@@ -1,6 +1,6 @@
 {
   "name": "bkms-workbench",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "邮件规则自动处理、人工待办与草稿审核工作台",
   "repository": {
     "type": "git",

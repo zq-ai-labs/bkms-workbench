@@ -14,8 +14,9 @@ export interface Task {
   history: { at: string; message: string }[]; attempts: number; nextAttemptAt?: string; supplement?: string; workspace?: string; prepareKey?: string
 }
 export interface Log { id: string; at: string; level: 'info' | 'error'; message: string; taskId?: string }
+export interface Settings { enabled: boolean; pollSeconds: number; showWorkbench?: boolean; notifyNewTodo?: boolean }
 export interface State {
-  version: 1; revision: number; configRevision: number; settings: { enabled: boolean; pollSeconds: number }; rules: Rule[]; tasks: Task[]
+  version: 1; revision: number; configRevision: number; settings: Settings; rules: Rule[]; tasks: Task[]
   cursors: Record<string, Cursor>; logs: Log[]
 }
 export interface EmailService {

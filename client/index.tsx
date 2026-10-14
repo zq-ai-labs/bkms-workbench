@@ -1,6 +1,7 @@
 import * as React from "react";
 import { connectLocale, language, systemMessage, t, useWorkbenchLocale, type LocaleService } from "./i18n";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { TodoTracker, type Preferences } from "./preferences";
 // @ts-ignore CSS is bundled as a text module by scripts/build-client.mjs.
 import stylesheet from "./styles.css";
 
@@ -97,7 +98,7 @@ type Snapshot = {
   accounts: { id: string; label: string; inboxFolder?: string }[];
   logs: Log[];
   capabilities?: Capabilities;
-  settings: { enabled: boolean; pollSeconds: number };
+  settings: Preferences["settings"];
   health: {
     email: boolean;
     model?: boolean;
@@ -292,6 +293,7 @@ async function uploadDraftAttachment(draft: Draft, file: File): Promise<Draft> {
 async function api<T = unknown>(
   action: string,
   payload: Record<string, unknown> = {},
+  signal?: AbortSignal,
 ): Promise<T> {
   // Native hosts may own the authenticated HTTP carrier. Keep the route relative
   // so it resolves against that Host's base rather than the desktop page origin.
@@ -300,6 +302,7 @@ async function api<T = unknown>(
     credentials: "same-origin",
     headers: { "Content-Type": "application/json", "x-bkms-workbench": "1" },
     body: JSON.stringify({ ...payload, action }),
+    signal,
   });
   const body = await response.json();
   if (!response.ok || body.ok !== true)
@@ -310,6 +313,79 @@ async function api<T = unknown>(
           : t("操作失败 ({0})", response.status)),
     );
   return body.value as T;
+}
+
+let preferences: Preferences = { revision: 1, settings: { enabled: false, pollSeconds: 60, showWorkbench: true, notifyNewTodo: false }, attention: [] };
+let reminder = { count: 0, sequence: 0 };
+const preferenceListeners = new Set<() => void>();
+const subscribePreferences = (listener: () => void) => { preferenceListeners.add(listener); return () => { preferenceListeners.delete(listener); }; };
+const emitPreferences = () => preferenceListeners.forEach(listener => listener());
+let tracker = new TodoTracker();
+function acceptPreferences(next: Preferences) {
+  if (next.revision < preferences.revision) return;
+  if (next.revision === preferences.revision && (next.stateRevision ?? 0) < (preferences.stateRevision ?? 0)) return;
+  const count = tracker.accept(next.settings.notifyNewTodo === true, next.attention);
+  preferences = next;
+  if (!next.settings.notifyNewTodo) reminder = { ...reminder, count: 0 };
+  else if (count) reminder = { count: reminder.count + count, sequence: reminder.sequence + 1 };
+  emitPreferences();
+}
+async function refreshPreferences(signal?: AbortSignal) {
+  acceptPreferences(await api<Preferences>("preferences", {}, signal));
+}
+function usePreferences() { return useSyncExternalStore(subscribePreferences, () => preferences); }
+function dismissReminder() { reminder = { ...reminder, count: 0 }; emitPreferences(); }
+
+export function WorkbenchSettings() {
+  useWorkbenchLocale();
+  const data = usePreferences();
+  const [loaded, setLoaded] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(""), [saved, setSaved] = useState(false);
+  const [interval, setIntervalValue] = useState(String(data.settings.pollSeconds));
+  const operation = useRef(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    refreshPreferences(controller.signal).then(() => setLoaded(true)).catch(error => { if (!controller.signal.aborted) setError(errorMessage(error)); });
+    return () => controller.abort();
+  }, []);
+  useEffect(() => setIntervalValue(String(data.settings.pollSeconds)), [data.settings.pollSeconds]);
+  useEffect(() => { if (!saved) return; const timer = setTimeout(() => setSaved(false), 4000); return () => clearTimeout(timer); }, [saved]);
+  async function save(settings: Partial<Preferences["settings"]>) {
+    if (operation.current) return;
+    operation.current = true; setBusy(true); setError(""); setSaved(false);
+    try {
+      const next = await api<Preferences["settings"]>("saveSettings", { revision: data.revision, settings });
+      // Apply switches immediately; the following read establishes the new reminder baseline.
+      if (next.notifyNewTodo && !preferences.settings.notifyNewTodo) {
+        tracker = new TodoTracker();
+        preferences = { ...preferences, revision: data.revision + 1, settings: next };
+        emitPreferences();
+      } else acceptPreferences({ ...preferences, revision: data.revision + 1, settings: next });
+      await refreshPreferences(); setSaved(true);
+    } catch (error) { setError(errorMessage(error)); await refreshPreferences().catch(() => {}); }
+    finally { operation.current = false; setBusy(false); }
+  }
+  return <div className="bkw bkw-settings">
+    <header><h2>{t("工作台设置")}</h2><p>{t("设置工作台入口与待办提醒，邮件处理方案和草稿审核请在工作台中操作。")}</p></header>
+    {error && <div className="bkw-alert danger" role="alert">{systemMessage(error)}<button className="bkw-inline-link" disabled={busy} onClick={() => { void refreshPreferences().then(() => { setLoaded(true); setError(""); }).catch(error => setError(errorMessage(error))); }}>{t("重试")}</button></div>}
+    <section className="bkw-preference-card">
+      <h3>{t("显示与提醒")}</h3>
+      {[
+        { key: "showWorkbench" as const, title: t("显示工作台入口"), hint: t("在侧栏显示任务工作台。隐藏入口不影响后台处理，可随时在此恢复。"), checked: data.settings.showWorkbench !== false },
+        { key: "notifyNewTodo" as const, title: t("新待办消息提醒"), hint: t("出现待审核、待补充、处理失败或发送待核实任务时显示简洁提醒。开启时不补提醒已有待办，关闭后立即隐藏提醒。"), checked: data.settings.notifyNewTodo === true },
+      ].map(row => <label className="bkw-preference-row" key={row.key}><span><strong>{row.title}</strong><small>{row.hint}</small></span><input className="bkw-switch" type="checkbox" role="switch" checked={row.checked} disabled={!loaded || busy} onChange={event => { void save({ [row.key]: event.target.checked }); }} /></label>)}
+    </section>
+    <section className="bkw-preference-card"><h3>{t("后台检查")}</h3><div className="bkw-preference-row"><span><strong>{t("邮件检查间隔")}</strong><small>{t("后台自动处理开启时生效，范围 30–3600 秒。")}</small></span><form className="bkw-interval" onSubmit={event => { event.preventDefault(); void save({ pollSeconds: Number(interval) }); }}><input aria-label={t("邮件检查间隔")} required type="number" min={30} max={3600} step={1} value={interval} disabled={!loaded || busy} onChange={event => setIntervalValue(event.target.value)} /><span>{t("秒")}</span><button className="bkw-btn" disabled={!loaded || busy || Number(interval) === data.settings.pollSeconds}>{t("保存")}</button></form></div></section>
+    <p className="bkw-settings-note">{t("这些设置在当前 DSH 实例中保存，界面语言跟随 DSH 全局设置。")}</p>
+    <div className="bkw-settings-feedback" role="status">{busy ? t("保存中…") : saved ? t("设置已保存") : !loaded && !error ? t("正在加载…") : ""}</div>
+  </div>;
+}
+
+function TodoReminder({ open }: { open?: () => void }) {
+  useWorkbenchLocale();
+  const notice = useSyncExternalStore(subscribePreferences, () => reminder);
+  useEffect(() => { if (!notice.count) return; const timer = setTimeout(dismissReminder, 8000); return () => clearTimeout(timer); }, [notice.sequence, notice.count]);
+  if (!notice.count) return null;
+  return <div className="bkw-todo-reminder" role="status"><div><strong>{t("有 {0} 项新待办需要处理", notice.count)}</strong><span>{t("请前往工作台查看处理结果。")}</span></div>{open && <button onClick={() => { open(); dismissReminder(); }}>{t("查看待办")}</button>}<button aria-label={t("关闭提醒")} onClick={dismissReminder}><Icon name="close" size={16} /></button></div>;
 }
 
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
@@ -663,7 +739,6 @@ export function Workbench() {
     <div className="bkw" data-testid="bkms-workbench">
       <div className="bkw-top">
         <div>
-          <span className="bkw-eyebrow">BKMS WORKBENCH</span>
           <h1>{t("任务工作台")}</h1>
         </div>
         <div className="bkw-top-actions">
@@ -2435,11 +2510,27 @@ interface ClientContext {
     register(
       meta: Record<string, unknown>,
       component: React.ComponentType<any>,
-    ): unknown;
+    ): () => void;
   };
 }
 export const inject = ["slots", "locale"];
 export function apply(ctx: ClientContext) {
+  ctx.effect(() => {
+    const controller = new AbortController();
+    tracker = new TodoTracker();
+    preferences = { revision: 1, settings: { enabled: false, pollSeconds: 60, showWorkbench: true, notifyNewTodo: false }, attention: [] };
+    dismissReminder();
+    let pending = false;
+    const refresh = async () => {
+      if (pending || controller.signal.aborted) return;
+      pending = true;
+      try { await refreshPreferences(controller.signal); } catch { /* Settings show connection failures with retry. */ }
+      finally { pending = false; }
+    };
+    void refresh();
+    const timer = setInterval(() => { void refresh(); }, 8000);
+    return () => { controller.abort(); clearInterval(timer); dismissReminder(); };
+  }, "bkms-workbench: preferences and reminders");
   ctx.effect(() => connectLocale((ctx.get?.("locale") || ctx.locale) as LocaleService | undefined), "bkms-workbench: locale");
   ctx.effect(() => {
     const style = document.createElement("style");
@@ -2454,8 +2545,11 @@ export function apply(ctx: ClientContext) {
       Workbench,
     ),
   );
-  ctx.slots.inject("sidebar.panellist", () =>
-    ctx.slots.register(
+  ctx.slots.inject("sidebar.panellist", () => {
+    let remove: (() => void) | undefined;
+    const update = () => {
+      if (preferences.settings.showWorkbench === false) { remove?.(); remove = undefined; }
+      else remove ??= ctx.slots.register(
       {
         name: "sidebar.panellist",
         id: "bkms-workbench",
@@ -2463,18 +2557,28 @@ export function apply(ctx: ClientContext) {
         label: () => t("任务工作台"),
       },
       ({ size = 20 }: { size?: number }) => <Icon name="grid" size={size} />,
-    ),
-  );
+      );
+    };
+    update();
+    const unsubscribe = subscribePreferences(update);
+    return () => { unsubscribe(); remove?.(); };
+  });
+  ctx.slots.inject("shell.overlay", () => ctx.slots.register(
+    { name: "shell.overlay", id: "bkms-workbench.todo-reminder", inject: () => {
+      const layout = ctx.get?.("layout") as { selectPanel?: (id: string) => void } | undefined;
+      return { open: layout?.selectPanel ? () => layout.selectPanel!("bkms-workbench") : undefined };
+    } }, TodoReminder,
+  ));
   ctx.slots.inject("settings.section", () =>
     ctx.slots.register(
       {
         name: "settings.section",
         id: "bkms-workbench",
         order: 44,
-        label: () => t("任务工作台"),
+        label: () => t("工作台设置"),
         inject: () => ({}),
       },
-      Workbench,
+      WorkbenchSettings,
     ),
   );
 }

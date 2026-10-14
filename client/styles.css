@@ -1,3 +1,30 @@
+.bkw.bkw-settings { height: auto; min-height: 0; padding: 10px 4px 24px; background: transparent; }
+.bkw-settings header { margin-bottom: 24px; }
+.bkw-settings header h2 { font-size: 20px; font-weight: 650; margin-bottom: 8px; }
+.bkw-settings header p, .bkw-settings-note { color: var(--bkw-muted); }
+.bkw-preference-card { border: 1px solid var(--bkw-border); border-radius: 14px; background: var(--bkw-white); margin-bottom: 16px; overflow: hidden; }
+.bkw-preference-card h3 { padding: 16px 20px 6px; font-size: 14px; }
+.bkw-preference-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 18px 20px; }
+.bkw-preference-row + .bkw-preference-row { border-top: 1px solid var(--bkw-border); }
+.bkw-preference-row > span { min-width: 0; }
+.bkw-preference-row strong, .bkw-preference-row small { display: block; }
+.bkw-preference-row strong { font-size: 13px; font-weight: 600; margin-bottom: 5px; }
+.bkw-preference-row small { color: var(--bkw-muted); line-height: 1.65; }
+.bkw input.bkw-switch { appearance: none; width: 38px; height: 22px; min-width: 38px; padding: 0; border: 0; border-radius: 20px; background: #b9bdc9; cursor: pointer; position: relative; transition: background .15s; }
+.bkw input.bkw-switch:before { content: ""; position: absolute; width: 16px; height: 16px; background: white; border-radius: 50%; top: 3px; left: 3px; box-shadow: 0 1px 3px #0002; transition: transform .15s; }
+.bkw input.bkw-switch:checked { background: var(--bkw-accent); }
+.bkw input.bkw-switch:checked:before { transform: translateX(16px); }
+.bkw input.bkw-switch:focus-visible { outline: 2px solid var(--bkw-accent); outline-offset: 3px; }
+.bkw input.bkw-switch:disabled { opacity: .5; cursor: wait; }
+.bkw-interval { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.bkw .bkw-interval input { width: 82px; }
+.bkw-settings-feedback { min-height: 24px; color: var(--bkw-accent); margin-top: 8px; }
+.bkw-todo-reminder { position: fixed; bottom: 24px; right: 24px; z-index: 1000; pointer-events: auto; display: flex; align-items: center; gap: 16px; max-width: min(500px, calc(100vw - 32px)); padding: 16px 18px; border: 1px solid var(--dsw-alias-line-primary, #e4e6ec); border-radius: 12px; background: var(--dsw-alias-background-primary, #fff); color: var(--dsw-alias-label-primary, #232735); box-shadow: 0 8px 28px #0002; font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+.bkw-todo-reminder strong, .bkw-todo-reminder span { display: block; }
+.bkw-todo-reminder span { font-size: 12px; opacity: .7; margin-top: 3px; }
+.bkw-todo-reminder button { border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; padding: 5px; font: inherit; white-space: nowrap; }
+.bkw-todo-reminder button:hover { background: #8882; }
+@media (max-width: 600px) { .bkw-settings .bkw-preference-row { gap: 16px; padding: 16px; } .bkw-settings .bkw-preference-row:has(form) { flex-direction: column; align-items: flex-start; } .bkw-todo-reminder { bottom: 16px; right: 16px; gap: 10px; } }
 .bkw {
   --bkw-bg: #f7f8fb;
   --bkw-white: #fff;
@@ -78,14 +105,6 @@
 }
 .bkw-top {
   margin-bottom: 27px;
-}
-.bkw-eyebrow {
-  display: block;
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 2px;
-  color: var(--bkw-muted);
-  margin-bottom: 5px;
 }
 .bkw h1 {
   font-size: 26px;
@@ -1920,3 +1939,6 @@
 [data-ds-dark-theme] .bkw .bkw-log-row button {
   color: #b6a6f0 !important;
 }
+[data-ds-dark-theme] .bkw.bkw-settings { background: transparent; }
+[data-ds-dark-theme] .bkw input.bkw-switch { background: #62697b; }
+[data-ds-dark-theme] .bkw input.bkw-switch:checked { background: var(--bkw-accent); }

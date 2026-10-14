@@ -11,6 +11,7 @@ function validateState(state: State): void {
   const statuses = new Set(['queued', 'running', 'review', 'needs_info', 'failed', 'sending', 'sent', 'uncertain', 'ignored', 'unmatched', 'completed'])
   if (!state || state.version !== 1 || !positive(state.revision) || !positive(state.configRevision) || !Array.isArray(state.rules) || state.rules.length > 100 || !Array.isArray(state.tasks) || state.tasks.length > 5000 || !Array.isArray(state.logs) || !state.cursors || typeof state.cursors !== 'object' || Array.isArray(state.cursors) || typeof state.settings?.enabled !== 'boolean' || !Number.isSafeInteger(state.settings.pollSeconds) || state.settings.pollSeconds < 30 || state.settings.pollSeconds > 3600) throw new Error('invalid document')
   if (new Set(state.tasks.map(task => task.id)).size !== state.tasks.length || new Set(state.rules.map(rule => rule.id)).size !== state.rules.length) throw new Error('duplicate identities')
+  for (const key of ['showWorkbench', 'notifyNewTodo'] as const) if (state.settings[key] !== undefined && typeof state.settings[key] !== 'boolean') throw new Error('invalid preference')
   for (const rule of state.rules) { if (typeof rule?.id !== 'string' || !rule.id.trim()) throw new Error('invalid rule identity'); validateRule(rule) }
   for (const value of Object.values(state.cursors)) if (!cursor(value)) throw new Error('invalid cursor')
   for (const entry of state.logs) if (!entry || typeof entry.id !== 'string' || typeof entry.at !== 'string' || typeof entry.message !== 'string' || !['info', 'error'].includes(entry.level)) throw new Error('invalid log')
@@ -31,9 +32,11 @@ export class Store {
       const state: State = JSON.parse(await readFile(this.file, 'utf8'))
       state.configRevision ??= 1
       validateState(state)
+      state.settings.showWorkbench ??= true
+      state.settings.notifyNewTodo ??= false
       return state
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, revision: 1, configRevision: 1, settings: { enabled: false, pollSeconds: 60 }, rules: [], tasks: [], cursors: {}, logs: [] }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, revision: 1, configRevision: 1, settings: { enabled: false, pollSeconds: 60, showWorkbench: true, notifyNewTodo: false }, rules: [], tasks: [], cursors: {}, logs: [] }
       throw new WorkbenchError('工作台数据无法读取，原文件已保留。请检查存储或从备份恢复。', 'storage', 503)
     }
   }

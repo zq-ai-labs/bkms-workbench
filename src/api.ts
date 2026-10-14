@@ -68,6 +68,11 @@ export class WorkbenchApi {
   private async dispatch(body: any, signal: AbortSignal): Promise<unknown> {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new WorkbenchError('请求格式无效。')
     if (body.action === 'snapshot') return this.buildSnapshot()
+    if (body.action === 'preferences') {
+      const state = await this.engine.store.read()
+      // Global navigation and reminders do not need mailbox access or draft bodies.
+      return { revision: state.configRevision, stateRevision: state.revision, settings: state.settings, attention: state.tasks.filter(task => ['review', 'needs_info', 'failed', 'uncertain'].includes(task.status)).map(task => ({ id: task.id, status: task.status })) }
+    }
     if (body.action === 'folders') {
       const email = this.engine.email(), accounts = await email.accounts()
       if (typeof body.account !== 'string' || (body.account && !accounts.some(account => account.id === body.account))) throw new WorkbenchError('请选择已配置的邮箱。')
@@ -92,8 +97,17 @@ export class WorkbenchApi {
       finally { this.generating = false }
     }
     if (body.action === 'saveSettings') {
-      if (typeof body.settings?.enabled !== 'boolean' || !Number.isSafeInteger(body.settings.pollSeconds) || body.settings.pollSeconds < 30 || body.settings.pollSeconds > 3600) throw new WorkbenchError('检查间隔应为 30–3600 秒。')
-      return this.engine.store.mutate(state => { configCheck(state, body.revision); state.settings = { enabled: body.settings.enabled, pollSeconds: body.settings.pollSeconds }; state.configRevision++; log(state, state.settings.enabled ? '已开启后台自动处理。' : '已暂停接收和排队执行，正在运行的任务继续完成。'); return state.settings })
+      const settings = body.settings
+      if (!settings || typeof settings !== 'object' || Array.isArray(settings) || !Object.keys(settings).length || Object.keys(settings).some(key => !['enabled', 'pollSeconds', 'showWorkbench', 'notifyNewTodo'].includes(key))) throw new WorkbenchError('工作台设置无效。')
+      for (const key of ['enabled', 'showWorkbench', 'notifyNewTodo']) if (key in settings && typeof settings[key] !== 'boolean') throw new WorkbenchError('工作台开关应为布尔值。')
+      if ('pollSeconds' in settings && (!Number.isSafeInteger(settings.pollSeconds) || settings.pollSeconds < 30 || settings.pollSeconds > 3600)) throw new WorkbenchError('检查间隔应为 30–3600 秒。')
+      return this.engine.store.mutate(state => {
+        configCheck(state, body.revision)
+        const enabled = state.settings.enabled
+        state.settings = { ...state.settings, ...settings }; state.configRevision++
+        log(state, enabled !== state.settings.enabled ? state.settings.enabled ? '已开启后台自动处理。' : '已暂停接收和排队执行，正在运行的任务继续完成。' : '已更新工作台设置。')
+        return state.settings
+      })
     }
     if (body.action === 'saveRule') {
       const rule = validateRule(body.rule)

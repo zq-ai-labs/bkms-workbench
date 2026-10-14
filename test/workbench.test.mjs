@@ -36,6 +36,42 @@ async function fixture(t) {
   return { root, store, email, engine, api, drafts, get sends() { return sends }, get runs() { return runs }, mail: value => { newMail = value }, output: value => { output = value } }
 }
 const mail = (uid = 11) => ({ uid, date: new Date().toISOString(), from: [{ address: 'buyer@example.test' }], subject: '产品询价', seen: true, hasAttachments: false })
+test('preferences migrate old data, persist independently and do not invoke email or pause processing', async t => {
+  const f = await fixture(t)
+  const legacy = await f.store.read()
+  delete legacy.settings.showWorkbench; delete legacy.settings.notifyNewTodo
+  await writeFile(f.store.file, JSON.stringify(legacy))
+  const migrated = await f.store.read()
+  assert.equal(migrated.settings.showWorkbench, true)
+  assert.equal(migrated.settings.notifyNewTodo, false)
+  await f.api.action({ action: 'saveSettings', revision: migrated.configRevision, settings: { enabled: true, pollSeconds: 90 } })
+  const enabled = await f.store.read()
+  await f.api.action({ action: 'saveSettings', revision: enabled.configRevision, settings: { showWorkbench: false, notifyNewTodo: true } })
+  const reloaded = await new Store(f.root).read()
+  assert.deepEqual(reloaded.settings, { enabled: true, pollSeconds: 90, showWorkbench: false, notifyNewTodo: true })
+  await assert.rejects(f.api.action({ action: 'saveSettings', revision: enabled.configRevision, settings: { showWorkbench: true } }), error => error.code === 'conflict')
+  for (const settings of [{ showWorkbench: 'false' }, { notifyNewTodo: 1 }, { pollSeconds: 29 }, { pollSeconds: 3601 }, { unexpected: true }, []]) {
+    await assert.rejects(f.api.action({ action: 'saveSettings', revision: reloaded.configRevision, settings }))
+  }
+  assert.deepEqual((await f.store.read()).settings, reloaded.settings)
+  f.email.accounts = () => { throw new Error('preferences must not access mail') }
+  const lightweight = await f.api.action({ action: 'preferences' })
+  assert.equal(lightweight.settings.showWorkbench, false)
+  assert.deepEqual(lightweight.attention, [])
+  assert.equal(f.sends, 0); assert.equal(f.runs, 0)
+})
+
+test('global reminder endpoint exposes only attention identities, without mail bodies or drafts', async t => {
+  const f = await fixture(t), task = await prepare(f)
+  f.email.drafts.get = () => { throw new Error('no drafts should load') }
+  const result = await f.api.action({ action: 'preferences' })
+  assert.deepEqual(result.attention, [{ id: task.id, status: 'review' }])
+  assert.ok(result.stateRevision >= 1)
+  assert.equal(JSON.stringify(result).includes('buyer@example.test'), false)
+  assert.equal(JSON.stringify(result).includes('请提供'), false)
+  await f.api.action({ action: 'ignore', id: task.id, revision: task.revision })
+  assert.deepEqual((await f.api.action({ action: 'preferences' })).attention, [])
+})
 async function prepare(f) {
   await f.api.action({ action: 'saveRule', revision: 1, rule: ruleInput })
   await f.engine.poll(); f.mail([mail()]); await f.engine.poll(); await f.engine.processNext()
