@@ -1,0 +1,10 @@
+node_modules/
+lib/
+dist/
+*.log
+.preview/
+.env
+.env.*
+!.env.example
+runtime/
+data/

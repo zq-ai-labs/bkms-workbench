@@ -1,0 +1,2 @@
+# Preserve unified diff context and line endings for reproducible application.
+patches/*.patch text eol=lf whitespace=-blank-at-eol

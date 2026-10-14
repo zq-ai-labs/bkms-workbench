@@ -1,0 +1,5 @@
+# Requires the local dsh-email build with emailWorkbench service, plus the normal DSH agent/session services.
+- insert:
+    - id: bkms-workbench
+      name: bkms-workbench
+      config: {}
