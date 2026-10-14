@@ -160,6 +160,21 @@ const NEEDS_ACTION = new Set<Status>([
   "failed",
   "uncertain",
 ]);
+function nextStep(status: Status): string {
+  switch (status) {
+    case "review": return t("核对处理结果与回复草稿");
+    case "needs_info": return t("补充必要信息后继续处理");
+    case "failed": return t("查看失败原因并重新处理");
+    case "uncertain": return t("先核对发送记录，避免重复发送");
+    case "unmatched": return t("选择处理方案或忽略任务");
+    case "queued": return t("等待后台处理");
+    case "running": return t("正在准备处理结果");
+    case "sending": return t("正在等待发送结果");
+    case "sent": return t("查看发送回执");
+    case "completed": return t("查看已生成的处理结果");
+    case "ignored": return t("此任务已忽略");
+  }
+}
 const EMPTY: Snapshot = {
   revision: 1,
   tasks: [],
@@ -365,7 +380,7 @@ export function WorkbenchSettings() {
     finally { operation.current = false; setBusy(false); }
   }
   return <div className="bkw bkw-settings">
-    <header><h2>{t("工作台设置")}</h2><p>{t("设置工作台入口与待办提醒，邮件处理方案和草稿审核请在工作台中操作。")}</p></header>
+    <header><h2>{t("工作台设置")}</h2><p>{t("设置工作台入口与待办提醒，AI 处理方案和草稿审核请在工作台中操作。")}</p></header>
     {error && <div className="bkw-alert danger" role="alert">{systemMessage(error)}<button className="bkw-inline-link" disabled={busy} onClick={() => { void refreshPreferences().then(() => { setLoaded(true); setError(""); }).catch(error => setError(errorMessage(error))); }}>{t("重试")}</button></div>}
     <section className="bkw-preference-card">
       <h3>{t("显示与提醒")}</h3>
@@ -538,6 +553,9 @@ export function Workbench() {
   const [selected, setSelected] = useState<string | undefined>(cachedDraft?.id),
     [search, setSearch] = useState(""),
     [filter, setFilter] = useState("all");
+  const [allDetailOpen, setAllDetailOpen] = useState(false);
+  const rowsRef = useRef<HTMLDivElement>(null);
+  const views = useRef<Record<string, { search: string; filter: string; scroll: number; selected?: string }>>({});
   const [error, setError] = useState(""),
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(""),
@@ -655,18 +673,50 @@ export function Workbench() {
   }
   function choose(id: string) {
     if (op.current) return;
-    if (selected === id) return;
+    if (selected === id) { setAllDetailOpen(true); return; }
     if (dirty && !window.confirm(t("草稿有尚未保存的修改。放弃修改并切换任务？")))
       return;
     setForm(undefined);
     setOriginal("");
     cachedDraft = undefined;
     setSelected(id);
+    setAllDetailOpen(true);
     setPreview(null);
     setAssignment("");
     setConfirmIgnore(false);
     setDetailTab("result");
     setSupplement("");
+  }
+  function switchTab(next: Tab) {
+    views.current[tab] = { search, filter, scroll: rowsRef.current?.scrollTop || 0, selected };
+    setTab(next);
+    const view = views.current[next];
+    setSearch(view?.search || "");
+    setFilter(view?.filter || "all");
+    if (!dirty && (next === "inbox" || next === "all")) {
+      const previous = data.tasks.find(item => item.id === view?.selected && (next !== "inbox" || NEEDS_ACTION.has(item.status)));
+      const fallback = next === "inbox" && !NEEDS_ACTION.has(task?.status as Status)
+        ? data.tasks.filter(item => NEEDS_ACTION.has(item.status)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
+        : undefined;
+      if (previous || fallback) choose((previous || fallback)!.id);
+    }
+    setAllDetailOpen(false);
+  }
+  useEffect(() => {
+    if (rowsRef.current) rowsRef.current.scrollTop = views.current[tab]?.scroll || 0;
+  }, [tab, loaded]);
+  function closeTaskDetails() {
+    if (op.current) return;
+    if (dirty && !window.confirm(t("草稿有尚未保存的修改。放弃修改并关闭详情？"))) return;
+    if (dirty && task?.draft) {
+      const saved = draftValue(task.draft);
+      setForm(saved);
+      setOriginal(JSON.stringify(saved));
+      setFormRevision(task.draft.revision);
+      setTaskRevision(task.revision);
+      cachedDraft = undefined;
+    }
+    setAllDetailOpen(false);
   }
   async function saveDraft() {
     if (!task || !form) return;
@@ -684,10 +734,6 @@ export function Workbench() {
   const pending = data.tasks.filter((item) =>
     NEEDS_ACTION.has(item.status),
   ).length;
-  const active = data.tasks.filter((item) =>
-    ["queued", "running", "sending"].includes(item.status),
-  ).length;
-  const sent = data.tasks.filter((item) => item.status === "sent").length;
   const tasks = data.tasks
     .filter(
       (item) =>
@@ -699,6 +745,9 @@ export function Workbench() {
     )
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   const accounts = data.accounts;
+  useEffect(() => {
+    if (loaded && tab === "inbox" && !selected && tasks.length) setSelected(tasks[0].id);
+  }, [loaded, tab, selected, tasks[0]?.id]);
   const mailReady = data.health.email && accounts.length > 0;
   const servicesReady = mailReady && data.health.model && data.health.worker;
   const newRule = (): Rule => ({
@@ -721,7 +770,7 @@ export function Workbench() {
   const title = {
     inbox: t("待我处理"),
     all: t("全部任务"),
-    rules: t("邮件处理方案"),
+    rules: t("AI 处理方案"),
     logs: t("运行记录"),
   }[tab];
   const captions = {
@@ -735,299 +784,7 @@ export function Workbench() {
     !task ||
     task.status !== "review" ||
     (!!task.draft && task.draft.state !== "draft");
-  return (
-    <div className="bkw" data-testid="bkms-workbench">
-      <div className="bkw-top">
-        <div>
-          <h1>{t("任务工作台")}</h1>
-        </div>
-        <div className="bkw-top-actions">
-          <span className={`bkw-live ${data.settings.enabled ? "on" : ""}`}>
-            <i />
-            {data.settings.enabled ? t("自动处理已开启") : t("自动处理已暂停")}
-          </span>
-          <button
-            className="bkw-btn"
-            disabled={
-              !!busy ||
-              !loaded ||
-              (!data.settings.enabled && (!mailReady || !data.health.worker))
-            }
-            onClick={() =>
-              void perform("toggle", async () => {
-                await api("saveSettings", {
-                  revision: data.revision,
-                  settings: {
-                    ...data.settings,
-                    enabled: !data.settings.enabled,
-                  },
-                });
-                await refresh();
-              })
-            }
-          >
-            <Icon name={data.settings.enabled ? "pause" : "play"} />
-            {data.settings.enabled ? t("暂停") : t("开启")}
-          </button>
-        </div>
-      </div>
-      <div className="bkw-summary">
-        <div>
-          <span>{t("需要你处理")}</span>
-          <strong>
-            {pending}
-            <small>{t("项待办")}</small>
-          </strong>
-        </div>
-        <div>
-          <span>{t("后台处理中")}</span>
-          <strong>
-            {active}
-            <small>{t(active === 1 ? "unit.task.one" : "项任务")}</small>
-          </strong>
-        </div>
-        <div>
-          <span>{t("已完成发送")}</span>
-          <strong>
-            {sent}
-            <small>{t(sent === 1 ? "unit.message.one" : "封邮件")}</small>
-          </strong>
-        </div>
-        <div className="bkw-summary-status">
-          <span className={`bkw-dot ${servicesReady ? "good" : ""}`} />{" "}
-          <div>
-            <strong>{servicesReady ? t("服务已就绪") : t("等待服务连接")}</strong>
-            <span>
-              {data.health.lastPoll
-                ? t("最近检测 {0}", date(data.health.lastPoll))
-                : t("配置邮箱与方案后，即可开始")}
-            </span>
-          </div>
-        </div>
-      </div>
-      <nav className="bkw-nav" aria-label={t("工作台导航")}>
-        {(["inbox", "all", "rules", "logs"] as Tab[]).map((id) => (
-          <button
-            key={id}
-            onClick={() => {
-              setTab(id);
-              setFilter("all");
-              setSearch("");
-            }}
-            className={tab === id ? "active" : ""}
-            aria-current={tab === id ? "page" : undefined}
-          >
-            <Icon
-              name={
-                {
-                  inbox: "inbox",
-                  all: "grid",
-                  rules: "rules",
-                  logs: "history",
-                }[id]
-              }
-            />
-            {
-              {
-                inbox: t("待我处理"),
-                all: t("全部任务"),
-                rules: t("邮件处理方案"),
-                logs: t("运行记录"),
-              }[id]
-            }
-            {id === "inbox" && pending > 0 && (
-              <span className="bkw-count">{pending}</span>
-            )}
-          </button>
-        ))}
-      </nav>
-      <div className="bkw-heading">
-        <div>
-          <h2>{title}</h2>
-          <p>{captions[tab]}</p>
-        </div>
-        <div className="bkw-actions">
-          {tab === "rules" ? (
-            <button
-              className="bkw-btn primary"
-              onClick={() => openRule(newRule())}
-            >
-              <Icon name="plus" />
-              {t("新建方案")}</button>
-          ) : (
-            <>
-              <button
-                className="bkw-icon-btn"
-                aria-label={t("刷新工作台")}
-                title={t("刷新")}
-                disabled={!!busy}
-                onClick={() => void perform("refresh", refresh)}
-              >
-                <Icon name="refresh" />
-              </button>
-              <button
-                className="bkw-btn"
-                disabled={!!busy || !mailReady || !data.health.worker}
-                onClick={() =>
-                  void perform("poll", async () => {
-                    const result = await api<{
-                      checked: boolean;
-                      added: number;
-                    }>("poll");
-                    await refresh();
-                    setNotice(
-                      result.checked
-                        ? t("检测完成，新增 {0} 项任务", result.added)
-                        : t("后台正在检测邮箱，请稍后查看结果"),
-                    );
-                  })
-                }
-              >
-                <Icon name="mail" />
-                {busy === "poll" ? t("检测中…") : t("立即检测")}
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-      {error && (
-        <div className="bkw-alert danger" role="alert">
-          <Icon name="info" />
-          <span>{systemMessage(error)}</span>
-          <button aria-label={t("关闭错误提示")} onClick={() => setError("")}>
-            <Icon name="close" size={16} />
-          </button>
-        </div>
-      )}
-      {notice && (
-        <div className="bkw-alert success" role="status">
-          <Icon name="check" />
-          <span>{systemMessage(notice)}</span>
-        </div>
-      )}
-      {loaded && (!servicesReady || data.health.error) && (
-        <div className="bkw-alert neutral">
-          <Icon name="info" />
-          <span>
-            {(data.health.error && systemMessage(data.health.error)) ||
-              (!mailReady
-                ? t("邮件服务尚未就绪，请先在邮件插件中配置邮箱账号。")
-                : !data.health.worker
-                  ? t("后台任务服务尚未就绪；已有任务和方案仍可查看，请检查实例运行状态。")
-                  : t("DSH 执行服务尚未就绪；方案和待办可查看，自动生成将等待服务恢复。"))}
-          </span>
-        </div>
-      )}
-      {!loaded ? (
-        <div className="bkw-panel">
-          <Empty
-            title={error ? t("暂时无法加载工作台") : t("正在加载工作台")}
-            text={
-              error ? t("请检查服务连接后刷新重试。") : t("正在获取你的任务与方案。")
-            }
-          >
-            <button
-              className="bkw-btn"
-              onClick={() => void perform("refresh", refresh)}
-            >
-              {t("重新加载")}</button>
-          </Empty>
-        </div>
-      ) : (
-        <>
-          {(tab === "inbox" || tab === "all") && (
-            <div className="bkw-workspace">
-              <section className="bkw-task-list" aria-label={t("任务列表")}>
-                <div className="bkw-list-controls">
-                  <div className="bkw-search">
-                    <Icon name="search" size={16} />
-                    <input
-                      placeholder={t("搜索主题、发件人或方案")}
-                      aria-label={t("搜索任务")}
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                    />
-                  </div>
-                  <div className="bkw-list-filter">
-                    <span>{tasks.length} {t(tasks.length === 1 ? "unit.task.one" : "项任务")}</span>
-                    <select
-                      aria-label={t("按状态筛选")}
-                      value={filter}
-                      onChange={(e) => setFilter(e.target.value)}
-                    >
-                      <option value="all">{t("全部状态")}</option>
-                      {Object.entries(LABELS)
-                        .filter(
-                          ([id]) =>
-                            tab !== "inbox" || NEEDS_ACTION.has(id as Status),
-                        )
-                        .map(([id, label]) => (
-                          <option value={id} key={id}>
-                            {t(label)}
-                          </option>
-                        ))}
-                    </select>
-                  </div>
-                </div>
-                <div className="bkw-rows">
-                  {tasks.length ? (
-                    tasks.map((item) => (
-                      <button
-                        key={item.id}
-                        className={`bkw-task-row ${selected === item.id ? "selected" : ""}`}
-                        onClick={() => choose(item.id)}
-                        aria-pressed={selected === item.id}
-                      >
-                        <div className="bkw-row-top">
-                          <Badge
-                            status={item.status}
-                            partial={
-                              item.status === "sent" &&
-                              !!item.draft?.receipt?.rejected?.length
-                            }
-                          />
-                          <time>{date(item.receivedAt)}</time>
-                        </div>
-                        <h3>{item.subject || (item.title === "无主题邮件" ? t("无主题邮件") : item.title) || t("无主题邮件")}</h3>
-                        <div className="bkw-sender">{item.from}</div>
-                        <p>{item.summary || (item.error && systemMessage(item.error)) || t("等待方案处理")}</p>
-                        <div className="bkw-row-bottom">
-                          <span>{item.ruleName || t("未匹配方案")}</span>
-                          <Icon name="arrow" size={14} />
-                        </div>
-                      </button>
-                    ))
-                  ) : (
-                    <Empty
-                      title={
-                        search || filter !== "all"
-                          ? t("没有符合条件的任务")
-                          : tab === "inbox"
-                            ? t("暂时没有需要处理的任务")
-                            : t("从第一封邮件开始")
-                      }
-                      text={
-                        search || filter !== "all"
-                          ? t("试试其他关键词或状态。")
-                          : data.rules.length
-                            ? t("后台会按方案处理新邮件，需要你审核时会出现在这里。")
-                            : t("创建一个方案，自动整理邮件并准备回复草稿。")
-                      }
-                    >
-                      {!data.rules.length && (
-                        <button
-                          className="bkw-btn primary"
-                          onClick={() => {
-                            setTab("rules");
-                            openRule(newRule());
-                          }}
-                        >
-                          {t("创建第一个方案")}</button>
-                      )}
-                    </Empty>
-                  )}
-                </div>
-              </section>
+  const taskDetails = (
               <section className="bkw-detail" aria-label={t("任务详情")}>
                 {task ? (
                   <>
@@ -1191,11 +948,11 @@ export function Workbench() {
                       {detailTab === "result" && (
                         <>
                           {task.summary && (
-                            <div className="bkw-result">
-                              <span className="bkw-section-label">
-                                {t("处理摘要")}</span>
+                            <details key={task.id} className="bkw-result" open={task.status !== "review" || !task.draft}>
+                              <summary className="bkw-section-label">
+                                {t("处理摘要")}<span>{task.summary}</span></summary>
                               <p>{task.summary}</p>
-                            </div>
+                            </details>
                           )}
                           {task.error && (
                             <div className="bkw-alert danger">
@@ -1322,6 +1079,7 @@ export function Workbench() {
                                   )?.label || task.draft.account}
                                 </strong>
                               </div>
+                              <div className="bkw-address-fields">
                               <Field label={t("收件人")}>
                                 <input
                                   disabled={editingLocked}
@@ -1344,6 +1102,7 @@ export function Workbench() {
                                   placeholder={t("可选，多个地址用逗号分隔")}
                                 />
                               </Field>
+                              </div>
                               <Field label={t("主题")}>
                                 <input
                                   disabled={editingLocked}
@@ -1625,6 +1384,275 @@ export function Workbench() {
                   />
                 )}
               </section>
+  );
+  return (
+    <div className={`bkw bkw-workbench ${tab === "inbox" || tab === "all" ? "bkw-task-view" : ""}`} data-testid="bkms-workbench">
+      <div className="bkw-top">
+        <div>
+          <h1>{t("任务工作台")}</h1>
+        </div>
+        <div className="bkw-top-actions">
+          <span className={`bkw-live ${data.settings.enabled ? "on" : ""}`}>
+            <i />
+            {data.settings.enabled ? t("自动处理已开启") : t("自动处理已暂停")}
+          </span>
+          <button
+            className="bkw-btn"
+            disabled={
+              !!busy ||
+              !loaded ||
+              (!data.settings.enabled && (!mailReady || !data.health.worker))
+            }
+            onClick={() =>
+              void perform("toggle", async () => {
+                await api("saveSettings", {
+                  revision: data.revision,
+                  settings: {
+                    ...data.settings,
+                    enabled: !data.settings.enabled,
+                  },
+                });
+                await refresh();
+              })
+            }
+          >
+            <Icon name={data.settings.enabled ? "pause" : "play"} />
+            {data.settings.enabled ? t("暂停") : t("开启")}
+          </button>
+        </div>
+      </div>
+      <nav className="bkw-nav" aria-label={t("工作台导航")}>
+        {(["inbox", "all", "rules"] as Tab[]).map((id) => (
+          <button
+            key={id}
+            onClick={() => switchTab(id)}
+            className={tab === id ? "active" : ""}
+            aria-current={tab === id ? "page" : undefined}
+          >
+            <Icon
+              name={
+                {
+                  inbox: "inbox",
+                  all: "grid",
+                  rules: "rules",
+                  logs: "history",
+                }[id]
+              }
+            />
+            {
+              {
+                inbox: t("待我处理"),
+                all: t("全部任务"),
+                rules: t("AI 处理方案"),
+                logs: t("运行记录"),
+              }[id]
+            }
+            {(id === "inbox" || id === "all") && (
+              <span className="bkw-count">{id === "inbox" ? pending : data.tasks.length}</span>
+            )}
+          </button>
+        ))}
+      </nav>
+      <div className={`bkw-heading ${tab === "inbox" || tab === "all" ? "bkw-toolbar" : ""}`}>
+        {tab === "inbox" || tab === "all" ? (
+                <div className="bkw-task-controls">
+                  <div className="bkw-search">
+                    <Icon name="search" size={16} />
+                    <input
+                      placeholder={t("搜索主题、发件人或方案")}
+                      aria-label={t("搜索任务")}
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                    />
+                  </div>
+                  <div className="bkw-list-filter">
+                    <select
+                      aria-label={t("按状态筛选")}
+                      value={filter}
+                      onChange={(e) => setFilter(e.target.value)}
+                    >
+                      <option value="all">{t("全部状态")}</option>
+                      {Object.entries(LABELS)
+                        .filter(
+                          ([id]) =>
+                            tab !== "inbox" || NEEDS_ACTION.has(id as Status),
+                        )
+                        .map(([id, label]) => (
+                          <option value={id} key={id}>
+                            {t(label)}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                </div>
+
+        ) : <div>
+          <h2>{title}</h2>
+          <p>{captions[tab]}</p>
+        </div>}
+        <div className="bkw-actions">
+          {tab === "rules" ? (
+            <button
+              className="bkw-btn primary"
+              onClick={() => openRule(newRule())}
+            >
+              <Icon name="plus" />
+              {t("新建方案")}</button>
+          ) : (
+            <>
+              <button
+                className="bkw-icon-btn"
+                aria-label={t("刷新工作台")}
+                title={t("刷新")}
+                disabled={!!busy}
+                onClick={() => void perform("refresh", refresh)}
+              >
+                <Icon name="refresh" />
+              </button>
+              <button
+                className="bkw-btn"
+                disabled={!!busy || !mailReady || !data.health.worker}
+                onClick={() =>
+                  void perform("poll", async () => {
+                    const result = await api<{
+                      checked: boolean;
+                      added: number;
+                    }>("poll");
+                    await refresh();
+                    setNotice(
+                      result.checked
+                        ? t("检测完成，新增 {0} 项任务", result.added)
+                        : t("后台正在检测邮箱，请稍后查看结果"),
+                    );
+                  })
+                }
+              >
+                <Icon name="mail" />
+                {busy === "poll" ? t("检测中…") : t("立即检测")}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+      {error && (
+        <div className="bkw-alert danger" role="alert">
+          <Icon name="info" />
+          <span>{systemMessage(error)}</span>
+          <button aria-label={t("关闭错误提示")} onClick={() => setError("")}>
+            <Icon name="close" size={16} />
+          </button>
+        </div>
+      )}
+      {notice && (
+        <div className="bkw-alert success" role="status">
+          <Icon name="check" />
+          <span>{systemMessage(notice)}</span>
+        </div>
+      )}
+      {loaded && (!servicesReady || data.health.error) && (
+        <div className="bkw-alert neutral">
+          <Icon name="info" />
+          <span>
+            {(data.health.error && systemMessage(data.health.error)) ||
+              (!mailReady
+                ? t("邮件服务尚未就绪，请先在邮件插件中配置邮箱账号。")
+                : !data.health.worker
+                  ? t("后台任务服务尚未就绪；已有任务和方案仍可查看，请检查实例运行状态。")
+                  : t("DSH 执行服务尚未就绪；方案和待办可查看，自动生成将等待服务恢复。"))}
+          </span>
+        </div>
+      )}
+      {!loaded ? (
+        <div className="bkw-panel">
+          <Empty
+            title={error ? t("暂时无法加载工作台") : t("正在加载工作台")}
+            text={
+              error ? t("请检查服务连接后刷新重试。") : t("正在获取你的任务与方案。")
+            }
+          >
+            <button
+              className="bkw-btn"
+              onClick={() => void perform("refresh", refresh)}
+            >
+              {t("重新加载")}</button>
+          </Empty>
+        </div>
+      ) : (
+        <>
+          {(tab === "inbox" || tab === "all") && (
+            <div className={`bkw-workspace ${tab === "all" ? "bkw-all-tasks" : ""}`}>
+              <section className="bkw-task-list" aria-label={t("任务列表")}>
+                <div className="bkw-rows" ref={rowsRef}>
+                  {tab === "all" && tasks.length > 0 && <div className="bkw-table-heading" aria-hidden="true">
+                    <span>{t("任务 / 下一步")}</span><span>{t("发件人")}</span><span>{t("状态")}</span><span>{t("时间")}</span><span />
+                  </div>}
+                  {tasks.length ? (
+                    tasks.map((item) => (
+                      <button
+                        key={item.id}
+                        className={`bkw-task-row ${tab === "all" ? "bkw-table-row" : ""} ${selected === item.id ? "selected" : ""}`}
+                        onClick={() => choose(item.id)}
+                        aria-pressed={selected === item.id}
+                      >
+                        {tab === "all" ? <>
+                          <span className="bkw-table-title"><strong>{item.subject || (item.title === "无主题邮件" ? t("无主题邮件") : item.title) || t("无主题邮件")}</strong><span>{nextStep(item.status)}</span></span>
+                          <span className="bkw-table-sender">{item.from}</span>
+                          <Badge status={item.status} partial={item.status === "sent" && !!item.draft?.receipt?.rejected?.length} />
+                          <time>{date(item.receivedAt)}</time>
+                          <Icon name="arrow" size={14} />
+                        </> : <>
+                        <div className="bkw-row-top">
+                          <Badge
+                            status={item.status}
+                            partial={
+                              item.status === "sent" &&
+                              !!item.draft?.receipt?.rejected?.length
+                            }
+                          />
+                          <time>{date(item.receivedAt)}</time>
+                        </div>
+                        <h3>{item.subject || (item.title === "无主题邮件" ? t("无主题邮件") : item.title) || t("无主题邮件")}</h3>
+                        <div className="bkw-sender">{item.from}</div>
+                        <p>{nextStep(item.status)}</p>
+                        <div className="bkw-row-bottom">
+                          <span>{item.ruleName || t("未匹配方案")}</span>
+                          <Icon name="arrow" size={14} />
+                        </div>
+                        </>}
+                      </button>
+                    ))
+                  ) : (
+                    <Empty
+                      title={
+                        search || filter !== "all"
+                          ? t("没有符合条件的任务")
+                          : tab === "inbox"
+                            ? t("暂时没有需要处理的任务")
+                            : t("从第一封邮件开始")
+                      }
+                      text={
+                        search || filter !== "all"
+                          ? t("试试其他关键词或状态。")
+                          : data.rules.length
+                            ? t("后台会按方案处理新邮件，需要你审核时会出现在这里。")
+                            : t("创建一个方案，自动整理邮件并准备回复草稿。")
+                      }
+                    >
+                      {!data.rules.length && (
+                        <button
+                          className="bkw-btn primary"
+                          onClick={() => {
+                            setTab("rules");
+                            openRule(newRule());
+                          }}
+                        >
+                          {t("创建第一个方案")}</button>
+                      )}
+                    </Empty>
+                  )}
+                </div>
+              </section>
+              {tab === "inbox" && taskDetails}
             </div>
           )}
           {tab === "rules" && (
@@ -1817,7 +1845,7 @@ export function Workbench() {
                         {log.taskId && (
                           <button
                             onClick={() => {
-                              setTab("all");
+                              switchTab("all");
                               choose(log.taskId!);
                             }}
                           >
@@ -1838,6 +1866,18 @@ export function Workbench() {
             </div>
           )}
         </>
+      )}
+      <footer className="bkw-statusbar" aria-label={t("工作台服务状态")}>
+        <span><i className={`bkw-dot ${servicesReady ? "good" : ""}`} />{servicesReady ? t("服务已就绪") : t("等待服务连接")}</span>
+        <span>{data.health.lastPoll ? t("最近检测 {0}", date(data.health.lastPoll)) : t("尚未检测邮箱")}</span>
+        <button className="bkw-inline-link" onClick={() => switchTab(tab === "logs" ? "inbox" : "logs")}>{tab === "logs" ? t("返回待办") : t("运行记录")}<Icon name="arrow" size={12} /></button>
+      </footer>
+      {tab === "all" && allDetailOpen && task && (
+        <Modal title={t("任务详情")} taskDialog onClose={closeTaskDetails}>
+          {error && <div className="bkw-alert danger" role="alert"><Icon name="info" /><span>{systemMessage(error)}</span></div>}
+          {notice && <div className="bkw-alert success" role="status"><Icon name="check" /><span>{systemMessage(notice)}</span></div>}
+          {taskDetails}
+        </Modal>
       )}
       {ruleEditor && (
         <RuleDialog
@@ -2197,11 +2237,13 @@ function Modal({
   children,
   onClose,
   wide,
+  taskDialog,
 }: {
   title: string;
   children: React.ReactNode;
   onClose: () => void;
   wide?: boolean;
+  taskDialog?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null),
     previousFocus = useRef<HTMLElement | null>(null);
@@ -2219,7 +2261,7 @@ function Modal({
     >
       <div
         ref={ref}
-        className={`bkw-dialog ${wide ? "wide" : ""}`}
+        className={`bkw-dialog ${wide ? "wide" : ""} ${taskDialog ? "bkw-task-dialog" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label={title}
@@ -2343,7 +2385,7 @@ function RuleDialog({ rule, accounts, tasks, capabilities, aiReady, error, busy,
     finally { setGenerating(false); }
   };
   const broad = !value.match.from && !value.match.subject && !value.match.hasAttachments;
-  return <Modal title={rule.id ? t("编辑邮件处理方案") : t("新建邮件处理方案")} onClose={close} wide>
+  return <Modal title={rule.id ? t("编辑 AI 处理方案") : t("新建 AI 处理方案")} onClose={close} wide>
     <form onSubmit={event => { event.preventDefault(); if (!locked && showEditor) onSave(value); }}>
       <fieldset disabled={locked}>
         <div className="bkw-rule-editor">

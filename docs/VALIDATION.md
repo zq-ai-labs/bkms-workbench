@@ -1,5 +1,17 @@
 # 本地验证记录
 
+## 工作台界面调整（2026-10-14）
+
+沿用现有配色与控件风格，移除顶部统计区和任务视图重复标题，数量放到导航标签，搜索与筛选合并到工具栏。「待我处理」使用双栏审核，「全部任务」使用全宽列表，任务详情改为居中宽窗口，底部审核操作保留，正文区域独立滚动。运行记录移到页底入口；看板和日程尚未加入。
+
+「邮件处理方案」更名为「AI 处理方案」，英文为 `AI workflows`，包括导航、设置说明和新建/编辑标题；当前仍只支持邮件来源，IM 等尚未实现。已有方案和邮件数据未迁移。
+
+文本输入、数字输入、下拉与多行正文的焦点使用单条高亮边框，移除叠加的外层 outline；按钮及复选框保留键盘焦点标识。真实前端的方案名称和收件人聚焦后，浏览器 computed style 为 `border: 1px solid`、`outline-style: none`、`box-shadow: none`，深色下同样成立。
+
+主核心 `DSH_SOURCE_ROOT` 下 `pnpm test`：构建成功，31 项通过，0 失败、0 跳过；`git diff --check` 通过。在隔离的 `runtime/poc/bkms-workbench-compact-qa` 使用真实前端与 WorkbenchApi/Store、合成邮件服务验收列表、详情窗口、方案编辑及中英文显示。520×850 英文深色详情窗口左右均在视口内，页面宽 505px，小于视口 520px，无横向溢出。
+
+截图位于 `runtime/dev/bkms-workbench/validation/workbench-task-dialog.png`、`workbench-input-focus.png` 和 `workbench-task-dialog-en-narrow.png`，均为合成数据。未操作用户真实邮箱、未发送邮件，尚未在用户日常客户端内验收；本地前端产物已重新构建。
+
 日期：2026-10-14。状态：开发交付，未发布，未建立生产 Baseline。
 
 ## 组件
