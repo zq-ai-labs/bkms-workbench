@@ -4,6 +4,7 @@ import { open, stat, unlink } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import { join, basename } from 'node:path'
 import { chooseRule } from './rules.js'
+import { originalMailFields } from './original-mail.js'
 import { Store, findTask, log, touch } from './store.js'
 import { WorkbenchError, now, type AgentRunner, type EmailService, type Task } from './types.js'
 
@@ -144,6 +145,7 @@ export class Engine {
       if (!task.rule) throw new WorkbenchError('任务缺少规则快照。')
       const email = this.email(), read = await this.readOriginal(task, signal)
       task.body = read.text || ''; task.attachments = read.attachments || []
+      Object.assign(task, originalMailFields(read))
       task.messageId = read.messageId; task.references = read.references; task.replyTo = address(read.replyTo?.length ? read.replyTo : read.from)
       const workspace = join(this.store.root, 'tasks', task.id)
       await mkdir(workspace, { recursive: true, mode: 0o700 })
@@ -156,7 +158,7 @@ export class Engine {
           file.localPath = result.path
         }
       }
-      await this.store.mutate(state => { const item = findTask(state, task!.id); Object.assign(item, { body: task!.body, mailLoaded: true, attachments: task!.attachments, workspace, messageId: task!.messageId, references: task!.references, replyTo: task!.replyTo }); touch(item, '原邮件与资料已读取。') })
+      await this.store.mutate(state => { const item = findTask(state, task!.id); Object.assign(item, originalMailFields(read), { body: task!.body, mailLoaded: true, attachments: task!.attachments, workspace, messageId: task!.messageId, references: task!.references, replyTo: task!.replyTo }); touch(item, '原邮件与资料已读取。') })
       const result = await this.agent.run(task, task.rule, signal)
       signal.throwIfAborted()
       let draftId = task.draftId
@@ -173,8 +175,8 @@ export class Engine {
       }
       await this.store.mutate(state => {
         const item = findTask(state, task!.id)
-        Object.assign(item, { summary: result.output.summary, sessionId: result.sessionId, draftId, status: result.output.needsInfo ? 'needs_info' : item.rule?.output === 'reply' ? 'review' : 'completed', error: result.output.needsInfo || undefined })
-        touch(item, result.output.needsInfo ? '需要补充信息后继续。' : draftId ? '已生成回复草稿，等待人工审核。' : '分析报告已生成。'); log(state, 'DSH 处理完成。', item.id)
+        Object.assign(item, { summary: result.output.summary, informationGaps: result.output.informationGaps, needsInfoKind: result.output.needsInfo ? result.output.needsInfoKind || 'information' : undefined, sessionId: result.sessionId, draftId, status: result.output.needsInfo ? 'needs_info' : item.rule?.output === 'reply' ? 'review' : 'completed', error: result.output.needsInfo || undefined })
+        touch(item, result.output.needsInfo ? '需要补充信息后继续。' : item.rule?.output === 'reply' ? '已生成回复草稿，等待人工审核。' : '分析报告已生成。'); log(state, 'DSH 处理完成。', item.id)
       })
       this.error = undefined
     } catch (error) {

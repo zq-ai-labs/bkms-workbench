@@ -19,6 +19,11 @@ function validateState(state: State): void {
     if (!task || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(task.id) || !positive(task.revision) || !statuses.has(task.status) || !task.source || !cursor({ uidValidity: task.source.uidValidity, lastUid: task.source.uid }) || !positive(task.source.uid) || task.source.account !== task.account || typeof task.source.folder !== 'string' || !Array.isArray(task.history) || !Array.isArray(task.attachments) || !Number.isSafeInteger(task.attempts) || task.attempts < 0) throw new Error('invalid task')
     for (const key of ['title', 'account', 'from', 'subject', 'body', 'receivedAt', 'updatedAt'] as const) if (typeof task[key] !== 'string') throw new Error('invalid task text')
     if (task.rule) validateRule(task.rule)
+    for (const key of ['to', 'cc', 'mailDate'] as const) if (task[key] !== undefined && (typeof task[key] !== 'string' || task[key]!.length > 16000)) throw new Error('invalid mail metadata')
+    if (task.bodyHtml !== undefined && (typeof task.bodyHtml !== 'string' || Buffer.byteLength(task.bodyHtml, 'utf8') > 256 * 1024)) throw new Error('invalid mail HTML')
+    if (task.mailSize !== undefined && (!Number.isSafeInteger(task.mailSize) || task.mailSize < 0)) throw new Error('invalid mail size')
+    if (task.informationGaps !== undefined && typeof task.informationGaps !== 'string') throw new Error('invalid information gaps')
+    if (task.needsInfoKind !== undefined && !['information', 'attachments'].includes(task.needsInfoKind)) throw new Error('invalid information blocker')
     if (task.attachments.some(file => !file || typeof file.filename !== 'string' || !Number.isFinite(file.size) || file.size < 0 || (file.localPath !== undefined && typeof file.localPath !== 'string'))) throw new Error('invalid attachment')
   }
 }

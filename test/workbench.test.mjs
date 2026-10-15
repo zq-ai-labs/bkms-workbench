@@ -72,8 +72,8 @@ test('global reminder endpoint exposes only attention identities, without mail b
   await f.api.action({ action: 'ignore', id: task.id, revision: task.revision })
   assert.deepEqual((await f.api.action({ action: 'preferences' })).attention, [])
 })
-async function prepare(f) {
-  await f.api.action({ action: 'saveRule', revision: 1, rule: ruleInput })
+async function prepare(f, rule = ruleInput) {
+  await f.api.action({ action: 'saveRule', revision: 1, rule })
   await f.engine.poll(); f.mail([mail()]); await f.engine.poll(); await f.engine.processNext()
   return (await f.api.snapshot()).tasks[0]
 }
@@ -206,14 +206,109 @@ test('needs-info can continue; regenerate creates a new draft preserving human e
   assert.notEqual(next.draftId, old.id); assert.equal((await f.email.drafts.get(old.id)).text, old.text)
 })
 
+test('reports keep nonblocking information gaps while attachment blockers require action', async t => {
+  const f = await fixture(t)
+  f.output({ summary: '已根据可读取资料完成分析。', informationGaps: '项目日期未提供，待人工核实。' })
+  const report = await prepare(f, { ...ruleInput, output: 'report' })
+  assert.equal(report.status, 'completed')
+  assert.equal(report.outputKind, 'report')
+  assert.equal(report.informationGaps, '项目日期未提供，待人工核实。')
+  assert.equal(report.error, undefined)
+  assert.equal(f.drafts.size, 0)
+  f.output({ summary: '附件未能解析。', needsInfo: 'PDF 缺少可读取文字层。', needsInfoKind: 'attachments' })
+  await f.api.action({ action: 'retry', id: report.id, revision: report.revision })
+  await f.engine.processNext()
+  const blocked = (await f.api.snapshot()).tasks[0]
+  assert.equal(blocked.status, 'needs_info')
+  assert.equal(blocked.needsInfoKind, 'attachments')
+  assert.equal(blocked.informationGaps, undefined)
+  assert.equal(f.sends, 0)
+})
+
+test('latest workflow reprocessing is explicit, revision checked, and preserves results and supplements', async t => {
+  const f = await fixture(t)
+  f.output({ summary: '原分析结果', needsInfo: '需要补充资料。' })
+  const task = await prepare(f)
+  await f.api.action({ action: 'supplement', id: task.id, revision: task.revision, text: '第一份补充资料' })
+  await f.engine.processNext()
+  let snapshot = await f.api.snapshot(), current = snapshot.tasks[0]
+  const originalRule = snapshot.rules[0]
+  const saved = await f.api.action({ action: 'saveRule', rule: { ...originalRule, tools: ['read_document'], instructions: '读取文档后生成分析报告。', output: 'report' }, revision: snapshot.revision })
+  assert.equal(saved.revision, snapshot.revision + 1, 'save returns the committed configuration revision')
+  snapshot = await f.api.snapshot()
+  assert.equal(snapshot.tasks[0].ruleUpdated, true)
+  assert.equal(snapshot.tasks[0].outputKind, 'reply')
+  await assert.rejects(f.api.action({ action: 'runRule', id: current.id, revision: current.revision, ruleId: saved.id, ruleRevision: snapshot.revision - 1 }), /配置已更新/)
+  const unchanged = await f.store.read()
+  assert.deepEqual(unchanged.tasks[0].rule.tools, [])
+  await f.api.action({ action: 'runRule', id: current.id, revision: current.revision, ruleId: saved.id, ruleRevision: snapshot.revision, text: '第二份补充资料' })
+  let queued = (await f.store.read()).tasks[0]
+  assert.deepEqual(queued.rule.tools, ['read_document'])
+  assert.equal(queued.supplement, '第一份补充资料\n\n第二份补充资料')
+  assert(queued.history.some(event => event.message.includes('原分析结果')))
+  f.output({ summary: '已读取资料，生成完整报告。', informationGaps: '普通待确认项' })
+  await f.engine.processNext()
+  current = (await f.api.snapshot()).tasks[0]
+  assert.equal(current.status, 'completed')
+  assert.equal(current.ruleUpdated, false)
+  assert.equal(current.outputKind, 'report')
+  await assert.rejects(f.api.action({ action: 'supplement', id: current.id, revision: current.revision, text: 'x'.repeat(16000) }), /累计补充信息/)
+  assert.equal((await f.store.read()).tasks[0].supplement, queued.supplement)
+  assert.equal(f.sends, 0)
+})
+
 test('send uncertainty prevents automatic retries; restart reconciles authoritative saved mail receipt', async t => {
   const f = await fixture(t), task = await prepare(f)
   f.email.drafts.send = async id => { f.drafts.get(id).state = 'uncertain'; return { draft: structuredClone(f.drafts.get(id)) } }
   await f.api.action({ action: 'send', id: task.id, revision: task.revision, draftRevision: task.draft.revision, planId: 'plan', confirmed: true })
   const uncertain = (await f.api.snapshot()).tasks[0]; assert.equal(uncertain.status, 'uncertain')
+  assert.equal((await f.api.snapshot()).tasks[0].revision, uncertain.revision, 'polling an unchanged uncertain result must not invalidate confirmation')
   await assert.rejects(f.api.action({ action: 'retry', id: task.id, revision: uncertain.revision }), /不允许/)
   f.drafts.get(task.draftId).state = 'sent'
   assert.equal((await f.api.snapshot()).tasks[0].status, 'sent')
+})
+
+test('uncertain sends require explicit verification and exact revisions; recovery never sends', async t => {
+  for (const outcome of ['sent', 'not_sent']) {
+    const f = await fixture(t), task = await prepare(f)
+    f.email.drafts.send = async id => { Object.assign(f.drafts.get(id), { state: 'uncertain', error: 'synthetic connect timeout' }); return { draft: structuredClone(f.drafts.get(id)) } }
+    await f.api.action({ action: 'send', id: task.id, revision: task.revision, draftRevision: task.draft.revision, planId: 'plan', confirmed: true })
+    const pending = (await f.api.snapshot()).tasks[0]
+    const body = { action: 'resolveSend', id: task.id, revision: pending.revision, draftRevision: pending.draft.revision, outcome, confirmed: true }
+    assert.equal(pending.canResolveSend, false)
+    await assert.rejects(f.api.action(body), e => e.status === 503)
+    let resolutions = 0
+    f.email.drafts.resolveSend = async (id, revision, decision, confirmed) => {
+      const draft = f.drafts.get(id); assert.equal(draft.revision, revision); assert.equal(confirmed, true); resolutions++
+      Object.assign(draft, { state: decision === 'sent' ? 'sent' : 'draft', revision: revision + 1, sendChecks: [{ at: new Date().toISOString(), outcome: decision }] }); delete draft.error
+      return structuredClone(draft)
+    }
+    assert.equal((await f.api.snapshot()).tasks[0].canResolveSend, true)
+    await assert.rejects(f.api.action({ ...body, confirmed: false }))
+    await assert.rejects(f.api.action({ ...body, outcome: 'guess' }))
+    await assert.rejects(f.api.action({ ...body, draftRevision: 99 }), e => e.status === 409)
+    await assert.rejects(f.api.action({ ...body, revision: 999 }), e => e.status === 409)
+    assert.equal(resolutions, 0)
+    await f.api.action(body)
+    const result = (await f.api.snapshot()).tasks[0]
+    assert.equal(result.status, outcome === 'sent' ? 'sent' : 'review'); assert.equal(result.error, undefined)
+    assert.equal(result.draftId, task.draftId); assert.equal(result.draft.text, task.draft.text)
+    assert.equal(result.draft.receipt, undefined); assert(result.history.some(h => h.message.includes('用户核对邮箱')))
+    await assert.rejects(f.api.action(body)); assert.equal(resolutions, 1); assert.equal(f.sends, 0)
+    // If the email backend committed but the task write was interrupted, the next snapshot recovers it.
+    await f.store.mutate(state => { state.tasks[0].status = 'uncertain' })
+    assert.equal((await f.api.snapshot()).tasks[0].status, result.status)
+  }
+})
+
+test('a definite pre-connect failure returns to review without repeated SMTP submission', async t => {
+  const f = await fixture(t), task = await prepare(f)
+  f.email.drafts.send = async id => { Object.assign(f.drafts.get(id), { state: 'draft', sendFailure: 'not_submitted', error: 'connection refused' }); return { draft: structuredClone(f.drafts.get(id)) } }
+  await f.api.action({ action: 'send', id: task.id, revision: task.revision, draftRevision: task.draft.revision, planId: 'plan', confirmed: true })
+  const result = (await f.api.snapshot()).tasks[0]
+  assert.equal(result.status, 'review'); assert.equal(result.draftId, task.draftId); assert.match(result.error, /connection refused/)
+  await f.store.mutate(state => { state.tasks[0].status = 'uncertain' })
+  assert.equal((await f.api.snapshot()).tasks[0].status, 'review'); assert.equal(f.sends, 0)
 })
 
 test('mailbox generation mismatch preserves cursor and records actionable failure', async t => {
@@ -306,7 +401,12 @@ test('an explicit baseline reset wins against an older in-flight poll without im
     return { cursor: { uidValidity: 123, lastUid: 11 }, messages: [mail()], firstRun: false, reset: false, hasMore: false }
   }
   const polling = f.engine.poll(); await ready
-  await f.api.action({ action: 'resetBaseline', account: 'sales', folder: 'INBOX', confirmed: true })
+  await assert.rejects(f.api.action({ action: 'resetBaseline', account: 'sales', folder: 'INBOX', confirmed: true, revision: 999 }), /配置已更新/)
+  const mailSettings = await f.api.action({ action: 'mailSettings' })
+  assert.equal('tasks' in mailSettings, false)
+  assert.equal('rules' in mailSettings, false)
+  assert.equal(mailSettings.accounts[0].id, 'sales')
+  await f.api.action({ action: 'resetBaseline', account: 'sales', folder: 'INBOX', confirmed: true, revision: mailSettings.revision })
   unblock(); await polling
   const state = await f.store.read()
   assert.equal(state.cursors[JSON.stringify(['sales', 'INBOX'])].lastUid, 99)
@@ -389,6 +489,24 @@ test('an unmatched mail can be loaded for manual review without running a rule o
   assert.match(loaded.body, /100 件产品/); assert.equal(loaded.attachments[0].filename, '需求.pdf')
   assert.equal(loaded.revision, task.revision + 1)
   assert.equal(f.runs, 0); assert.equal(f.drafts.size, 0); assert.equal(f.sends, 0)
+})
+
+test('original-mail metadata persists on manual and automated reads without replacing the agent plain text', async t => {
+  const f = await fixture(t), original = f.email.read
+  const display = { bodyHtml: '<table><tr><td>Synthetic rich mail</td></tr></table>', to: [{ name: 'Service', address: 'sales@example.test' }], cc: [{ address: 'copy@example.test' }], date: '2026-10-15T05:35:00.000Z', size: 123456 }
+  f.email.read = async (...args) => ({ ...(await original(...args)), ...display })
+  const processed = await prepare(f)
+  assert.equal(processed.bodyHtml, display.bodyHtml); assert.match(processed.body, /100 件产品/)
+  assert.equal(processed.to, 'Service <sales@example.test>'); assert.equal(processed.cc, 'copy@example.test')
+  assert.equal(processed.mailDate, display.date); assert.equal(processed.mailSize, display.size)
+  const loaded = await f.api.action({ action: 'loadMail', id: processed.id, revision: processed.revision })
+  assert.equal(loaded.bodyHtml, display.bodyHtml); assert.equal(loaded.replyTo, 'reply@example.test')
+  // Re-reading a mail without HTML clears stale presentation data, retaining plain-text readability.
+  f.email.read = original
+  const plain = await f.api.action({ action: 'loadMail', id: loaded.id, revision: loaded.revision })
+  assert.equal(plain.bodyHtml, undefined); assert.equal(plain.to, '')
+  const stored = await new Store(f.root).read()
+  assert.equal(stored.tasks[0].bodyHtml, undefined); assert.equal(f.runs, 1); assert.equal(f.sends, 0)
 })
 
 test('manual original-mail loading rejects reassigned UIDs without overwriting the task', async t => {

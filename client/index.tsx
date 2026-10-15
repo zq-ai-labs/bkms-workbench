@@ -1,7 +1,8 @@
 import * as React from "react";
 import { connectLocale, language, systemMessage, t, useWorkbenchLocale, type LocaleService } from "./i18n";
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { TodoTracker, type Preferences } from "./preferences";
+import { OriginalMailBody } from "./original-mail";
 // @ts-ignore CSS is bundled as a text module by scripts/build-client.mjs.
 import stylesheet from "./styles.css";
 
@@ -27,6 +28,7 @@ type Draft = {
   text: string;
   attachments: { id: string; filename: string }[];
   state: string;
+  sendChecks?: { at: string; outcome: "sent" | "not_sent" }[];
   receipt?: {
     accepted: string[];
     rejected: string[];
@@ -43,11 +45,21 @@ type Task = {
   replyTo?: string;
   subject: string;
   body: string;
+  bodyHtml?: string;
+  to?: string;
+  cc?: string;
+  mailDate?: string;
+  mailSize?: number;
   receivedAt: string;
   updatedAt: string;
   ruleId?: string;
   ruleName?: string;
   summary?: string;
+  informationGaps?: string;
+  needsInfoKind?: "information" | "attachments";
+  outputKind?: "reply" | "report";
+  ruleUpdated?: boolean;
+  canResolveSend?: boolean;
   error?: string;
   draftId?: string;
   draft?: Draft;
@@ -357,6 +369,33 @@ export function WorkbenchSettings() {
   const [loaded, setLoaded] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(""), [saved, setSaved] = useState(false);
   const [interval, setIntervalValue] = useState(String(data.settings.pollSeconds));
   const operation = useRef(false);
+  const [resetOpen, setResetOpen] = useState(false),
+    [resetAccount, setResetAccount] = useState(""),
+    [resetFolder, setResetFolder] = useState("INBOX"),
+    [resetConfirmed, setResetConfirmed] = useState(false);
+  const [mail, setMail] = useState<{ revision: number; accounts: Snapshot["accounts"]; health: Snapshot["health"] }>();
+  const [resetRevision, setResetRevision] = useState(0);
+  const [baselineNotice, setBaselineNotice] = useState(false);
+  const accounts = mail?.accounts || [];
+  const servicesReady = !!(mail?.health.email && accounts.length && mail.health.agent && mail.health.running);
+  async function refreshMail(signal?: AbortSignal) { setMail(await api("mailSettings", {}, signal)); }
+  useEffect(() => {
+    const controller = new AbortController();
+    const refresh = () => { void refreshMail(controller.signal).catch(error => { if (!controller.signal.aborted) setError(errorMessage(error)); }); };
+    refresh();
+    const timer = setInterval(refresh, 10000);
+    return () => { controller.abort(); clearInterval(timer); };
+  }, []);
+  async function rebuildBaseline() {
+    if (operation.current) return;
+    operation.current = true; setBusy(true); setError(""); setSaved(false);
+    try {
+      await api("resetBaseline", { account: resetAccount, folder: resetFolder.trim(), confirmed: true, revision: resetRevision });
+      setResetOpen(false); setBaselineNotice(true);
+      await refreshMail();
+    } catch (error) { setError(errorMessage(error)); }
+    finally { operation.current = false; setBusy(false); }
+  }
   useEffect(() => {
     const controller = new AbortController();
     refreshPreferences(controller.signal).then(() => setLoaded(true)).catch(error => { if (!controller.signal.aborted) setError(errorMessage(error)); });
@@ -389,9 +428,88 @@ export function WorkbenchSettings() {
         { key: "notifyNewTodo" as const, title: t("新待办消息提醒"), hint: t("出现待审核、待补充、处理失败或发送待核实任务时显示简洁提醒。开启时不补提醒已有待办，关闭后立即隐藏提醒。"), checked: data.settings.notifyNewTodo === true },
       ].map(row => <label className="bkw-preference-row" key={row.key}><span><strong>{row.title}</strong><small>{row.hint}</small></span><input className="bkw-switch" type="checkbox" role="switch" checked={row.checked} disabled={!loaded || busy} onChange={event => { void save({ [row.key]: event.target.checked }); }} /></label>)}
     </section>
-    <section className="bkw-preference-card"><h3>{t("后台检查")}</h3><div className="bkw-preference-row"><span><strong>{t("邮件检查间隔")}</strong><small>{t("后台自动处理开启时生效，范围 30–3600 秒。")}</small></span><form className="bkw-interval" onSubmit={event => { event.preventDefault(); void save({ pollSeconds: Number(interval) }); }}><input aria-label={t("邮件检查间隔")} required type="number" min={30} max={3600} step={1} value={interval} disabled={!loaded || busy} onChange={event => setIntervalValue(event.target.value)} /><span>{t("秒")}</span><button className="bkw-btn" disabled={!loaded || busy || Number(interval) === data.settings.pollSeconds}>{t("保存")}</button></form></div></section>
+    <section className="bkw-preference-card"><h3>{t("邮件")}</h3><h4 className="bkw-mail-heading">{t("邮件检测")}</h4><div className="bkw-preference-row"><span><strong>{t("邮件检查间隔")}</strong><small>{t("后台自动处理开启时生效，范围 30–3600 秒。")}</small></span><form className="bkw-interval" onSubmit={event => { event.preventDefault(); void save({ pollSeconds: Number(interval) }); }}><input aria-label={t("邮件检查间隔")} required type="number" min={30} max={3600} step={1} value={interval} disabled={!loaded || busy} onChange={event => setIntervalValue(event.target.value)} /><span>{t("秒")}</span><button className="bkw-btn" disabled={!loaded || busy || Number(interval) === data.settings.pollSeconds}>{t("保存")}</button></form></div>
+      <div className="bkw-preference-row"><span><strong>{t("服务状态")}</strong><small><i className={`bkw-dot ${servicesReady ? "good" : ""}`} />{!mail ? t("正在加载…") : servicesReady ? t("服务已就绪") : t("等待服务连接")}</small></span></div>
+      <div className="bkw-preference-row"><span><strong>{t("最近检测时间")}</strong><small>{mail?.health.lastPoll ? date(mail.health.lastPoll) : t("尚未检测邮箱")}</small></span></div>
+      {mail?.health.error && <div className="bkw-alert danger" role="alert">{systemMessage(mail.health.error)}</div>}
+      <details className="bkw-recovery"><summary>{t("高级与恢复")}</summary><div><p>{t("首次检测从当前邮件开始，之后的新邮件按方案处理。重建基线会跳过当前文件夹的已有邮件，不会重新处理历史邮件。")}</p><details><summary>{t("技术详情")}</summary><p>{t("邮箱 UIDVALIDITY 变化时会暂停相应文件夹的增量检测，核对邮箱后可重建收件基线。")}</p></details><button className="bkw-btn" disabled={busy || !accounts.length || !mail?.health.email} onClick={() => { setResetAccount(""); setResetFolder("INBOX"); setResetConfirmed(false); setResetRevision(mail!.revision); setResetOpen(true); setError(""); }}>{t("重建收件基线")}</button></div></details>
+    </section>
+      {resetOpen && (
+        <Modal
+          title={t("重建收件基线")}
+          onClose={() => {
+            if (!busy) setResetOpen(false);
+          }}
+        >
+          <p className="bkw-dialog-description">
+            {t("重建后，只会处理此刻之后到达的新邮件。当前文件夹内尚未进入工作台的邮件将跳过，已有任务与历史记录保留。请在确认邮箱变化后使用。")}</p>
+          <Field label={t("邮箱账号")}>
+            <select
+              required
+              value={resetAccount}
+              onChange={(e) => {
+                setResetAccount(e.target.value);
+                setResetFolder(accounts.find(account => account.id === e.target.value)?.inboxFolder || "INBOX");
+                setResetConfirmed(false);
+              }}
+            >
+              <option value="">{t("请选择邮箱账号")}</option>
+              {accounts.map((account) => (
+                <option key={account.id} value={account.id}>
+                  {account.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label={t("邮件文件夹")}>
+            <FolderPicker
+              account={resetAccount}
+              ready={!!resetAccount}
+              value={resetFolder}
+              defaultFolder={accounts.find(account => account.id === resetAccount)?.inboxFolder || "INBOX"}
+              onChange={(folder) => {
+                setResetFolder(folder);
+                setResetConfirmed(false);
+              }}
+            />
+          </Field>
+          <label className="bkw-checkbox">
+            <input
+              type="checkbox"
+              checked={resetConfirmed}
+              onChange={(e) => setResetConfirmed(e.target.checked)}
+            />
+            {t("我已核对邮箱，确认跳过当前文件夹的已有邮件")}</label>
+          {error && (
+            <div className="bkw-alert danger" role="alert">
+              <Icon name="info" />
+              <span>{systemMessage(error)}</span>
+            </div>
+          )}
+          <div className="bkw-dialog-actions">
+            <button
+              className="bkw-btn"
+              disabled={!!busy}
+              onClick={() => setResetOpen(false)}
+            >
+              {t("取消")}</button>
+            <button
+              className="bkw-btn primary"
+              disabled={
+                !!busy ||
+                !resetConfirmed ||
+                !resetAccount ||
+                !resetFolder.trim()
+              }
+              onClick={() => { void rebuildBaseline(); }}
+            >
+              {busy ? t("正在重建…") : t("确认重建基线")}
+            </button>
+          </div>
+        </Modal>
+      )}
     <p className="bkw-settings-note">{t("这些设置在当前 DSH 实例中保存，界面语言跟随 DSH 全局设置。")}</p>
-    <div className="bkw-settings-feedback" role="status">{busy ? t("保存中…") : saved ? t("设置已保存") : !loaded && !error ? t("正在加载…") : ""}</div>
+    <div className="bkw-settings-feedback" role="status">{busy ? t("保存中…") : saved ? t("设置已保存") : baselineNotice ? t("收件基线已重建，后续新邮件将按方案处理") : !loaded && !error ? t("正在加载…") : ""}</div>
   </div>;
 }
 
@@ -458,6 +576,7 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
     check: <path d="m5 12 4 4L19 6" />,
     close: <path d="m6 6 12 12M6 18 18 6" />,
     arrow: <path d="m9 5 7 7-7 7" />,
+    back: <path d="m14 5-7 7 7 7M7 12h14" />,
     file: (
       <>
         <path d="M14 3H5v18h14V8zM14 3v5h5M8 12h8M8 16h6" />
@@ -553,7 +672,8 @@ export function Workbench() {
   const [selected, setSelected] = useState<string | undefined>(cachedDraft?.id),
     [search, setSearch] = useState(""),
     [filter, setFilter] = useState("all");
-  const [allDetailOpen, setAllDetailOpen] = useState(false);
+  const [taskPageOpen, setTaskPageOpen] = useState(false);
+  const overviewRef = useRef<HTMLDivElement>(null);
   const rowsRef = useRef<HTMLDivElement>(null);
   const views = useRef<Record<string, { search: string; filter: string; scroll: number; selected?: string }>>({});
   const [error, setError] = useState(""),
@@ -569,10 +689,9 @@ export function Workbench() {
   const [assignment, setAssignment] = useState(""),
     [confirmIgnore, setConfirmIgnore] = useState(false),
     [supplement, setSupplement] = useState("");
-  const [resetOpen, setResetOpen] = useState(false),
-    [resetAccount, setResetAccount] = useState(""),
-    [resetFolder, setResetFolder] = useState("INBOX"),
-    [resetConfirmed, setResetConfirmed] = useState(false);
+  const [rerunPlan, setRerunPlan] = useState<{ rule: Rule; configRevision: number; taskId: string; taskRevision: number; text: string }>();
+  const [sendResolution, setSendResolution] = useState<{ id: string; revision: number; draftRevision: number; outcome: "sent" | "not_sent" }>();
+  const [sendChecked, setSendChecked] = useState(false);
   const op = useRef(false),
     sequence = useRef(0),
     mounted = useRef(true);
@@ -595,6 +714,7 @@ export function Workbench() {
       setData(snapshot);
       setLoaded(true);
     }
+    return snapshot;
   }, []);
   useEffect(() => {
     mounted.current = true;
@@ -613,14 +733,14 @@ export function Workbench() {
     return () => clearTimeout(timer);
   }, [notice]);
   useEffect(() => {
-    if (!dirty) return;
+    if (!dirty && !supplement.trim()) return;
     const before = (e: BeforeUnloadEvent) => {
       e.preventDefault();
       e.returnValue = "";
     };
     window.addEventListener("beforeunload", before);
     return () => window.removeEventListener("beforeunload", before);
-  }, [dirty]);
+  }, [dirty, supplement]);
   useEffect(() => {
     if (!task?.draft) {
       if (!dirty) {
@@ -655,7 +775,7 @@ export function Workbench() {
           }
         : undefined;
   }, [dirty, selected, form, original, taskRevision, formRevision]);
-  async function perform(key: string, work: () => Promise<void>) {
+  async function perform(key: string, work: () => Promise<unknown>) {
     if (op.current) return;
     op.current = true;
     setBusy(key);
@@ -673,14 +793,14 @@ export function Workbench() {
   }
   function choose(id: string) {
     if (op.current) return;
-    if (selected === id) { setAllDetailOpen(true); return; }
+    if (selected === id) { setTaskPageOpen(true); return; }
     if (dirty && !window.confirm(t("草稿有尚未保存的修改。放弃修改并切换任务？")))
       return;
     setForm(undefined);
     setOriginal("");
     cachedDraft = undefined;
     setSelected(id);
-    setAllDetailOpen(true);
+    setTaskPageOpen(true);
     setPreview(null);
     setAssignment("");
     setConfirmIgnore(false);
@@ -700,14 +820,14 @@ export function Workbench() {
         : undefined;
       if (previous || fallback) choose((previous || fallback)!.id);
     }
-    setAllDetailOpen(false);
+    setTaskPageOpen(false);
   }
   useEffect(() => {
     if (rowsRef.current) rowsRef.current.scrollTop = views.current[tab]?.scroll || 0;
   }, [tab, loaded]);
   function closeTaskDetails() {
     if (op.current) return;
-    if (dirty && !window.confirm(t("草稿有尚未保存的修改。放弃修改并关闭详情？"))) return;
+    if ((dirty || supplement.trim()) && !window.confirm(t("当前任务有尚未保存的修改，确认放弃并返回？"))) return;
     if (dirty && task?.draft) {
       const saved = draftValue(task.draft);
       setForm(saved);
@@ -716,7 +836,9 @@ export function Workbench() {
       setTaskRevision(task.revision);
       cachedDraft = undefined;
     }
-    setAllDetailOpen(false);
+    setSupplement("");
+    setPreview(null);
+    setTaskPageOpen(false);
   }
   async function saveDraft() {
     if (!task || !form) return;
@@ -750,6 +872,11 @@ export function Workbench() {
   }, [loaded, tab, selected, tasks[0]?.id]);
   const mailReady = data.health.email && accounts.length > 0;
   const servicesReady = mailReady && data.health.model && data.health.worker;
+  const latestTaskRule = data.rules.find(rule => rule.id === task?.ruleId);
+  const openLatestRule = () => {
+    if (!task || !latestTaskRule || dirty || op.current) return;
+    setRerunPlan({ rule: latestTaskRule, configRevision: data.revision, taskId: task.id, taskRevision: task.revision, text: supplement.trim() });
+  };
   const newRule = (): Rule => ({
     id: "",
     name: "",
@@ -765,6 +892,7 @@ export function Workbench() {
   });
   const openRule = (rule: Rule) => {
     setError("");
+    setNotice("");
     setRuleEditor({ ...rule, revision: data.revision });
   };
   const title = {
@@ -784,53 +912,100 @@ export function Workbench() {
     !task ||
     task.status !== "review" ||
     (!!task.draft && task.draft.state !== "draft");
-  const taskDetails = (
-              <section className="bkw-detail" aria-label={t("任务详情")}>
-                {task ? (
-                  <>
-                    <div className="bkw-detail-header">
-                      <div className="bkw-row-top">
-                        <Badge
-                          status={task.status}
-                          partial={
-                            task.status === "sent" &&
-                            !!task.draft?.receipt?.rejected?.length
-                          }
-                        />
-                        <span className="bkw-muted">
-                          {task.ruleName || t("尚未匹配方案")}
-                        </span>
+  const taskActions = task ? (<div className="bkw-detail-footer">
+                      <div className="bkw-actions">
+                        {task.status === "uncertain" && task.canResolveSend && task.draft && <>
+                          <button className="bkw-btn bkw-task-rerun" disabled={!!busy} onClick={() => { setSendChecked(false); setSendResolution({ id: task.id, revision: task.revision, draftRevision: task.draft!.revision, outcome: "not_sent" }); }}>{t("确认未发送，恢复草稿")}</button>
+                          <button className="bkw-btn" disabled={!!busy} onClick={() => { setSendChecked(false); setSendResolution({ id: task.id, revision: task.revision, draftRevision: task.draft!.revision, outcome: "sent" }); }}>{t("确认已发送，标记完成")}</button>
+                        </>}
+                        {![
+                          "sent",
+                          "sending",
+                          "uncertain",
+                          "ignored",
+                          "running",
+                          "completed",
+                        ].includes(task.status) && (
+                          <button
+                            className="bkw-btn bkw-task-ignore"
+                            disabled={!!busy || dirty}
+                            onClick={() => setConfirmIgnore(true)}
+                          >
+                            {t("忽略任务")}</button>
+                        )}
+                        {latestTaskRule && ["failed", "needs_info", "review", "completed"].includes(task.status) && <button className="bkw-btn bkw-task-rerun" disabled={!!busy || dirty || !data.health.model} onClick={openLatestRule}>{t("按最新方案重新处理")}</button>}
+                        {["failed", "needs_info", "review"].includes(
+                          task.status,
+                        ) && (
+                          <button
+                            className="bkw-btn bkw-task-rerun"
+                            disabled={!!busy || dirty || !data.health.model}
+                            onClick={() =>
+                              void perform("retry", async () => {
+                                await api("retry", {
+                                  id: task.id,
+                                  revision: task.revision,
+                                });
+                                await refresh();
+                                setNotice(t("已重新加入处理队列"));
+                              })
+                            }
+                          >
+                            <Icon name="refresh" size={15} />
+                            {t("按原方案重试")}</button>
+                        )}
                       </div>
-                      <h2>{task.subject || (task.title === "无主题邮件" ? t("无主题邮件") : task.title) || t("无主题邮件")}</h2>
-                      <div className="bkw-meta">
-                        <span>{t("来自")}{task.from}</span>
-                        <span>{date(task.receivedAt)}</span>
+                      <div className="bkw-actions">
+                        {task.draft && task.status === "review" && (
+                          <>
+                            <button
+                              className="bkw-btn"
+                              disabled={editingLocked || !dirty}
+                              onClick={() =>
+                                void perform("saveDraft", saveDraft)
+                              }
+                            >
+                              {busy === "saveDraft" ? t("保存中…") : t("保存草稿")}
+                            </button>
+                            <button
+                              className="bkw-btn primary"
+                              disabled={
+                                editingLocked ||
+                                dirty ||
+                                !form?.to ||
+                                !form.subject
+                              }
+                              title={
+                                dirty ? t("请先保存修改再审核发送") : undefined
+                              }
+                              onClick={() =>
+                                void perform("previewSend", async () => {
+                                  const plan = await api<SendPlan>(
+                                    "previewSend",
+                                    {
+                                      id: task.id,
+                                      revision: task.revision,
+                                      draftRevision: task.draft!.revision,
+                                    },
+                                  );
+                                  setPreview({
+                                    ...plan,
+                                    taskRevision: task.revision,
+                                    draftRevision: task.draft!.revision,
+                                  });
+                                })
+                              }
+                            >
+                              <Icon name="send" size={16} />
+                              {t("审核发送")}</button>
+                          </>
+                        )}
                       </div>
-                    </div>
-                    <div
-                      className="bkw-detail-tabs"
-                      role="tablist"
-                      aria-label={t("任务详情内容")}
-                    >
-                      {[
-                        ["result", t("处理结果")],
-                        ["source", t("原邮件与附件")],
-                        ["history", t("处理记录")],
-                      ].map(([id, label]) => (
-                        <button
-                          key={id}
-                          role="tab"
-                          aria-selected={detailTab === id}
-                          className={detailTab === id ? "active" : ""}
-                          onClick={() => setDetailTab(id)}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="bkw-detail-content">
-                      {detailTab === "source" && (
-                        <>
+                    </div>) : null;
+  const taskDetails = task ? (
+    <div className={`bkw-task-page-layout show-${detailTab}`}>
+      <aside className="bkw-task-source" aria-label={t("原邮件与附件")}>
+        <div className="bkw-source-content"><>
                           <div className="bkw-editor-title">
                             <span className="bkw-section-label">{t("原邮件")}</span>
                             <button
@@ -865,39 +1040,38 @@ export function Workbench() {
                                   : t("读取原邮件")}
                             </button>
                           </div>
+                          <div className="bkw-mail-header">
+                          <h3 className="bkw-mail-subject">{task.subject}</h3>
                           <dl className="bkw-source-meta">
                             <dt>{t("发件人")}</dt>
                             <dd>{task.from}</dd>
-                            {task.replyTo && (
+                            {task.replyTo && !task.from.includes(task.replyTo) && (
                               <>
                                 <dt>{t("回复地址")}</dt>
                                 <dd>{task.replyTo}</dd>
                               </>
                             )}
-                            <dt>{t("收件账号")}</dt>
+                            <dt>{t(task.to ? "收件人" : "收件账号")}</dt>
                             <dd>
-                              {accounts.find((a) => a.id === task.account)
+                              {task.to || accounts.find((a) => a.id === task.account)
                                 ?.label || task.account}
                             </dd>
-                            <dt>{t("主题")}</dt>
-                            <dd>{task.subject}</dd>
+                            {task.cc && <><dt>{t("抄送")}</dt><dd>{task.cc}</dd></>}
+                            <dt>{t("时间")}</dt>
+                            <dd>{Number.isFinite(Date.parse(task.mailDate || task.receivedAt)) ? new Date(task.mailDate || task.receivedAt).toLocaleString(language() === "en" ? "en-US" : "zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) : "—"}</dd>
+                            {task.mailSize !== undefined && <><dt>{t("大小")}</dt><dd>{Math.max(1, Math.ceil(task.mailSize / 1024))} KB</dd></>}
                           </dl>
-                          <pre className="bkw-original">
-                            {task.body ||
-                              (task.status === "unmatched" ||
-                              task.status === "queued"
-                                ? t("点击“读取原邮件”查看正文，无需启动自动处理。")
-                                : t("邮件正文为空"))}
-                          </pre>
+                          </div>
                           {!!task.attachments?.length && (
-                            <div className="bkw-attachment-list">
+                            <div className="bkw-attachment-list bkw-mail-attachments" aria-label={t("邮件附件")}>
                               {task.attachments.map((item, index) => (
                                 <span key={index}>
-                                  <Icon name="file" size={16} />
-                                  {item.filename}
+                                  <span className={`bkw-file-badge ${/\.pdf$/i.test(item.filename) ? "pdf" : ""}`}><Icon name="file" size={22} /><b>{item.filename.includes(".") ? item.filename.split(".").pop()!.slice(0, 5).toUpperCase() : "FILE"}</b></span>
+                                  <span className="bkw-file-description"><strong title={item.filename}>{item.filename}</strong>
                                   <small>
                                     {Math.ceil(item.size / 1024)} KB
                                   </small>
+                                  </span>
                                   <button
                                     className="bkw-inline-link"
                                     disabled={!!busy || !mailReady}
@@ -928,10 +1102,12 @@ export function Workbench() {
                               <p className="bkw-preview-note">
                                 {t("这封邮件包含附件，读取原邮件后可查看附件列表。")}</p>
                             )}
-                        </>
-                      )}
-                      {detailTab === "history" && (
-                        <div className="bkw-timeline">
+                          <OriginalMailBody key={task.id} html={task.bodyHtml} text={task.body ||
+                              (task.status === "unmatched" || task.status === "queued"
+                                ? t("点击“读取原邮件”查看正文，无需启动自动处理。")
+                                : t("邮件正文为空"))} />
+                        </></div>
+        <details className="bkw-task-history" key={task.id} open={detailTab === "history" ? true : undefined}><summary>{t("处理记录")}</summary><div className="bkw-timeline">
                           {task.history?.length ? (
                             task.history.map((event, i) => (
                               <div key={i}>
@@ -943,17 +1119,19 @@ export function Workbench() {
                           ) : (
                             <p className="bkw-muted">{t("尚无处理记录")}</p>
                           )}
-                        </div>
-                      )}
-                      {detailTab === "result" && (
-                        <>
+                        </div></details>
+      </aside>
+      <section className="bkw-detail bkw-task-result" aria-label={t("处理结果")}>
+        <div className="bkw-detail-content"><>
                           {task.summary && (
                             <details key={task.id} className="bkw-result" open={task.status !== "review" || !task.draft}>
                               <summary className="bkw-section-label">
-                                {t("处理摘要")}<span>{task.summary}</span></summary>
+                                {task.outputKind === "report" ? t("分析报告") : t("处理摘要")}<span>{task.summary}</span></summary>
                               <p>{task.summary}</p>
                             </details>
                           )}
+                          {task.informationGaps && <section className="bkw-information-gaps"><h3>{t("待人工核实")}</h3><p>{task.informationGaps}</p><small>{t("以下事项不影响本次报告完成，可按需补充核实。")}</small></section>}
+                          {task.ruleUpdated && <div className="bkw-alert neutral"><Icon name="info" /><span>{t("方案已更新，当前结果仍基于原方案。可按最新方案重新处理，以使用更新后的要求和工具。")}</span></div>}
                           {task.error && (
                             <div className="bkw-alert danger">
                               <Icon name="info" />
@@ -967,25 +1145,28 @@ export function Workbench() {
                                 {t("发送结果尚未确定。请核对邮箱中的已发送邮件，避免重复发送。")}</span>
                             </div>
                           )}
+                          {task.status === "uncertain" && !task.canResolveSend && <div className="bkw-alert neutral"><Icon name="info" /><span>{t("发送结果恢复功能暂不可用，请确认配套邮件插件已更新并重启客户端；草稿无法读取时请先恢复邮件服务。")}</span></div>}
                           {["sent", "uncertain"].includes(task.status) && (
                             <ReceiptPanel draft={task.draft} />
                           )}
                           {task.status === "needs_info" && (
                             <div className="bkw-supplement">
+                              {task.needsInfoKind === "attachments" && <div className="bkw-attachment-blocker"><strong>{t("附件读取受阻")}</strong><p>{t("请检查文档读取工具和附件格式。修复后可重新处理，也可在下方补充附件文字。")}</p></div>}
                               <Field
                                 label={t("补充信息")}
                                 hint={t("补充缺少的资料，工作台将结合原邮件继续处理。")}
                               >
-                                <textarea
+                                <AutoTextarea
                                   maxLength={16000}
                                   value={supplement}
                                   onChange={(e) =>
                                     setSupplement(e.target.value)
                                   }
                                   disabled={!!busy}
-                                  placeholder={t("例如：本次报价为…，交付日期为…")}
+                                  placeholder={t("请输入需要补充的资料、说明或修正信息。")}
                                 />
                               </Field>
+                              {task.ruleUpdated && <p className="bkw-muted">{t("直接提交将沿用原方案；若已调整处理要求或工具，请使用“按最新方案重新处理”。")}</p>}
                               <button
                                 className="bkw-btn primary"
                                 disabled={
@@ -1117,7 +1298,7 @@ export function Workbench() {
                                 />
                               </Field>
                               <Field label={t("正文")}>
-                                <textarea
+                                <AutoTextarea
                                   disabled={editingLocked}
                                   className="bkw-draft-body"
                                   value={form.text}
@@ -1287,106 +1468,14 @@ export function Workbench() {
                                 icon="file"
                               />
                             )}
-                        </>
-                      )}
-                    </div>
-                    <div className="bkw-detail-footer">
-                      <div className="bkw-actions">
-                        {![
-                          "sent",
-                          "sending",
-                          "uncertain",
-                          "ignored",
-                          "running",
-                          "completed",
-                        ].includes(task.status) && (
-                          <button
-                            className="bkw-btn quiet"
-                            disabled={!!busy || dirty}
-                            onClick={() => setConfirmIgnore(true)}
-                          >
-                            {t("忽略任务")}</button>
-                        )}
-                        {["failed", "needs_info", "review"].includes(
-                          task.status,
-                        ) && (
-                          <button
-                            className="bkw-btn"
-                            disabled={!!busy || dirty || !data.health.model}
-                            onClick={() =>
-                              void perform("retry", async () => {
-                                await api("retry", {
-                                  id: task.id,
-                                  revision: task.revision,
-                                });
-                                await refresh();
-                                setNotice(t("已重新加入处理队列"));
-                              })
-                            }
-                          >
-                            <Icon name="refresh" size={15} />
-                            {t("重新生成")}</button>
-                        )}
-                      </div>
-                      <div className="bkw-actions">
-                        {task.draft && task.status === "review" && (
-                          <>
-                            <button
-                              className="bkw-btn"
-                              disabled={editingLocked || !dirty}
-                              onClick={() =>
-                                void perform("saveDraft", saveDraft)
-                              }
-                            >
-                              {busy === "saveDraft" ? t("保存中…") : t("保存草稿")}
-                            </button>
-                            <button
-                              className="bkw-btn primary"
-                              disabled={
-                                editingLocked ||
-                                dirty ||
-                                !form?.to ||
-                                !form.subject
-                              }
-                              title={
-                                dirty ? t("请先保存修改再审核发送") : undefined
-                              }
-                              onClick={() =>
-                                void perform("previewSend", async () => {
-                                  const plan = await api<SendPlan>(
-                                    "previewSend",
-                                    {
-                                      id: task.id,
-                                      revision: task.revision,
-                                      draftRevision: task.draft!.revision,
-                                    },
-                                  );
-                                  setPreview({
-                                    ...plan,
-                                    taskRevision: task.revision,
-                                    draftRevision: task.draft!.revision,
-                                  });
-                                })
-                              }
-                            >
-                              <Icon name="send" size={16} />
-                              {t("审核发送")}</button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  <Empty
-                    title={t("选择一项任务，开始处理")}
-                    text={t("在左侧选择任务，查看原邮件、处理结果和回复草稿。")}
-                    icon="file"
-                  />
-                )}
-              </section>
-  );
+                        </></div>
+      </section>
+    </div>
+  ) : null;
+
   return (
-    <div className={`bkw bkw-workbench ${tab === "inbox" || tab === "all" ? "bkw-task-view" : ""}`} data-testid="bkms-workbench">
+    <div className={`bkw bkw-workbench ${tab === "inbox" || tab === "all" ? "bkw-task-view" : ""} ${ruleEditor || taskPageOpen ? "bkw-has-page" : ""}`} data-testid="bkms-workbench">
+      <div className="bkw-overview" ref={overviewRef} hidden={!!ruleEditor || taskPageOpen}>
       <div className="bkw-top">
         <div>
           <h1>{t("任务工作台")}</h1>
@@ -1580,45 +1669,28 @@ export function Workbench() {
       ) : (
         <>
           {(tab === "inbox" || tab === "all") && (
-            <div className={`bkw-workspace ${tab === "all" ? "bkw-all-tasks" : ""}`}>
+            <div className="bkw-workspace bkw-all-tasks">
               <section className="bkw-task-list" aria-label={t("任务列表")}>
                 <div className="bkw-rows" ref={rowsRef}>
-                  {tab === "all" && tasks.length > 0 && <div className="bkw-table-heading" aria-hidden="true">
-                    <span>{t("任务 / 下一步")}</span><span>{t("发件人")}</span><span>{t("状态")}</span><span>{t("时间")}</span><span />
+                  {tasks.length > 0 && <div className="bkw-table-heading" aria-hidden="true">
+                    <span>{t("任务 / 下一步")}</span><span className="bkw-heading-sender">{t("发件人")}</span><span className="bkw-heading-workflow">{t("处理方案")}</span><span>{t("状态")}</span><span className="bkw-heading-time">{t("时间")}</span><span className="bkw-heading-arrow" />
                   </div>}
                   {tasks.length ? (
                     tasks.map((item) => (
                       <button
                         key={item.id}
-                        className={`bkw-task-row ${tab === "all" ? "bkw-table-row" : ""} ${selected === item.id ? "selected" : ""}`}
+                        className={`bkw-task-row bkw-table-row ${selected === item.id ? "selected" : ""}`}
                         onClick={() => choose(item.id)}
                         aria-pressed={selected === item.id}
                       >
-                        {tab === "all" ? <>
+                        <>
                           <span className="bkw-table-title"><strong>{item.subject || (item.title === "无主题邮件" ? t("无主题邮件") : item.title) || t("无主题邮件")}</strong><span>{nextStep(item.status)}</span></span>
                           <span className="bkw-table-sender">{item.from}</span>
+                          <span className={`bkw-table-workflow ${!item.ruleName ? "unmatched" : ""}`} title={item.ruleName || t("尚未匹配方案")}><span className="bkw-table-workflow-label">{t("处理方案")}{": "}</span>{item.ruleName || t("尚未匹配方案")}</span>
                           <Badge status={item.status} partial={item.status === "sent" && !!item.draft?.receipt?.rejected?.length} />
                           <time>{date(item.receivedAt)}</time>
                           <Icon name="arrow" size={14} />
-                        </> : <>
-                        <div className="bkw-row-top">
-                          <Badge
-                            status={item.status}
-                            partial={
-                              item.status === "sent" &&
-                              !!item.draft?.receipt?.rejected?.length
-                            }
-                          />
-                          <time>{date(item.receivedAt)}</time>
-                        </div>
-                        <h3>{item.subject || (item.title === "无主题邮件" ? t("无主题邮件") : item.title) || t("无主题邮件")}</h3>
-                        <div className="bkw-sender">{item.from}</div>
-                        <p>{nextStep(item.status)}</p>
-                        <div className="bkw-row-bottom">
-                          <span>{item.ruleName || t("未匹配方案")}</span>
-                          <Icon name="arrow" size={14} />
-                        </div>
-                        </>}
+                        </>
                       </button>
                     ))
                   ) : (
@@ -1652,7 +1724,6 @@ export function Workbench() {
                   )}
                 </div>
               </section>
-              {tab === "inbox" && taskDetails}
             </div>
           )}
           {tab === "rules" && (
@@ -1679,7 +1750,6 @@ export function Workbench() {
                             <h3 title={rule.name}>{rule.name}</h3>
                             <span className="bkw-rule-output">{rule.output === "reply" ? t("回复草稿") : t("分析报告")}</span>
                           </div>
-                          <p className="bkw-rule-description">{rule.instructions.replace(/\s+/g, " ")}</p>
                           <div className="bkw-rule-meta">
                             <span className="bkw-rule-mailbox" title={mailbox}><Icon name="mail" size={13} /><span>{mailbox}</span></span>
                             <span className="bkw-rule-priority">{t("优先级")}{" "}{rule.priority}</span>
@@ -1735,25 +1805,6 @@ export function Workbench() {
               <div className="bkw-footnote">
                 <Icon name="info" size={15} />
                 {t("多个方案命中时按优先级执行首个。方案更新仅用于后续执行，邮件发送始终需要你确认。")}</div>
-              <details className="bkw-recovery">
-                <summary>{t("高级与恢复")}</summary>
-                <div>
-                  <p>
-                    {t("首次检测会建立当前收件基线，仅处理之后到达的新邮件。若邮箱 UIDVALIDITY 发生变化，可核对邮箱后重建基线。")}</p>
-                  <button
-                    className="bkw-btn"
-                    disabled={!!busy || !accounts.length || !data.health.email}
-                    onClick={() => {
-                      setResetAccount("");
-                      setResetFolder("INBOX");
-                      setResetConfirmed(false);
-                      setResetOpen(true);
-                      setError("");
-                    }}
-                  >
-                    {t("重建收件基线")}</button>
-                </div>
-              </details>
             </>
           )}
           {tab === "logs" && (
@@ -1806,19 +1857,23 @@ export function Workbench() {
         </>
       )}
       <footer className="bkw-statusbar" aria-label={t("工作台服务状态")}>
-        <span><i className={`bkw-dot ${servicesReady ? "good" : ""}`} />{servicesReady ? t("服务已就绪") : t("等待服务连接")}</span>
-        <span>{data.health.lastPoll ? t("最近检测 {0}", date(data.health.lastPoll)) : t("尚未检测邮箱")}</span>
         <button className="bkw-inline-link" onClick={() => switchTab(tab === "logs" ? "inbox" : "logs")}>{tab === "logs" ? t("返回待办") : t("运行记录")}<Icon name="arrow" size={12} /></button>
       </footer>
-      {tab === "all" && allDetailOpen && task && (
-        <Modal title={t("任务详情")} taskDialog onClose={closeTaskDetails}>
+      </div>
+      {taskPageOpen && task && (
+        <DetailPage title={task.subject || task.title || t("无主题邮件")} backLabel={tab === "all" ? t("返回全部任务") : tab === "logs" ? t("返回运行记录") : t("返回待我处理")} onBack={closeTaskDetails} busy={!!busy}
+          subtitle={<><Badge status={task.status} partial={task.status === "sent" && !!task.draft?.receipt?.rejected?.length} /><span>{task.from}</span><span>{date(task.receivedAt)}</span><span>{task.ruleName || t("尚未匹配方案")}</span></>}
+          footer={taskActions}>
           {error && <div className="bkw-alert danger" role="alert"><Icon name="info" /><span>{systemMessage(error)}</span></div>}
           {notice && <div className="bkw-alert success" role="status"><Icon name="check" /><span>{systemMessage(notice)}</span></div>}
+          <div className="bkw-page-mobile-tabs" role="tablist" aria-label={t("任务详情内容")}>
+            {[["result", t("处理结果")], ["source", t("原邮件与附件")], ["history", t("处理记录")]].map(([id, label]) => <button key={id} role="tab" aria-selected={detailTab === id} onClick={() => setDetailTab(id)}>{label}</button>)}
+          </div>
           {taskDetails}
-        </Modal>
+        </DetailPage>
       )}
       {ruleEditor && (
-        <RuleDialog
+        <RulePage
           rule={ruleEditor}
           accounts={accounts}
           tasks={data.tasks}
@@ -1827,14 +1882,18 @@ export function Workbench() {
           error={systemMessage(error)}
           busy={!!busy}
           onClose={() => setRuleEditor(null)}
-          onSave={(rule) =>
-            void perform("saveRule", async () => {
-              await api("saveRule", { rule, revision: rule.revision });
-              await refresh();
-              setRuleEditor(null);
+          notice={systemMessage(notice)}
+          onSave={async (rule) => {
+            let saved: Rule | undefined;
+            await perform("saveRule", async () => {
+              const result = await api<Rule>("saveRule", { rule, revision: rule.revision });
+              saved = { ...result, revision: result.revision ?? (rule.revision || data.revision) + 1 };
+              setRuleEditor(saved);
               setNotice(t("方案已保存"));
-            })
-          }
+              await refresh().catch(() => setError(t("方案已保存，但列表刷新失败。请稍后刷新工作台。")));
+            });
+            return saved;
+          }}
           onDelete={(rule) =>
             void perform("deleteRule", async () => {
               await api("deleteRule", { id: rule.id, revision: rule.revision });
@@ -1846,6 +1905,26 @@ export function Workbench() {
           onTest={async (rule, taskId) => api("testRule", { rule, taskId })}
         />
       )}
+      {rerunPlan && <Modal title={t("按最新方案重新处理")} onClose={() => { if (!busy) setRerunPlan(undefined); }}>
+        <p>{t("将使用“{0}”当前保存的处理要求和工具配置重新分析。", rerunPlan.rule.name)}</p>
+        <p className="bkw-muted">{t("原处理结果保留在处理记录中，原草稿保留，不会自动发送邮件。")}</p>
+        {rerunPlan.text && <p>{t("本次填写的补充信息将一并提交。")}</p>}
+        <div className="bkw-actions bkw-modal-actions"><button className="bkw-btn" disabled={!!busy} onClick={() => setRerunPlan(undefined)}>{t("取消")}</button><button className="bkw-btn primary" disabled={!!busy || !data.health.model} onClick={() => void perform("runRule", async () => {
+          await api("runRule", { id: rerunPlan.taskId, revision: rerunPlan.taskRevision, ruleId: rerunPlan.rule.id, ruleRevision: rerunPlan.configRevision, ...(rerunPlan.text ? { text: rerunPlan.text } : {}) });
+          setRerunPlan(undefined); setSupplement(""); await refresh(); setNotice(t("已按最新方案加入处理队列"));
+        })}>{busy === "runRule" ? t("正在提交…") : t("确认重新处理")}</button></div>
+        {error && <div className="bkw-alert danger" role="alert">{systemMessage(error)}</div>}
+      </Modal>}
+      {sendResolution && <Modal title={sendResolution.outcome === "sent" ? t("确认发送结果") : t("恢复待审核草稿")} onClose={() => { if (!busy) setSendResolution(undefined); }}>
+        <p>{sendResolution.outcome === "sent" ? t("请先核对邮箱发送记录或收件方确认，再将任务标记为已发送。这只是人工核对记录，不会发送邮件。") : t("请先核对邮箱发送记录与相关回执，确认上次邮件未发送后再恢复。恢复后保留原正文和附件，需要重新预览并手动发送。")}</p>
+        <label className="bkw-checkbox"><input type="checkbox" checked={sendChecked} disabled={!!busy} onChange={event => setSendChecked(event.target.checked)} />{sendResolution.outcome === "sent" ? t("我已核对，确认邮件已发送") : t("我已核对，确认邮件未发送")}</label>
+        <div className="bkw-actions bkw-modal-actions"><button className="bkw-btn" disabled={!!busy} onClick={() => setSendResolution(undefined)}>{t("取消")}</button><button className="bkw-btn primary" disabled={!!busy || !sendChecked} onClick={() => void perform("resolveSend", async () => {
+          await api("resolveSend", { ...sendResolution, confirmed: true });
+          setSendResolution(undefined); setSendChecked(false); await refresh();
+          setNotice(sendResolution.outcome === "sent" ? t("已按人工核对结果标记为已发送") : t("已恢复待审核草稿，请修复连接后重新预览发送"));
+        })}>{busy === "resolveSend" ? t("正在提交…") : t("确认核对结果")}</button></div>
+        {error && <div className="bkw-alert danger" role="alert">{systemMessage(error)}</div>}
+      </Modal>}
       {preview && task?.draft && reviewForm && (
         <Modal
           title={t("确认发送邮件")}
@@ -1986,7 +2065,9 @@ export function Workbench() {
                       planId,
                       confirmed: true,
                     });
-                    if (result.draft?.state !== "sent")
+                    if (result.draft?.state === "draft")
+                      setError(t("邮件未提交，草稿已保留。请检查网络与发件服务器配置，修复后重新预览发送。"));
+                    else if (result.draft?.state !== "sent")
                       setError(
                         t("发送结果待核实，请先核对邮箱中的已发送邮件。工作台不会自动重发，请不要重复发送。"),
                       );
@@ -2004,91 +2085,6 @@ export function Workbench() {
             >
               <Icon name="send" size={16} />
               {busy === "send" ? t("正在发送…") : t("确认发送")}
-            </button>
-          </div>
-        </Modal>
-      )}
-      {resetOpen && (
-        <Modal
-          title={t("重建收件基线")}
-          onClose={() => {
-            if (!busy) setResetOpen(false);
-          }}
-        >
-          <p className="bkw-dialog-description">
-            {t("重建后，只会处理此刻之后到达的新邮件。当前文件夹内尚未进入工作台的邮件将跳过，已有任务与历史记录保留。请在确认邮箱变化后使用。")}</p>
-          <Field label={t("邮箱账号")}>
-            <select
-              required
-              value={resetAccount}
-              onChange={(e) => {
-                setResetAccount(e.target.value);
-                setResetFolder(accounts.find(account => account.id === e.target.value)?.inboxFolder || "INBOX");
-                setResetConfirmed(false);
-              }}
-            >
-              <option value="">{t("请选择邮箱账号")}</option>
-              {accounts.map((account) => (
-                <option key={account.id} value={account.id}>
-                  {account.label}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label={t("邮件文件夹")}>
-            <FolderPicker
-              account={resetAccount}
-              ready={!!resetAccount}
-              value={resetFolder}
-              defaultFolder={accounts.find(account => account.id === resetAccount)?.inboxFolder || "INBOX"}
-              onChange={(folder) => {
-                setResetFolder(folder);
-                setResetConfirmed(false);
-              }}
-            />
-          </Field>
-          <label className="bkw-checkbox">
-            <input
-              type="checkbox"
-              checked={resetConfirmed}
-              onChange={(e) => setResetConfirmed(e.target.checked)}
-            />
-            {t("我已核对邮箱，确认跳过当前文件夹的已有邮件")}</label>
-          {error && (
-            <div className="bkw-alert danger" role="alert">
-              <Icon name="info" />
-              <span>{systemMessage(error)}</span>
-            </div>
-          )}
-          <div className="bkw-dialog-actions">
-            <button
-              className="bkw-btn"
-              disabled={!!busy}
-              onClick={() => setResetOpen(false)}
-            >
-              {t("取消")}</button>
-            <button
-              className="bkw-btn primary"
-              disabled={
-                !!busy ||
-                !resetConfirmed ||
-                !resetAccount ||
-                !resetFolder.trim()
-              }
-              onClick={() =>
-                void perform("resetBaseline", async () => {
-                  await api("resetBaseline", {
-                    account: resetAccount,
-                    folder: resetFolder.trim(),
-                    confirmed: true,
-                  });
-                  await refresh();
-                  setResetOpen(false);
-                  setNotice(t("收件基线已重建，后续新邮件将按方案处理"));
-                })
-              }
-            >
-              {busy === "resetBaseline" ? t("正在重建…") : t("确认重建基线")}
             </button>
           </div>
         </Modal>
@@ -2122,6 +2118,7 @@ export function Workbench() {
 
 function ReceiptPanel({ draft }: { draft?: Draft }) {
   const receipt = draft?.receipt;
+  if (!receipt && draft?.state === "sent" && draft.sendChecks?.at(-1)?.outcome === "sent") return <div className="bkw-alert success"><Icon name="check" /><span>{t("已由用户核对确认发送。这是人工核对记录，系统没有生成 SMTP 回执。")}</span></div>;
   if (!receipt)
     return (
       <div className="bkw-alert neutral">
@@ -2170,18 +2167,50 @@ function ReceiptPanel({ draft }: { draft?: Draft }) {
   );
 }
 
+function AutoTextarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const resize = () => { element.style.height = "auto"; element.style.height = `${element.scrollHeight + 2}px`; };
+    resize();
+    let width = element.clientWidth;
+    const observer = new ResizeObserver(() => { if (element.clientWidth !== width) { width = element.clientWidth; resize(); } });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [props.value]);
+  return <textarea {...props} ref={ref} style={{ ...props.style, resize: "none", overflow: "hidden" }} />;
+}
+
+function DetailPage({ title, backLabel, onBack, busy, subtitle, actions, feedback, footer, children }: {
+  title: string; backLabel: string; onBack: () => void; busy?: boolean; subtitle?: React.ReactNode;
+  actions?: React.ReactNode; feedback?: React.ReactNode; footer?: React.ReactNode; children: React.ReactNode;
+}) {
+  const back = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    back.current?.focus({ preventScroll: true });
+    return () => { if (previous?.isConnected) previous.focus({ preventScroll: true }); };
+  }, []);
+  return <section className="bkw-page" aria-label={title}>
+    <header className="bkw-page-header">
+      <div className="bkw-page-heading"><h1 aria-label={title}><button ref={back} type="button" className="bkw-page-back" aria-label={backLabel} title={backLabel} onClick={onBack} disabled={busy}><Icon name="back" size={22} /><span>{title}</span></button></h1>{subtitle && <div className="bkw-page-meta">{subtitle}</div>}</div>
+      {actions && <div className="bkw-page-actions">{actions}</div>}
+    </header>
+    {feedback && <div className="bkw-page-feedback">{feedback}</div>}
+    <div className="bkw-page-content">{children}</div>
+    {footer && <div className="bkw-page-footer">{footer}</div>}
+  </section>;
+}
+
 function Modal({
   title,
   children,
   onClose,
-  wide,
-  taskDialog,
 }: {
   title: string;
   children: React.ReactNode;
   onClose: () => void;
-  wide?: boolean;
-  taskDialog?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null),
     previousFocus = useRef<HTMLElement | null>(null);
@@ -2199,7 +2228,7 @@ function Modal({
     >
       <div
         ref={ref}
-        className={`bkw-dialog ${wide ? "wide" : ""} ${taskDialog ? "bkw-task-dialog" : ""}`}
+        className="bkw-dialog"
         role="dialog"
         aria-modal="true"
         aria-label={title}
@@ -2282,9 +2311,9 @@ function FolderPicker({ account, value, defaultFolder = "INBOX", onChange, ready
   </div>;
 }
 
-function RuleDialog({ rule, accounts, tasks, capabilities, aiReady, error, busy, onClose, onSave, onDelete, onTest }: {
-  capabilities?: Capabilities; aiReady: boolean; error: string; rule: Rule; accounts: Snapshot["accounts"]; tasks: Task[]; busy: boolean;
-  onClose: () => void; onSave: (rule: Rule) => void; onDelete: (rule: Rule) => void; onTest: (rule: Rule, taskId: string) => Promise<unknown>;
+function RulePage({ rule, accounts, tasks, capabilities, aiReady, error, notice, busy, onClose, onSave, onDelete, onTest }: {
+  capabilities?: Capabilities; aiReady: boolean; error: string; notice: string; rule: Rule; accounts: Snapshot["accounts"]; tasks: Task[]; busy: boolean;
+  onClose: () => void; onSave: (rule: Rule) => Promise<Rule | undefined>; onDelete: (rule: Rule) => void; onTest: (rule: Rule, taskId: string) => Promise<unknown>;
 }) {
   const [value, setValue] = useState(rule),
     [description, setDescription] = useState(""),
@@ -2303,11 +2332,18 @@ function RuleDialog({ rule, accounts, tasks, capabilities, aiReady, error, busy,
     [testing, setTesting] = useState(false),
     [deleteConfirm, setDeleteConfirm] = useState(false),
     [toolsText, setToolsText] = useState(rule.tools.join(", "));
-  const changed = JSON.stringify(value) !== JSON.stringify(rule) || !!description;
+  const [savedValue, setSavedValue] = useState(rule);
+  const [editorTab, setEditorTab] = useState<"content" | "settings">("content");
+  const tabsId = React.useId();
+  const formId = React.useId();
+  const formRef = useRef<HTMLFormElement>(null);
+  const savePending = useRef(false);
+  const [saving, setSaving] = useState(false), [saveSuccess, setSaveSuccess] = useState(false), [validationError, setValidationError] = useState("");
+  const changed = JSON.stringify(value) !== JSON.stringify(savedValue) || !!description;
   const optimizationRequest = useRef<AbortController>();
   const instructionsId = React.useId();
   useEffect(() => () => { optimizationRequest.current?.abort(); }, []);
-  const locked = busy || testing || generating || optimizing;
+  const locked = busy || testing || generating || optimizing || saving;
   useEffect(() => {
     if (!changed) return;
     const before = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
@@ -2315,7 +2351,7 @@ function RuleDialog({ rule, accounts, tasks, capabilities, aiReady, error, busy,
     return () => window.removeEventListener("beforeunload", before);
   }, [changed]);
   const close = () => { if (!locked && (!changed || window.confirm(t("方案有尚未保存的修改，确认放弃？")))) onClose(); };
-  const patch = (partial: Partial<Rule>) => { setValue({ ...value, ...partial }); setTestResult(""); setTestOutcome(undefined); if (partial.instructions !== undefined) { setOptimization(undefined); setOptimizationError(""); } };
+  const patch = (partial: Partial<Rule>) => { setValue({ ...value, ...partial }); setSaveSuccess(false); setValidationError(""); setTestResult(""); setTestOutcome(undefined); if (partial.instructions !== undefined) { setOptimization(undefined); setOptimizationError(""); } };
   const match = (partial: Partial<Rule["match"]>) => patch({ match: { ...value.match, ...partial } });
   const optimize = async () => {
     if (locked || optimizationRequest.current || value.instructions.trim().length < 5 || !aiReady) return;
@@ -2333,32 +2369,55 @@ function RuleDialog({ rule, accounts, tasks, capabilities, aiReady, error, busy,
     setGenerating(true); setAiError(""); setTestResult(""); setTestOutcome(undefined); setOptimization(undefined); setOptimizationError("");
     try {
       const result = await api<{ rule: Rule; warnings: string[] }>("generateRule", { description, account: value.account, folder: value.folder, uiLanguage: t("任务工作台") === "Task workbench" ? "en" : "zh" });
-      setValue({ ...result.rule, id: rule.id, revision: rule.revision, enabled: value.enabled, priority: value.priority, maxRetries: value.maxRetries });
+      setValue({ ...result.rule, id: value.id, revision: value.revision, enabled: value.enabled, priority: value.priority, maxRetries: value.maxRetries });
+      setSaveSuccess(false); setValidationError("");
       setToolsText(result.rule.tools.join(", "));
       setWarnings(result.warnings); setGenerated(true); setShowEditor(true); setAiOpen(false);
     } catch (error) { setAiError(errorMessage(error)); }
     finally { setGenerating(false); }
   };
   const broad = !value.match.from && !value.match.subject && !value.match.hasAttachments;
-  return <Modal title={rule.id ? t("编辑 AI 处理方案") : t("新建 AI 处理方案")} onClose={close} wide>
-    <form onSubmit={event => { event.preventDefault(); if (!locked && showEditor) onSave(value); }}>
+  return <DetailPage title={rule.id ? t("编辑 AI 处理方案") : t("新建 AI 处理方案")} backLabel={t("返回 AI 处理方案")} onBack={close} busy={locked}
+    feedback={validationError || error ? <div className="bkw-alert danger" role="alert"><Icon name="info" /><span>{validationError || systemMessage(error)}</span></div> : saveSuccess ? <div className="bkw-alert success" role="status"><Icon name="check" /><span>{notice || t("方案已保存")}</span></div> : undefined}
+    actions={showEditor && <button className="bkw-btn primary" type="button" disabled={locked} onClick={() => formRef.current?.requestSubmit()}>{saving || busy ? t("保存中…") : t("保存方案")}</button>}>
+    <form ref={formRef} id={formId} className="bkw-rule-page-form" noValidate onSubmit={async event => {
+      event.preventDefault();
+      if (!locked && !savePending.current && showEditor) {
+        // Reveal invalid fields before native validation tries to focus them.
+        const invalid = event.currentTarget.querySelector<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("input:invalid, textarea:invalid, select:invalid");
+        if (invalid) {
+          setSaveSuccess(false); setValidationError(t("请检查标出的必填项、文本长度或数值范围。"));
+          const panel = invalid.closest<HTMLElement>("[role=tabpanel]");
+          setEditorTab(panel?.dataset.editorTab === "settings" ? "settings" : "content");
+          for (let parent = invalid.parentElement; parent; parent = parent.parentElement) {
+            if (parent instanceof HTMLDetailsElement) parent.open = true;
+          }
+          requestAnimationFrame(() => { invalid.focus(); invalid.reportValidity(); });
+          return;
+        }
+        savePending.current = true; setSaving(true); setSaveSuccess(false); setValidationError("");
+        try {
+          const saved = await onSave(value);
+          if (saved) { setValue(saved); setSavedValue(saved); setDescription(""); setDeleteConfirm(false); setGenerated(false); setOptimization(undefined); setAiOpen(false); setSaveSuccess(true); }
+        } catch (error) { setValidationError(errorMessage(error)); }
+        finally { savePending.current = false; setSaving(false); }
+      }
+    }}>
+      <div className="bkw-rule-tabs" role="tablist" aria-label={t("方案编辑")}>
+        {([ ["content", t("方案内容")], ["settings", t("适用范围与选项")] ] as const).map(([tab, label], index) =>
+          <button key={tab} id={`${tabsId}-${tab}-tab`} type="button" role="tab" aria-selected={editorTab === tab} aria-controls={`${tabsId}-${tab}-panel`} tabIndex={editorTab === tab ? 0 : -1}
+            onClick={() => setEditorTab(tab)} onKeyDown={event => {
+              if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+              event.preventDefault();
+              const next = event.key === "Home" ? "content" : event.key === "End" ? "settings" : index === 0 ? "settings" : "content";
+              setEditorTab(next);
+              document.getElementById(`${tabsId}-${next}-tab`)?.focus();
+            }}>{label}</button>)}
+      </div>
       <fieldset disabled={locked}>
         <div className="bkw-rule-editor">
-          {error && <div className="bkw-alert danger" role="alert"><Icon name="info" /><span>{systemMessage(error)}</span></div>}
-          <div className="bkw-scope-fields">
-            <div className="bkw-form-grid">
-              <Field label={t("适用邮箱")}>
-                <select value={value.account} onChange={event => patch({ account: event.target.value, folder: accounts.find(account => account.id === event.target.value)?.inboxFolder || "INBOX" })}>
-                  {accounts.map(account => <option key={account.id} value={account.id}>{account.label}</option>)}
-                  <option value="">{t("全部邮箱")}</option>
-                </select>
-              </Field>
-              <Field label={t("邮件文件夹")}>
-                <FolderPicker account={value.account} value={value.folder} ready={!!accounts.length} defaultFolder={accounts.find(account => account.id === value.account)?.inboxFolder || "INBOX"} onChange={folder => patch({ folder })} />
-              </Field>
-            </div>
-          </div>
-          <section className="bkw-ai-builder">
+          <div className="bkw-rule-main" role="tabpanel" id={`${tabsId}-content-panel`} aria-labelledby={`${tabsId}-content-tab`} data-editor-tab="content" hidden={editorTab !== "content"}>
+          <section className={`bkw-ai-builder ${aiOpen ? "open" : "collapsed"}`}>
             <div className="bkw-ai-heading"><span className="bkw-ai-badge">AI</span><div><h3>{t("一句话创建方案")}</h3><p>{t("说清楚哪些邮件、如何处理，AI 帮你整理成可核对的方案。")}</p></div>
               {(rule.id || generated) && <button type="button" className="bkw-inline-link" onClick={() => setAiOpen(!aiOpen)}>{aiOpen ? t("收起") : t("修改描述")}</button>}
             </div>
@@ -2381,16 +2440,16 @@ function RuleDialog({ rule, accounts, tasks, capabilities, aiReady, error, busy,
           {!showEditor && <button type="button" className="bkw-inline-link bkw-manual-entry" onClick={() => setShowEditor(true)}>{t("手动填写方案")}<Icon name="arrow" size={14} /></button>}
           {showEditor && <>
             {generated && <div className="bkw-suggestion-status" role="status"><Icon name="check" size={17} /><span>{t("方案草稿已生成，请核对邮件范围与处理要求后保存。")}</span></div>}
-            {!!warnings.length && <div className="bkw-suggestion-warnings"><strong>{t("需要你核对")}</strong><ul>{warnings.map((warning, index) => <li key={index}>{systemMessage(warning)}</li>)}</ul></div>}
+
             <div>
               <span className="bkw-step-label">{t("方案内容")}</span>
               <div className="bkw-form-grid">
                 <Field label={t("方案名称")}><input required maxLength={100} value={value.name} onChange={event => patch({ name: event.target.value })} placeholder={t("例如：客户询价回复")} /></Field>
-                <Field label={t("生成内容")}><select value={value.output} onChange={event => patch({ output: event.target.value as Rule["output"] })}><option value="reply">{t("处理摘要 + 回复草稿")}</option><option value="report">{t("分析报告")}</option></select></Field>
+
               </div>
               <div className="bkw-field bkw-instruction-editor" aria-busy={optimizing}>
                 <div className="bkw-instruction-heading"><label htmlFor={instructionsId}>{t("处理要求")}</label><button type="button" className="bkw-btn bkw-optimize-btn" disabled={!aiReady || value.instructions.trim().length < 5} onClick={() => void optimize()}>{optimizing ? t("正在优化…") : t("AI 优化")}</button></div>
-                <textarea id={instructionsId} required minLength={5} maxLength={16000} className="bkw-instructions" value={value.instructions} onChange={event => patch({ instructions: event.target.value })} placeholder={t("说明收到邮件后需要做什么，以及缺少信息时如何处理。")} />
+                <AutoTextarea id={instructionsId} required minLength={5} maxLength={16000} className="bkw-instructions" value={value.instructions} onChange={event => patch({ instructions: event.target.value })} placeholder={t("说明收到邮件后需要做什么，以及缺少信息时如何处理。")} />
                 <small>{aiReady ? t("可调整处理步骤、语言、语气与署名。AI 优化后由你确认采用。") : t("配置 DSH 默认模型后可使用 AI 优化，也可手动修改。")}</small>
                 {optimizing && <small role="status">{t("正在整理处理要求，请稍候…")}</small>}
                 {optimizationError && <div className="bkw-alert danger" role="alert"><span>{systemMessage(optimizationError)}</span></div>}
@@ -2399,7 +2458,27 @@ function RuleDialog({ rule, accounts, tasks, capabilities, aiReady, error, busy,
                   <div className="bkw-ai-actions"><small>{t("核对原有条件与限制，采用后仍需保存方案。")}</small><div className="bkw-actions"><button type="button" className="bkw-btn" onClick={() => setOptimization(undefined)}>{t("保留原文")}</button><button type="button" className="bkw-btn primary" onClick={() => patch({ instructions: optimization.instructions })}>{t("采用优化")}</button></div></div>
                 </section>}
               </div>
-              <div className="bkw-scope-summary"><Icon name="mail" size={16} /><span>{t("匹配范围：")}{broad ? t("此文件夹中的全部新邮件") : [value.match.from && t("发件人包含 {0}", value.match.from), value.match.subject && t("主题包含 {0}", value.match.subject), value.match.hasAttachments && t("带附件")].filter(Boolean).join(value.match.mode === "all" ? t("，且 ") : t("，或 "))}{t("。")}{value.output === "reply" ? t("生成后由你审核并发送。") : t("生成后在任务中查看报告。")}</span></div>
+
+            </div>
+          </>}
+          </div>
+          <div className="bkw-rule-settings" role="tabpanel" id={`${tabsId}-settings-panel`} aria-labelledby={`${tabsId}-settings-tab`} data-editor-tab="settings" hidden={editorTab !== "settings"}>
+            <section className="bkw-rule-scope-card"><h2>{t("适用范围")}</h2>          <div className="bkw-scope-fields">
+            <div className="bkw-form-grid">
+              <Field label={t("适用邮箱")}>
+                <select value={value.account} onChange={event => patch({ account: event.target.value, folder: accounts.find(account => account.id === event.target.value)?.inboxFolder || "INBOX" })}>
+                  {accounts.map(account => <option key={account.id} value={account.id}>{account.label}</option>)}
+                  <option value="">{t("全部邮箱")}</option>
+                </select>
+              </Field>
+              <Field label={t("邮件文件夹")}>
+                <FolderPicker account={value.account} value={value.folder} ready={!!accounts.length} defaultFolder={accounts.find(account => account.id === value.account)?.inboxFolder || "INBOX"} onChange={folder => patch({ folder })} />
+              </Field>
+            </div>
+          </div>
+
+            {showEditor && <>
+                <Field label={t("生成内容")}><select value={value.output} onChange={event => patch({ output: event.target.value as Rule["output"] })}><option value="reply">{t("处理摘要 + 回复草稿")}</option><option value="report">{t("分析报告")}</option></select></Field>              <div className="bkw-scope-summary"><Icon name="mail" size={16} /><span>{t("匹配范围：")}{broad ? t("此文件夹中的全部新邮件") : [value.match.from && t("发件人包含 {0}", value.match.from), value.match.subject && t("主题包含 {0}", value.match.subject), value.match.hasAttachments && t("带附件")].filter(Boolean).join(value.match.mode === "all" ? t("，且 ") : t("，或 "))}{t("。")}{value.output === "reply" ? t("生成后由你审核并发送。") : t("生成后在任务中查看报告。")}</span></div>
               <div className="bkw-plan-capability-summary">
                 <span>{t("处理能力")}</span>
                 {!(value.skills?.length || value.tools.length) ? <strong>{t("邮件正文分析")}</strong> : <>
@@ -2409,8 +2488,10 @@ function RuleDialog({ rule, accounts, tasks, capabilities, aiReady, error, busy,
                 <small>{t("可在高级设置中调整")}</small>
               </div>
               <label className="bkw-checkbox"><input type="checkbox" checked={value.enabled} onChange={event => patch({ enabled: event.target.checked })} />{t("保存后启用方案")}</label>
-            </div>
-            <details className="bkw-advanced bkw-plan-advanced">
+            </>}
+            </section>
+            {showEditor && <>
+              <section className="bkw-rule-options-card"><h2>{t("更多选项")}</h2>            <details className="bkw-advanced bkw-plan-advanced">
               <summary>{t("高级设置 · 筛选条件、能力与执行选项")}</summary>
               <div className="bkw-form-grid">
                 <Field label={t("发件人或域名")} hint={t("字符串包含，留空不限")}><input maxLength={1000} value={value.match.from} onChange={event => match({ from: event.target.value })} placeholder={t("例如：@example.com")} /></Field>
@@ -2424,16 +2505,15 @@ function RuleDialog({ rule, accounts, tasks, capabilities, aiReady, error, busy,
               <details className="bkw-advanced"><summary>{t("填写准确工具名称")}</summary><Field label={t("允许调用的工具")} hint={t("逗号分隔，仅允许已安装的读取与查询工具。")}><input value={toolsText} onChange={event => { setToolsText(event.target.value); patch({ tools: event.target.value.split(",").map(item => item.trim()).filter(Boolean) }); }} placeholder={t("例如：read_document")} /></Field></details>
               <div className="bkw-test-panel"><h3>{t("测试匹配")}</h3><p>{t("选择已有邮件检查范围，不执行处理或发送邮件。")}</p><div className="bkw-actions"><select aria-label={t("选择用于测试的邮件")} value={testTask} onChange={event => setTestTask(event.target.value)}><option value="">{tasks.length ? t("选择一封邮件") : t("检测到邮件后即可测试")}</option>{tasks.slice(0, 100).map(task => <option key={task.id} value={task.id}>{task.subject || task.title}</option>)}</select><button type="button" className="bkw-btn" disabled={!testTask} onClick={async () => { setTesting(true); setTestResult(""); setTestOutcome(undefined); try { const result = await onTest(value, testTask) as { matched: boolean; note?: string }; setTestOutcome(result); } catch (error) { setTestResult(errorMessage(error)); } finally { setTesting(false); } }}>{testing ? t("测试中…") : t("测试匹配")}</button></div>{testOutcome && <div className="bkw-test-result" role="status">{t("{0}。{1}", testOutcome.matched ? t("匹配成功") : t("未命中当前方案"), systemMessage(testOutcome.note || ""))}</div>}{testResult && <div className="bkw-test-result" role="status">{systemMessage(testResult)}</div>}</div>
             </details>
-          </>}
-        </div>
-        <div className="bkw-dialog-actions">
-          {rule.id && <button type="button" className="bkw-btn danger" onClick={() => { if (deleteConfirm) onDelete(rule); else setDeleteConfirm(true); }}>{deleteConfirm ? t("再次点击确认删除") : t("删除方案")}</button>}
-          <span className="bkw-spacer" /><button type="button" className="bkw-btn" onClick={close}>{t("取消")}</button>
-          {showEditor && <button className="bkw-btn primary" type="submit">{busy ? t("保存中…") : t("保存方案")}</button>}
+</section>
+              {!!warnings.length && <details className="bkw-suggestion-warnings"><summary>{t("需要核对 {0} 项", warnings.length)}</summary><p>{t("请核对实际匹配范围与可用能力后保存。")}</p><ul>{warnings.map((warning, index) => <li key={index}>{systemMessage(warning)}</li>)}</ul></details>}
+            </>}
+            {rule.id && <div className="bkw-rule-delete"><button type="button" className="bkw-btn danger" onClick={() => { if (deleteConfirm) onDelete(rule); else setDeleteConfirm(true); }}>{deleteConfirm ? t("再次点击确认删除") : t("删除方案")}</button></div>}
+          </div>
         </div>
       </fieldset>
     </form>
-  </Modal>;
+  </DetailPage>;
 }
 
 

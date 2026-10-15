@@ -10,6 +10,8 @@ export interface Task {
   id: string; revision: number; title: string; account: string; status: Status; from: string; subject: string; body: string
   receivedAt: string; updatedAt: string; ruleId?: string; ruleName?: string; rule?: Rule
   source: Source; summary?: string; error?: string; draftId?: string; draft?: any; sessionId?: string; hasAttachments?: boolean; mailLoaded?: boolean
+  informationGaps?: string; needsInfoKind?: 'information' | 'attachments'
+  bodyHtml?: string; to?: string; cc?: string; mailDate?: string; mailSize?: number
   messageId?: string; references?: string; replyTo?: string; attachments: { filename: string; size: number; part?: string; contentType?: string; localPath?: string }[]
   history: { at: string; message: string }[]; attempts: number; nextAttemptAt?: string; supplement?: string; workspace?: string; prepareKey?: string
 }
@@ -34,9 +36,10 @@ export interface EmailService {
     update(id: string, revision: number, fields: Record<string, unknown>, signal?: AbortSignal): Promise<any>
     preview(id: string, revision: number, signal?: AbortSignal): Promise<any>
     send(id: string, previewId: string, confirmed: boolean, signal?: AbortSignal): Promise<any>
+    resolveSend?(id: string, revision: number, outcome: 'sent' | 'not_sent', confirmed: boolean, signal?: AbortSignal): Promise<any>
   }
 }
-export interface AgentOutput { summary: string; needsInfo?: string; subject?: string; text?: string }
+export interface AgentOutput { summary: string; needsInfo?: string; needsInfoKind?: 'information' | 'attachments'; informationGaps?: string; subject?: string; text?: string }
 export interface AgentRunner { available(): boolean; run(task: Task, rule: Rule, signal: AbortSignal): Promise<{ output: AgentOutput; sessionId?: string }> }
 export interface RuleSuggestion { rule: Rule; warnings: string[] }
 export type RuleAssistant = (input: { description: string; account: string; folder: string; uiLanguage?: 'zh' | 'en' }, signal: AbortSignal) => Promise<RuleSuggestion>

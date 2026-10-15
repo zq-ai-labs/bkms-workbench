@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { Engine } from './engine.js'
+import { originalMailFields } from './original-mail.js'
 import { matches, validateRule } from './rules.js'
 import { findTask, log, touch } from './store.js'
 import { WorkbenchError, type Task, type State, type RuleAssistant, type InstructionOptimizer } from './types.js'
@@ -38,7 +39,8 @@ export class WorkbenchApi {
     const state = await this.engine.store.read()
     let accounts: { id: string; label: string; inboxFolder: string }[] = []
     let providerError: string | undefined
-    try { accounts = (await this.engine.email().accounts()).map(a => ({ id: a.id, label: a.address || a.id, inboxFolder: a.inboxFolder || 'INBOX' })) } catch (error) { providerError = this.engine.safe(error) }
+    let sendRecoveryAvailable = false
+    try { const email = this.engine.email(); sendRecoveryAvailable = typeof email.drafts.resolveSend === 'function'; accounts = (await email.accounts()).map(a => ({ id: a.id, label: a.address || a.id, inboxFolder: a.inboxFolder || 'INBOX' })) } catch (error) { providerError = this.engine.safe(error) }
     // The provider's draft file is loaded once for the whole workbench. Loading
     // it per task becomes quadratic as the task history grows.
     let draftMap: Map<string, any> | undefined
@@ -54,12 +56,15 @@ export class WorkbenchApi {
         draft = draftMap ? draftMap.get(task.draftId) : await this.engine.email().drafts.get(task.draftId)
         if (!draft) throw new WorkbenchError('关联的邮件草稿无法读取或已移除；请核对邮件存储，任务资料仍保留。', 'draft-unavailable', 503)
         // A receipt saved by the mail provider is authoritative after a disconnect/restart.
-        if (['sending', 'uncertain', 'review'].includes(task.status) && ['sent', 'uncertain'].includes(draft.state) && !this.busy.has(task.id)) {
-          await this.engine.store.mutate(doc => { const current = findTask(doc, task.id); if (['sending', 'uncertain', 'review'].includes(current.status)) { current.status = draft.state; current.error = draft.error; touch(current, draft.state === 'sent' ? '已核对邮件发送记录。' : '发送结果待核实，请先核对邮箱。'); Object.assign(task, current) } })
+        const restoredDraft = draft.state === 'draft' && (draft.sendFailure === 'not_submitted' || draft.sendChecks?.at(-1)?.outcome === 'not_sent')
+        const reconciledStatus = restoredDraft ? 'review' : draft.state
+        if (['sending', 'uncertain', 'review'].includes(task.status) && (['sent', 'uncertain'].includes(draft.state) || (task.status !== 'review' && restoredDraft)) && (task.status !== reconciledStatus || task.error !== draft.error) && !this.busy.has(task.id)) {
+          await this.engine.store.mutate(doc => { const current = findTask(doc, task.id); if (['sending', 'uncertain', 'review'].includes(current.status)) { current.status = restoredDraft ? 'review' : draft.state; current.error = draft.error; touch(current, restoredDraft ? '已恢复为待审核草稿，请重新预览后手动发送。' : draft.state === 'sent' ? '已核对邮件发送记录。' : '发送结果待核实，请先核对邮箱。'); Object.assign(task, current) } })
         }
       } catch (error) { providerError ??= this.engine.safe(error) }
       const { workspace, rule, ...safe } = task
-      return { ...safe, attachments: task.attachments.map(({ localPath, ...file }) => file), draft: draft ? { ...draft, sourceKey: undefined, attachments: draft.attachments.map(({ id, filename }: any) => ({ id, filename })) } : undefined }
+      const latestRule = state.rules.find(rule => rule.id === task.ruleId)
+      return { ...safe, canResolveSend: task.status === 'uncertain' && draft?.state === 'uncertain' && sendRecoveryAvailable, outputKind: task.rule?.output, ruleUpdated: !!latestRule && !!task.rule && JSON.stringify(latestRule) !== JSON.stringify(task.rule), attachments: task.attachments.map(({ localPath, ...file }) => file), draft: draft ? { ...draft, sourceKey: undefined, attachments: draft.attachments.map(({ id, filename }: any) => ({ id, filename })) } : undefined }
     }))
     const health = this.engine.health()
     return { tasks, rules: state.rules, revision: state.configRevision, settings: state.settings, logs: state.logs.slice().reverse(), accounts, health: { ...health, error: providerError || health.error }, capabilities: await this.engine.capabilities() }
@@ -72,6 +77,14 @@ export class WorkbenchApi {
       const state = await this.engine.store.read()
       // Global navigation and reminders do not need mailbox access or draft bodies.
       return { revision: state.configRevision, stateRevision: state.revision, settings: state.settings, attention: state.tasks.filter(task => ['review', 'needs_info', 'failed', 'uncertain'].includes(task.status)).map(task => ({ id: task.id, status: task.status })) }
+    }
+    if (body.action === 'mailSettings') {
+      const state = await this.engine.store.read()
+      const health = this.engine.health()
+      let accounts: { id: string; label: string; inboxFolder: string }[] = []
+      try { accounts = (await this.engine.email().accounts()).map(account => ({ id: account.id, label: account.address || account.id, inboxFolder: account.inboxFolder || 'INBOX' })) }
+      catch (error) { health.error = this.engine.safe(error) }
+      return { revision: state.configRevision, accounts, health }
     }
     if (body.action === 'folders') {
       const email = this.engine.email(), accounts = await email.accounts()
@@ -122,7 +135,7 @@ export class WorkbenchApi {
     }
     if (body.action === 'saveRule') {
       const rule = validateRule(body.rule)
-      return this.engine.store.mutate(state => { configCheck(state, body.revision); const index = state.rules.findIndex(r => r.id === rule.id); if (index < 0) state.rules.push(rule); else state.rules[index] = rule; state.configRevision++; log(state, `已保存规则「${rule.name}」。`); return rule })
+      return this.engine.store.mutate(state => { configCheck(state, body.revision); const index = state.rules.findIndex(r => r.id === rule.id); if (index < 0) state.rules.push(rule); else state.rules[index] = rule; state.configRevision++; log(state, `已保存规则「${rule.name}」。`); return { ...rule, revision: state.configRevision } })
     }
     if (body.action === 'deleteRule') return this.engine.store.mutate(state => { configCheck(state, body.revision); const rule = state.rules.find(r => r.id === body.id); if (!rule) throw new WorkbenchError('规则不存在。'); state.rules = state.rules.filter(r => r.id !== body.id); state.configRevision++; log(state, `已删除规则「${rule.name}」，历史任务保留原规则快照。`); return { deleted: true } })
     if (body.action === 'testRule') {
@@ -131,9 +144,10 @@ export class WorkbenchApi {
     }
     if (body.action === 'poll') return this.engine.poll()
     if (body.action === 'resetBaseline') {
+      configCheck(await this.engine.store.read(), body.revision)
       if (body.confirmed !== true || typeof body.account !== 'string' || typeof body.folder !== 'string') throw new WorkbenchError('重建基线需要明确确认，当前已有邮件不会重新处理。')
       const baseline = await this.engine.email().scan({ account: body.account, folder: body.folder }, signal)
-      return this.engine.store.mutate(state => { state.cursors[JSON.stringify([body.account, body.folder])] = baseline.cursor; log(state, `${body.account} / ${body.folder} 已人工确认重建基线。`); return baseline.cursor })
+      return this.engine.store.mutate(state => { configCheck(state, body.revision); state.cursors[JSON.stringify([body.account, body.folder])] = baseline.cursor; log(state, `${body.account} / ${body.folder} 已人工确认重建基线。`); return baseline.cursor })
     }
     const id = typeof body.id === 'string' ? body.id : ''
     return this.exclusive(id, async () => {
@@ -144,6 +158,7 @@ export class WorkbenchApi {
         return this.engine.store.mutate(state => {
           const item = findTask(state, id, body.revision)
           item.body = read.text || ''; item.mailLoaded = true; item.attachments = read.attachments || []; item.messageId = read.messageId; item.references = read.references
+          Object.assign(item, originalMailFields(read))
           touch(item, '已人工读取原邮件。')
           return { ...item, rule: undefined, workspace: undefined, attachments: item.attachments.map(({ localPath, ...file }) => file) }
         })
@@ -153,9 +168,16 @@ export class WorkbenchApi {
         if (task.draftId) { const draft = await this.engine.email().drafts.get(task.draftId); if (draft.state !== 'draft') throw new WorkbenchError('草稿已提交或结果待核实，不能重新处理。', 'state', 409) }
         return this.engine.store.mutate(state => {
           const item = findTask(state, id, body.revision)
-          if (body.action === 'runRule') { const rule = state.rules.find(r => r.id === body.ruleId); if (!rule) throw new WorkbenchError('请选择已有规则。'); item.rule = structuredClone(rule); item.ruleId = rule.id; item.ruleName = rule.name }
+          if (body.action === 'runRule') { if (body.ruleRevision !== undefined) configCheck(state, body.ruleRevision); const rule = state.rules.find(r => r.id === body.ruleId); if (!rule) throw new WorkbenchError('请选择已有规则。'); item.rule = structuredClone(rule); item.ruleId = rule.id; item.ruleName = rule.name }
           if (!item.rule) throw new WorkbenchError('请先为任务选择处理规则。')
-          if (body.action === 'supplement') { if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 16000) throw new WorkbenchError('请填写不超过 16000 字的补充信息。'); item.supplement = body.text.trim() }
+          if (body.action === 'supplement' || (body.action === 'runRule' && body.text !== undefined)) {
+            if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 16000) throw new WorkbenchError('请填写不超过 16000 字的补充信息。')
+            const text = [item.supplement, body.text.trim()].filter(Boolean).join('\n\n')
+            if (text.length > 16000) throw new WorkbenchError('累计补充信息超过 16000 字，请整理后重新提交。')
+            item.supplement = text
+          }
+          if (item.summary) item.history.push({ at: new Date().toISOString(), message: `重新处理前的结果：\n${item.summary}${item.informationGaps ? '\n待人工核实：\n' + item.informationGaps : ''}${item.error ? '\n阻塞原因：\n' + item.error : ''}` })
+          delete item.needsInfoKind
           item.status = 'queued'; item.attempts = 0; item.prepareKey = randomUUID(); delete item.nextAttemptAt; delete item.error; touch(item, '已排队重新处理；原草稿保留，重新生成后关联新草稿。'); log(state, '任务已重新排队。', id); return item
         })
       }
@@ -184,13 +206,31 @@ export class WorkbenchApi {
         await this.engine.store.mutate(state => { const item = findTask(state, id, body.revision); editableTask(item); item.status = 'sending'; touch(item, '人工确认发送。'); log(state, '开始发送审核后的草稿。', id) })
         try {
           const result = await email.drafts.send(task.draftId, body.planId, true, signal)
-          await this.engine.store.mutate(state => { const item = findTask(state, id); item.status = result.draft.state === 'sent' ? 'sent' : 'uncertain'; item.error = result.draft.error; touch(item, item.status === 'sent' ? 'SMTP 已接受邮件，请以邮箱最终投递结果为准。' : '发送结果待核实，不会自动重发。'); log(state, item.status === 'sent' ? '邮件发送已获得 SMTP 回执。' : '发送结果待核实。', id) })
+          await this.engine.store.mutate(state => { const item = findTask(state, id); item.status = result.draft.state === 'sent' ? 'sent' : result.draft.state === 'draft' ? 'review' : 'uncertain'; item.error = result.draft.error; touch(item, item.status === 'review' ? '发送未提交，草稿保留，请修复连接后重新预览发送。' : item.status === 'sent' ? 'SMTP 已接受邮件，请以邮箱最终投递结果为准。' : '发送结果待核实，不会自动重发。'); log(state, item.status === 'review' ? '发送未提交，已保留待审核草稿。' : item.status === 'sent' ? '邮件发送已获得 SMTP 回执。' : '发送结果待核实。', id) })
           return result
         } catch (error) {
           const draft = await email.drafts.get(task.draftId).catch(() => undefined)
           await this.engine.store.mutate(state => { const item = findTask(state, id); item.status = draft?.state === 'draft' ? 'review' : draft?.state === 'sent' ? 'sent' : 'uncertain'; item.error = this.engine.safe(error); touch(item, item.status === 'review' ? '发送校验未通过，邮件未提交。' : '发送记录需核实。'); log(state, item.error!, id, 'error') })
           throw error
         }
+      }
+      if (body.action === 'resolveSend') {
+        if (task.status !== 'uncertain' || !task.draftId || body.confirmed !== true || !['sent', 'not_sent'].includes(body.outcome)) throw new WorkbenchError('请核对邮箱后确认当前待核实任务的发送结果。', 'state', 409)
+        const email = this.engine.email()
+        if (!email.drafts.resolveSend) throw new WorkbenchError('请更新配套邮件插件并重启客户端，以恢复发送待核实任务。', 'provider', 503)
+        const draft = await email.drafts.get(task.draftId)
+        if (draft.revision !== requireRevision(body.draftRevision)) throw new WorkbenchError('草稿已变化，请重新预览。', 'conflict', 409)
+        const resolved = await email.drafts.resolveSend(task.draftId, draft.revision, body.outcome, true, signal)
+        const status = body.outcome === 'sent' ? 'sent' : 'review'
+        if (resolved.state !== (status === 'sent' ? 'sent' : 'draft')) throw new WorkbenchError('邮件服务返回的核对结果无效。')
+        await this.engine.store.mutate(state => {
+          const item = findTask(state, id, body.revision)
+          if (item.error) touch(item, item.error)
+          item.status = status; delete item.error
+          const message = status === 'sent' ? '用户核对邮箱后确认已发送；未生成新的 SMTP 回执。' : '用户核对邮箱后确认未发送；已恢复草稿，需重新预览后手动发送。'
+          touch(item, message); log(state, message, id)
+        })
+        return { draft: resolved }
       }
       throw new WorkbenchError('不支持此操作。')
     })

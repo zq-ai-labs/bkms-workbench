@@ -1,4 +1,15 @@
 {
+  "已恢复为待审核草稿，请重新预览后手动发送。": "Restored as a draft for review. Preview again and send manually.",
+  "发送未提交，草稿保留，请修复连接后重新预览发送。": "The email was not submitted. The draft is preserved. Fix the connection, then preview again before sending.",
+  "发送未提交，已保留待审核草稿。": "The email was not submitted. The draft is retained for review.",
+  "请核对邮箱后确认当前待核实任务的发送结果。": "Check the mailbox and confirm the outcome of the current uncertain send.",
+  "请更新配套邮件插件并重启客户端，以恢复发送待核实任务。": "Update the companion email plugin and restart the client to recover uncertain sends.",
+  "邮件服务返回的核对结果无效。": "The email service returned an invalid verification result.",
+  "用户核对邮箱后确认已发送；未生成新的 SMTP 回执。": "The user checked the mailbox and confirmed sending. No new SMTP receipt was generated.",
+  "用户核对邮箱后确认未发送；已恢复草稿，需重新预览后手动发送。": "The user checked the mailbox and confirmed no send. The draft is restored and requires a fresh preview and manual send.",
+  "SMTP 连接建立前失败，邮件未提交。请检查网络与发件服务器配置后重新预览发送。{0}": "SMTP failed before establishing a connection. The email was not submitted. Check the network and outgoing server settings, then preview again before sending. {0}",
+  "请先核对邮箱，再明确确认发送结果": "Check the mailbox, then explicitly confirm the send outcome",
+  "只有发送待核实的草稿可以核对结果": "Only drafts with uncertain sending outcomes can be verified",
   "自动处理只允许 str_replace_editor 的 view 读取操作。": "Automatic processing only allows the view command of str_replace_editor.",
   "文件工具只能读取当前任务目录，已拒绝越界路径。": "File tools can only read the current task directory. The outside path was blocked.",
   "文件搜索模式不能越过任务目录。": "File search patterns must stay within the task directory.",
@@ -202,5 +213,7 @@
   "AI 正在生成或优化，请稍后再试。": "AI generation or refinement is in progress. Try again shortly.",
   "模型返回的处理要求格式无效。": "The model returned invalid instructions.",
   "AI 未生成有效的处理要求，请重试或手动修改。": "AI did not produce valid instructions. Retry or edit manually.",
-  "请先在 DSH 中配置默认模型，然后使用 AI 优化；也可手动修改。": "Configure the DSH default model to use AI refinement, or edit manually."
+  "请先在 DSH 中配置默认模型，然后使用 AI 优化；也可手动修改。": "Configure the DSH default model to use AI refinement, or edit manually.",
+  "累计补充信息超过 16000 字，请整理后重新提交。": "Additional information exceeds 16000 characters in total. Consolidate it before submitting.",
+  "重新处理前的结果：\n{0}": "Previous result before reprocessing:\n{0}"
 }

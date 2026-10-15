@@ -33,6 +33,7 @@ test('real DSH isolated agent: scoped result, restricted tools, terminal errors 
   let mode = 'result'
   let observed
   let firstCall = true
+  let resultValue = { summary: '已提取客户需求', subject: 'Re: 询价', text: '您好，需求已收到。' }
   function* call(name, values) {
     const args = JSON.stringify(values)
     const id = llm.ToolCallId('result-' + Math.random())
@@ -60,7 +61,7 @@ test('real DSH isolated agent: scoped result, restricted tools, terminal errors 
         firstCall = false
         if (mode === 'edit') yield* call('str_replace_editor', { command: 'create', path: join(directory, 'task1', 'safe.txt') })
         else yield* call('read_document', { file_path: mode === 'outside' ? join(directory, 'outside', 'secret.txt') : mode === 'symlink' ? join(directory, 'task1', 'linked', 'secret.txt') : join(directory, 'task1', 'safe.txt') })
-      } else yield* call(RESULT_TOOL, { summary: '已提取客户需求', subject: 'Re: 询价', text: '您好，需求已收到。' })
+      } else yield* call(RESULT_TOOL, resultValue)
     }
   }
   ctx.llm.registerAdapter(['workbench-test'], new Adapter())
@@ -121,6 +122,21 @@ test('real DSH isolated agent: scoped result, restricted tools, terminal errors 
   const incomplete = await runner.run({ ...task, attachments: manyFiles }, { ...rule, instructions: '分析全部附件后回复', tools: ['read_document'] }, new AbortController().signal)
   assert.match(incomplete.output.needsInfo, /1 个附件尚未下载/)
   assert.match(incomplete.output.needsInfo, /attachment10.txt/)
+  assert.equal(incomplete.output.needsInfoKind, 'attachments')
+  resultValue = { summary: '资料分析已完成。', informationGaps: '联系方式未提供，待核实。', subject: '不应创建的回复', text: '不应创建的正文' }
+  const report = await runner.run(task, { ...rule, output: 'report' }, new AbortController().signal)
+  assert.equal(report.output.informationGaps, '联系方式未提供，待核实。')
+  assert.equal(report.output.needsInfo, undefined)
+  assert.equal(report.output.subject, undefined)
+  assert.equal(report.output.text, undefined)
+  const reportPrompt = JSON.stringify(observed.messages)
+  assert.match(reportPrompt, /当前输出类型为分析报告/)
+  assert.match(reportPrompt, /普通资料缺口/)
+  assert.doesNotMatch(reportPrompt, /邮件写作规范/)
+  resultValue = { summary: 'PDF 无法解析。', needsInfo: '附件没有文字层。', needsInfoKind: 'attachments' }
+  const blockedReport = await runner.run(task, { ...rule, output: 'report' }, new AbortController().signal)
+  assert.equal(blockedReport.output.needsInfoKind, 'attachments')
+  resultValue = { summary: '已提取客户需求', subject: 'Re: 询价', text: '您好，需求已收到。' }
   await assert.rejects(runner.run(task, { ...rule, skills: ['missing-skill'] }, new AbortController().signal), /技能不可用/)
   mode = 'plain'
   await assert.rejects(runner.run(task, rule, new AbortController().signal), /未提交有效/)
