@@ -355,5 +355,14 @@
   "关闭提醒": "Dismiss reminder",
   "工作台设置无效。": "Invalid workbench settings.",
   "工作台开关应为布尔值。": "Workbench switches must be boolean values.",
-  "已更新工作台设置。": "Workbench settings updated."
+  "已更新工作台设置。": "Workbench settings updated.",
+  "AI 优化": "AI refine",
+  "正在优化…": "Refining…",
+  "可调整处理步骤、语言、语气与署名。AI 优化后由你确认采用。": "Adjust steps, language, tone and signature. Review AI suggestions before applying them.",
+  "配置 DSH 默认模型后可使用 AI 优化，也可手动修改。": "Configure the DSH default model to use AI refinement, or edit manually.",
+  "正在整理处理要求，请稍候…": "Refining instructions, please wait…",
+  "优化后的处理要求": "Suggested instructions",
+  "核对原有条件与限制，采用后仍需保存方案。": "Check the original conditions and limits. Save the workflow after applying the suggestion.",
+  "保留原文": "Keep original",
+  "采用优化": "Apply suggestion"
 }

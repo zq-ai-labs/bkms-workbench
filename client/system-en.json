@@ -196,5 +196,11 @@
   "附件分段已不存在，请重新读取邮件后再下载": "The attachment part is missing. Reload the message before downloading",
   "草稿附件超过大小或数量上限": "Draft attachments exceed the size or count limit",
   "邮件附件下载已取消": "Mail attachment download canceled",
-  "请在工作台审核当前草稿并明确点击发送": "Review the current draft in the workbench and explicitly select send"
+  "请在工作台审核当前草稿并明确点击发送": "Review the current draft in the workbench and explicitly select send",
+  "请填写 5–16000 字的处理要求后再优化。": "Enter instructions between 5 and 16000 characters before refining.",
+  "当前服务未提供 AI 优化，请更新工作台插件并重启 DSH。": "AI refinement is unavailable. Update the workbench plugin and restart DSH.",
+  "AI 正在生成或优化，请稍后再试。": "AI generation or refinement is in progress. Try again shortly.",
+  "模型返回的处理要求格式无效。": "The model returned invalid instructions.",
+  "AI 未生成有效的处理要求，请重试或手动修改。": "AI did not produce valid instructions. Retry or edit manually.",
+  "请先在 DSH 中配置默认模型，然后使用 AI 优化；也可手动修改。": "Configure the DSH default model to use AI refinement, or edit manually."
 }

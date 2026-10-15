@@ -40,6 +40,8 @@ export interface AgentOutput { summary: string; needsInfo?: string; subject?: st
 export interface AgentRunner { available(): boolean; run(task: Task, rule: Rule, signal: AbortSignal): Promise<{ output: AgentOutput; sessionId?: string }> }
 export interface RuleSuggestion { rule: Rule; warnings: string[] }
 export type RuleAssistant = (input: { description: string; account: string; folder: string; uiLanguage?: 'zh' | 'en' }, signal: AbortSignal) => Promise<RuleSuggestion>
+export interface InstructionSuggestion { instructions: string }
+export type InstructionOptimizer = (input: { instructions: string }, signal: AbortSignal) => Promise<InstructionSuggestion>
 export class WorkbenchError extends Error {
   constructor(message: string, readonly code = 'invalid', readonly status = 400) { super(message) }
 }

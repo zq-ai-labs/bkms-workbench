@@ -1657,64 +1657,36 @@ export function Workbench() {
           )}
           {tab === "rules" && (
             <>
-              <div className="bkw-rules-settings">
-                <div>
-                  <strong>{t("后台检测")}</strong>
-                  <p>{t("页面关闭后继续运行，服务恢复后按游标补查新邮件。")}</p>
-                </div>
-                <label>
-                  {t("检测间隔")}{" "}
-                  <select
-                    aria-label={t("后台检测间隔")}
-                    disabled={!!busy}
-                    value={data.settings.pollSeconds}
-                    onChange={(e) =>
-                      void perform("interval", async () => {
-                        await api("saveSettings", {
-                          revision: data.revision,
-                          settings: {
-                            ...data.settings,
-                            pollSeconds: Number(e.target.value),
-                          },
-                        });
-                        await refresh();
-                      })
-                    }
-                  >
-                    {[
-                      ...new Set([
-                        30,
-                        60,
-                        120,
-                        300,
-                        600,
-                        1800,
-                        3600,
-                        data.settings.pollSeconds,
-                      ]),
-                    ]
-                      .sort((a, b) => a - b)
-                      .map((n) => (
-                        <option value={n} key={n}>
-                          {n < 60 ? t("{0} 秒", n) : t("{0} 分钟", n / 60)}
-                        </option>
-                      ))}
-                  </select>
-                </label>
-              </div>
               <div className="bkw-rule-grid">
                 {data.rules.length ? (
                   [...data.rules]
                     .sort((a, b) => b.priority - a.priority)
-                    .map((rule, index) => (
+                    .map((rule, index) => {
+                      const mailbox = `${accounts.find(a => a.id === rule.account)?.label || rule.account || t("全部邮箱")} / ${rule.folder}`;
+                      const criteria = [
+                        rule.match.from && `${t("发件人：")}${rule.match.from}`,
+                        rule.match.subject && `${t("主题：")}${rule.match.subject}`,
+                        rule.match.hasAttachments && t("包含附件"),
+                      ].filter(Boolean).join(rule.match.mode === "all" ? t("，且 ") : t("，或 ")) || t("匹配该邮箱的全部新邮件");
+                      return (
                       <article
                         className={`bkw-rule-card ${!rule.enabled ? "paused" : ""}`}
                         key={rule.id}
                       >
-                        <div className="bkw-rule-head">
-                          <span className="bkw-rule-number">
-                            {String(index + 1).padStart(2, "0")}
-                          </span>
+                        <span className="bkw-rule-number" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
+                        <div className="bkw-rule-body">
+                          <div className="bkw-rule-title">
+                            <h3 title={rule.name}>{rule.name}</h3>
+                            <span className="bkw-rule-output">{rule.output === "reply" ? t("回复草稿") : t("分析报告")}</span>
+                          </div>
+                          <p className="bkw-rule-description">{rule.instructions.replace(/\s+/g, " ")}</p>
+                          <div className="bkw-rule-meta">
+                            <span className="bkw-rule-mailbox" title={mailbox}><Icon name="mail" size={13} /><span>{mailbox}</span></span>
+                            <span className="bkw-rule-priority">{t("优先级")}{" "}{rule.priority}</span>
+                            <span className="bkw-rule-criteria" title={criteria}>{criteria}</span>
+                          </div>
+                        </div>
+                        <div className="bkw-rule-actions">
                           <button
                             className={`bkw-switch ${rule.enabled ? "checked" : ""}`}
                             role="switch"
@@ -1733,50 +1705,16 @@ export function Workbench() {
                           >
                             <i />
                           </button>
+                          <button
+                            className="bkw-rule-edit bkw-btn"
+                            onClick={() => openRule({ ...rule, match: { ...rule.match }, tools: [...rule.tools] })}
+                          >
+                            <Icon name="edit" size={15} />
+                            {t("编辑方案")}
+                          </button>
                         </div>
-                        <h3>{rule.name}</h3>
-                        <p>{rule.instructions}</p>
-                        <div className="bkw-rule-tags">
-                          <span>
-                            {accounts.find((a) => a.id === rule.account)
-                              ?.label ||
-                              rule.account ||
-                              t("全部邮箱")}
-                          </span>
-                          <span>
-                            {rule.output === "reply" ? t("回复草稿") : t("分析报告")}
-                          </span>
-                          <span>{t("优先级")}{rule.priority}</span>
-                        </div>
-                        <div className="bkw-rule-criteria">
-                          {rule.match.from && (
-                            <span>{t("发件人：")}{rule.match.from}</span>
-                          )}
-                          {rule.match.subject && (
-                            <span>{t("主题：")}{rule.match.subject}</span>
-                          )}
-                          {rule.match.hasAttachments && <span>{t("包含附件")}</span>}
-                          {!rule.match.from &&
-                            !rule.match.subject &&
-                            !rule.match.hasAttachments && (
-                              <span>{t("匹配该邮箱的全部新邮件")}</span>
-                            )}
-                        </div>
-                        <button
-                          className="bkw-rule-edit"
-                          onClick={() =>
-                            openRule({
-                              ...rule,
-                              match: { ...rule.match },
-                              tools: [...rule.tools],
-                            })
-                          }
-                        >
-                          <Icon name="edit" size={15} />
-                          {t("编辑方案")}<Icon name="arrow" size={15} />
-                        </button>
                       </article>
-                    ))
+                    ); })
                 ) : (
                   <div className="bkw-panel bkw-rules-empty">
                     <Empty
@@ -2353,6 +2291,9 @@ function RuleDialog({ rule, accounts, tasks, capabilities, aiReady, error, busy,
     [showEditor, setShowEditor] = useState(!!rule.id),
     [aiOpen, setAiOpen] = useState(!rule.id),
     [generating, setGenerating] = useState(false),
+    [optimizing, setOptimizing] = useState(false),
+    [optimizationError, setOptimizationError] = useState(""),
+    [optimization, setOptimization] = useState<{ source: string; instructions: string }>(),
     [aiError, setAiError] = useState(""),
     [warnings, setWarnings] = useState<string[]>([]),
     [generated, setGenerated] = useState(false),
@@ -2363,7 +2304,10 @@ function RuleDialog({ rule, accounts, tasks, capabilities, aiReady, error, busy,
     [deleteConfirm, setDeleteConfirm] = useState(false),
     [toolsText, setToolsText] = useState(rule.tools.join(", "));
   const changed = JSON.stringify(value) !== JSON.stringify(rule) || !!description;
-  const locked = busy || testing || generating;
+  const optimizationRequest = useRef<AbortController>();
+  const instructionsId = React.useId();
+  useEffect(() => () => { optimizationRequest.current?.abort(); }, []);
+  const locked = busy || testing || generating || optimizing;
   useEffect(() => {
     if (!changed) return;
     const before = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
@@ -2371,11 +2315,22 @@ function RuleDialog({ rule, accounts, tasks, capabilities, aiReady, error, busy,
     return () => window.removeEventListener("beforeunload", before);
   }, [changed]);
   const close = () => { if (!locked && (!changed || window.confirm(t("方案有尚未保存的修改，确认放弃？")))) onClose(); };
-  const patch = (partial: Partial<Rule>) => { setValue({ ...value, ...partial }); setTestResult(""); setTestOutcome(undefined); };
+  const patch = (partial: Partial<Rule>) => { setValue({ ...value, ...partial }); setTestResult(""); setTestOutcome(undefined); if (partial.instructions !== undefined) { setOptimization(undefined); setOptimizationError(""); } };
   const match = (partial: Partial<Rule["match"]>) => patch({ match: { ...value.match, ...partial } });
+  const optimize = async () => {
+    if (locked || optimizationRequest.current || value.instructions.trim().length < 5 || !aiReady) return;
+    const controller = new AbortController(), source = value.instructions;
+    optimizationRequest.current = controller;
+    setOptimizing(true); setOptimizationError(""); setOptimization(undefined);
+    try {
+      const result = await api<{ instructions: string }>("optimizeInstructions", { instructions: source }, controller.signal);
+      if (!controller.signal.aborted) setOptimization({ source, instructions: result.instructions });
+    } catch (error) { if (!controller.signal.aborted) setOptimizationError(errorMessage(error)); }
+    finally { if (!controller.signal.aborted) setOptimizing(false); if (optimizationRequest.current === controller) optimizationRequest.current = undefined; }
+  };
   const generate = async () => {
     if (locked || !description.trim()) return;
-    setGenerating(true); setAiError(""); setTestResult(""); setTestOutcome(undefined);
+    setGenerating(true); setAiError(""); setTestResult(""); setTestOutcome(undefined); setOptimization(undefined); setOptimizationError("");
     try {
       const result = await api<{ rule: Rule; warnings: string[] }>("generateRule", { description, account: value.account, folder: value.folder, uiLanguage: t("任务工作台") === "Task workbench" ? "en" : "zh" });
       setValue({ ...result.rule, id: rule.id, revision: rule.revision, enabled: value.enabled, priority: value.priority, maxRetries: value.maxRetries });
@@ -2433,7 +2388,17 @@ function RuleDialog({ rule, accounts, tasks, capabilities, aiReady, error, busy,
                 <Field label={t("方案名称")}><input required maxLength={100} value={value.name} onChange={event => patch({ name: event.target.value })} placeholder={t("例如：客户询价回复")} /></Field>
                 <Field label={t("生成内容")}><select value={value.output} onChange={event => patch({ output: event.target.value as Rule["output"] })}><option value="reply">{t("处理摘要 + 回复草稿")}</option><option value="report">{t("分析报告")}</option></select></Field>
               </div>
-              <Field label={t("处理要求")} hint={t("可调整处理步骤、语言、语气与署名。")}><textarea required minLength={5} maxLength={16000} className="bkw-instructions" value={value.instructions} onChange={event => patch({ instructions: event.target.value })} placeholder={t("说明收到邮件后需要做什么，以及缺少信息时如何处理。")} /></Field>
+              <div className="bkw-field bkw-instruction-editor" aria-busy={optimizing}>
+                <div className="bkw-instruction-heading"><label htmlFor={instructionsId}>{t("处理要求")}</label><button type="button" className="bkw-btn bkw-optimize-btn" disabled={!aiReady || value.instructions.trim().length < 5} onClick={() => void optimize()}>{optimizing ? t("正在优化…") : t("AI 优化")}</button></div>
+                <textarea id={instructionsId} required minLength={5} maxLength={16000} className="bkw-instructions" value={value.instructions} onChange={event => patch({ instructions: event.target.value })} placeholder={t("说明收到邮件后需要做什么，以及缺少信息时如何处理。")} />
+                <small>{aiReady ? t("可调整处理步骤、语言、语气与署名。AI 优化后由你确认采用。") : t("配置 DSH 默认模型后可使用 AI 优化，也可手动修改。")}</small>
+                {optimizing && <small role="status">{t("正在整理处理要求，请稍候…")}</small>}
+                {optimizationError && <div className="bkw-alert danger" role="alert"><span>{systemMessage(optimizationError)}</span></div>}
+                {optimization && optimization.source === value.instructions && <section className="bkw-instruction-suggestion" aria-label={t("优化后的处理要求")}>
+                  <strong>{t("优化后的处理要求")}</strong><div className="bkw-instruction-preview">{optimization.instructions}</div>
+                  <div className="bkw-ai-actions"><small>{t("核对原有条件与限制，采用后仍需保存方案。")}</small><div className="bkw-actions"><button type="button" className="bkw-btn" onClick={() => setOptimization(undefined)}>{t("保留原文")}</button><button type="button" className="bkw-btn primary" onClick={() => patch({ instructions: optimization.instructions })}>{t("采用优化")}</button></div></div>
+                </section>}
+              </div>
               <div className="bkw-scope-summary"><Icon name="mail" size={16} /><span>{t("匹配范围：")}{broad ? t("此文件夹中的全部新邮件") : [value.match.from && t("发件人包含 {0}", value.match.from), value.match.subject && t("主题包含 {0}", value.match.subject), value.match.hasAttachments && t("带附件")].filter(Boolean).join(value.match.mode === "all" ? t("，且 ") : t("，或 "))}{t("。")}{value.output === "reply" ? t("生成后由你审核并发送。") : t("生成后在任务中查看报告。")}</span></div>
               <div className="bkw-plan-capability-summary">
                 <span>{t("处理能力")}</span>

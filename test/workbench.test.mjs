@@ -132,6 +132,42 @@ test('AI generation is bounded to one request and plugin shutdown cancels it bef
   assert.equal((await f.store.read()).rules.length, 0)
 })
 
+test('AI instruction refinement works without mail, returns a candidate only and recovers after failure', async t => {
+  const f = await fixture(t), before = await f.store.read(), received = []
+  f.email.accounts = () => { throw new Error('must not read mail') }
+  let fail = false, result = { instructions: '  整理客户需求，生成中文回复草稿。  ' }
+  const api = new WorkbenchApi(f.engine, undefined, async (input, signal) => { signal.throwIfAborted(); received.push(input); if (fail) throw new Error('mock model failure'); return result })
+  const body = { action: 'optimizeInstructions', instructions: '  帮我整理客户需求，生成中文回复。  ' }
+  assert.deepEqual(await api.action(body), { instructions: '整理客户需求，生成中文回复草稿。' })
+  assert.deepEqual(received, [{ instructions: body.instructions.trim() }])
+  assert.deepEqual(await f.store.read(), before); assert.equal(f.runs, 0); assert.equal(f.sends, 0)
+  for (const instructions of ['', '1234', 'x'.repeat(16001), '12345\0', null]) await assert.rejects(api.action({ ...body, instructions }), /5–16000/)
+  assert.equal(received.length, 1)
+  await assert.rejects(f.api.action(body), error => error.code === 'assistant_unavailable')
+  fail = true; await assert.rejects(api.action(body), /mock model failure/)
+  fail = false; await api.action(body)
+  for (const invalid of [{ instructions: '短' }, { instructions: '有效的处理要求', tools: ['email_send'] }, { instructions: '12345\0' }]) {
+    result = invalid; await assert.rejects(api.action(body), /格式无效/)
+  }
+  assert.deepEqual(await f.store.read(), before)
+})
+
+test('AI instruction refinement shares generation lock and is canceled and drained on shutdown', async t => {
+  const f = await fixture(t); let entered
+  const started = new Promise(resolve => { entered = resolve })
+  const api = new WorkbenchApi(f.engine, async () => { throw new Error('must not generate') }, async (_input, signal) => {
+    entered(); await new Promise((resolve, reject) => { if (signal.aborted) reject(signal.reason); else signal.addEventListener('abort', () => reject(signal.reason), { once: true }) })
+  })
+  const body = { action: 'optimizeInstructions', instructions: '整理客户需求并生成中文回复。' }
+  const running = api.action(body); await started
+  await assert.rejects(api.action(body), error => error.code === 'busy')
+  await assert.rejects(api.action({ action: 'generateRule', description: '整理需求', account: 'sales', folder: 'INBOX' }), error => error.code === 'busy')
+  const failed = assert.rejects(running, /已取消/)
+  await api.close(); await failed
+  await assert.rejects(api.action(body), error => error.code === 'stopping')
+  assert.equal((await f.store.read()).rules.length, 0)
+})
+
 test('store: concurrent writers retain changes, stale revision blocked and corruption preserved', async t => {
   const f = await fixture(t)
   await Promise.all(Array.from({ length: 8 }, (_, i) => f.store.mutate(state => { state.logs.push({ id: String(i), at: '', level: 'info', message: String(i) }) })))

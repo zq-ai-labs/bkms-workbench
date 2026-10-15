@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { Engine } from './engine.js'
 import { matches, validateRule } from './rules.js'
 import { findTask, log, touch } from './store.js'
-import { WorkbenchError, type Task, type State, type RuleAssistant } from './types.js'
+import { WorkbenchError, type Task, type State, type RuleAssistant, type InstructionOptimizer } from './types.js'
 
 const requireRevision = (revision: unknown): number => { if (!Number.isSafeInteger(revision) || Number(revision) < 1) throw new WorkbenchError('缺少有效版本，请刷新后重试。'); return Number(revision) }
 const configCheck = (state: State, revision: unknown): void => { if (requireRevision(revision) !== state.configRevision) throw new WorkbenchError('配置已更新，请刷新后重试。', 'conflict', 409) }
@@ -16,7 +16,7 @@ export class WorkbenchApi {
   private drains = new Set<() => void>()
   private generating = false
   private controller = new AbortController()
-  constructor(readonly engine: Engine, private ruleAssistant?: RuleAssistant) {}
+  constructor(readonly engine: Engine, private ruleAssistant?: RuleAssistant, private instructionOptimizer?: InstructionOptimizer) {}
   /** Stop admitting new requests, then wait for accepted actions and receipts. */
   async close(): Promise<void> {
     this.accepting = false
@@ -83,6 +83,17 @@ export class WorkbenchApi {
       const folders = results[0].folders.filter(folder => results.every(result => result.folders.some(item => item.path === folder.path)))
       return { folders, common: selected.length > 1, defaultFolder: selected.every(account => account.inboxFolder === selected[0].inboxFolder) ? selected[0].inboxFolder || 'INBOX' : folders.find(folder => folder.path.toUpperCase() === 'INBOX')?.path || folders[0]?.path || '' }
     }
+    if (body.action === 'optimizeInstructions') {
+      if (typeof body.instructions !== 'string' || body.instructions.trim().length < 5 || body.instructions.length > 16000 || body.instructions.includes('\0')) throw new WorkbenchError('请填写 5–16000 字的处理要求后再优化。')
+      if (!this.instructionOptimizer) throw new WorkbenchError('当前服务未提供 AI 优化，请更新工作台插件并重启 DSH。', 'assistant_unavailable', 503)
+      if (this.generating) throw new WorkbenchError('AI 正在生成或优化，请稍后再试。', 'busy', 409)
+      this.generating = true
+      try {
+        const result = await this.instructionOptimizer({ instructions: body.instructions.trim() }, AbortSignal.any([signal, this.controller.signal, AbortSignal.timeout(120000)]))
+        if (!result || typeof result.instructions !== 'string' || result.instructions.trim().length < 5 || result.instructions.length > 16000 || result.instructions.includes('\0') || Object.keys(result).some(key => key !== 'instructions')) throw new WorkbenchError('模型返回的处理要求格式无效。')
+        return { instructions: result.instructions.trim() }
+      } finally { this.generating = false }
+    }
     if (body.action === 'generateRule') {
       if (typeof body.description !== 'string' || !body.description.trim() || body.description.length > 8000 || body.description.includes('\0')) throw new WorkbenchError('请用不超过 8000 字描述需要处理的邮件和处理方式。')
       const accounts = await this.engine.email().accounts()
@@ -91,7 +102,7 @@ export class WorkbenchApi {
       const folder = typeof body.folder === 'string' ? body.folder.trim() : accounts.find(item => item.id === account)?.inboxFolder || 'INBOX'
       if (!folder || folder.length > 200 || /[\0\r\n]/.test(folder)) throw new WorkbenchError('请选择有效的邮件文件夹。')
       if (!this.ruleAssistant) throw new WorkbenchError('当前服务未提供 AI 方案生成，请更新工作台插件。', 'assistant_unavailable', 503)
-      if (this.generating) throw new WorkbenchError('正在生成方案，请稍后再试。', 'busy', 409)
+      if (this.generating) throw new WorkbenchError('AI 正在生成或优化，请稍后再试。', 'busy', 409)
       this.generating = true
       try { return await this.ruleAssistant({ description: body.description.trim(), account, folder, ...(body.uiLanguage === 'en' || body.uiLanguage === 'zh' ? { uiLanguage: body.uiLanguage } : {}) }, AbortSignal.any([signal, this.controller.signal, AbortSignal.timeout(120000)])) }
       finally { this.generating = false }
