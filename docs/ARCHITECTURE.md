@@ -17,6 +17,25 @@
 | src/api.ts | 快照、配置、人工操作、草稿审核发送、冲突校验 |
 | client/index.tsx | 标准 main/sidebar/settings 插槽、交互界面 |
 
+## 2026-10 重构概览
+
+| 文件 | 职责 |
+| --- | --- |
+| src/triage.ts | AI 分拣（类别、紧急度、下一步、选择方案）与无模型时的规则判断 |
+| src/structured.ts | 无工具、只提交一个结构化结果的隔离 Agent 运行 |
+| src/writer.ts | 每日简报、周报草稿、主题概括和方案试运行的生成 |
+| src/digest.ts | 待办判定、会话关联、主题匹配，以及简报/周报/主题的输入数据与模板 |
+| src/sources.ts | 信息源适配器约定与连接状态 |
+| client/index.tsx | 插件入口、工作台外壳、路由与共享状态 |
+| client/views.tsx, workspace.tsx, topics.tsx, plans.tsx, settings.tsx | 各视图；workspace 为审核与详情共用的 AI 产出 + 原始信息两栏 |
+| client/lib.ts, ui.tsx, store.ts, context.ts | 接口、类型、通用组件、偏好与提醒状态、视图上下文 |
+
+数据仍为版本 `1`，任务状态集合不变。新增字段全部可选：任务的 `triage`、`checks`、`autoSend`；方案的 `semantic`、`exclude`、`autonomy`、`sources`；顶层 `activity`、`topics`、`reports`、`brief`、`senders`；设置中的 `triage`、`undoMinutes`、`briefEnabled/briefTime`、`weeklyEnabled/weeklyDay/weeklyTime`、`meetingBriefMinutes`。默认值在读取时计算，不写回存储，旧数据无需迁移；旧版本插件仍能读取新数据（会忽略新增字段）。方案只在设置了非默认值时才写入新字段。
+
+处理链路：`poll` 新建任务时，分拣开启则为 `queued` + `triage.state = pending`；`processNext` 先读取原邮件并分拣，命中方案后回到 `queued` 再准备，未命中时归档（`ignored` + `triage.archived`）或 `unmatched`。分拣失败最多重试 2 次，手动重试会重新分拣。准备完成后若方案自主级别允许且通过 `autoSendDecision` 检查，写入 `autoSend`；`sendDue` 在撤回窗口结束后经 `drafts.preview` 和 `drafts.send` 发送，草稿版本变化、收件人被禁止或预览失败时取消并转人工。人工保存草稿、发送、忽略、重新处理均通过 `takeOver` 取消自动发送。
+
+新增动作：`restore`、`cancelAutoSend`、`undoActivity`、`generateBrief`、`generateReport`、`refreshTopic`、`saveTopic`、`deleteTopic`、`saveReport`、`deleteReport`、`trialRule`。`snapshot` 额外返回 `activity`、`topics`（含匹配数量）、`reports`、`brief`、`defaults`、`sources`，以及每个任务的 `relatedIds`（Message-ID 引用）、`possibleIds`（同发件人同主题，仅建议）、`topicIds`、`attention`。请求可附带 `uiLanguage`，用于定时生成的语言。
+
 ## 数据和状态
 
 数据版本为 `1`；全局写版本与配置版本分开，后台任务更新不会让正在编辑的规则无故冲突。任务有独立 revision、规则快照、收件 UID/UIDVALIDITY、执行次数、来源键和历史。
