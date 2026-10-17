@@ -20,6 +20,7 @@ export const settingsOf = (settings: Settings) => ({
   meetingBriefMinutes: settings.meetingBriefMinutes ?? 30,
 })
 const EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g
+const STALE_AUTO_SEND = 60 * 60000
 /** Deterministic bounds for an automatic reply. The model's own judgement is necessary but never sufficient. */
 export function autoSendDecision(rule: Rule, task: Task, output: AgentOutput, checks: Check[], prefs: State['senders']): { ok: true } | { ok: false; reason: string } {
   const autonomy = rule.autonomy ?? 'draft'
@@ -207,13 +208,13 @@ export class Engine {
       if (rule) {
         item.rule = structuredClone(rule); item.ruleId = rule.id; item.ruleName = rule.name; item.status = 'queued'
         touch(item, `命中方案「${rule.name}」，等待处理。`)
-      } else if (!keep && ['notification', 'marketing', 'fyi'].includes(result.category)) {
+      } else if (!keep && (result.category === 'notification' || result.category === 'marketing')) {
         item.status = 'ignored'; item.triage.archived = true
         touch(item, '已归档，可随时恢复。')
         doc.activity = [...(doc.activity || []), activityEntry({ kind: 'archive', title: item.subject || item.title, detail: result.reason, taskId: item.id, source: 'email' }, randomUUID())]
       } else {
         item.status = 'unmatched'
-        touch(item, '没有合适的处理方案，可手动选择方案或忽略。')
+        touch(item, result.category === 'fyi' ? '值得关注，无需处理方案；已列入今日简报。' : '没有合适的处理方案，可手动选择方案或忽略。')
       }
       log(doc, '信息已完成分拣。', item.id)
     })
@@ -308,7 +309,13 @@ export class Engine {
       item.autoSend.canceledAt = now(); item.autoSend.reason = reason; touch(item, reason)
       doc.activity = [...(doc.activity || []), activityEntry({ kind, title: item.subject || item.title, detail: reason, taskId: item.id, ruleName: item.ruleName, source: 'email' }, randomUUID())]
     })
+    let claimedSend = false
     try {
+      // The workflow is re-read at send time: lowering its autonomy or disabling it stops sends already scheduled.
+      const current = state.rules.find(rule => rule.id === due.ruleId)
+      if (!current || !current.enabled || (current.autonomy ?? 'draft') === 'draft' || current.output !== 'reply') { await cancel('方案已停用或改为仅起草，自动发送已取消，请人工审核。', 'auto_send_canceled'); return }
+      // A send long past its announced time (e.g. background processing was paused) is no longer what the person expected.
+      if (Date.now() - Date.parse(due.autoSend!.at) > STALE_AUTO_SEND) { await cancel('已超过计划发送时间较久，自动发送已取消，请人工审核。', 'auto_send_canceled'); return }
       const email = this.email(), draftId = due.draftId!
       const draft = await email.drafts.get(draftId)
       if (draft.state !== 'draft' || draft.revision !== due.autoSend!.draftRevision) { await cancel('草稿已变化，自动发送已取消，请人工审核。', 'auto_send_canceled'); return }
@@ -323,6 +330,7 @@ export class Engine {
         return true
       })
       if (!claimed) return
+      claimedSend = true
       try {
         const result = await email.drafts.send(draftId, planId, true, signal)
         await this.store.mutate(doc => {
@@ -342,8 +350,11 @@ export class Engine {
           touch(item, item.status === 'review' ? '自动发送校验未通过，邮件未提交。' : '自动发送记录需核实。'); log(doc, item.error!, item.id, 'error')
         })
       }
-    } catch (error) { this.error = this.safe(error) }
-    finally { this.sending = false }
+    } catch (error) {
+      this.error = this.safe(error)
+      // Failing before the mail was submitted hands the reply back to a person instead of retrying on every tick.
+      if (!claimedSend) await cancel(`自动发送前检查失败，已转为人工审核：${this.safe(error)}`, 'auto_send_blocked').catch(() => undefined)
+    } finally { this.sending = false }
   }
   private async writing<T>(work: () => Promise<T>): Promise<T> {
     if (this.generating) throw new WorkbenchError('AI 正在生成内容，请稍后再试。', 'busy', 409)

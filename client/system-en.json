@@ -288,5 +288,9 @@
   "包含营销或退订特征。": "Looks like marketing or contains an unsubscribe link.",
   "邮件中包含请求或询问。": "The mail contains a request or question.",
   "未识别出明确的请求。": "No clear request found.",
-  "定时生成失败：{0}": "Scheduled generation failed: {0}"
+  "定时生成失败：{0}": "Scheduled generation failed: {0}",
+  "值得关注，无需处理方案；已列入今日简报。": "Worth knowing; no workflow needed. Included in today's brief.",
+  "方案已停用或改为仅起草，自动发送已取消，请人工审核。": "The workflow was disabled or set to draft only. Automatic sending was canceled; please review.",
+  "已超过计划发送时间较久，自动发送已取消，请人工审核。": "Too long past the scheduled send time. Automatic sending was canceled; please review.",
+  "自动发送前检查失败，已转为人工审核：{0}": "Pre-send checks failed; handed over for review: {0}"
 }

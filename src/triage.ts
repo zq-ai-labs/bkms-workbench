@@ -14,9 +14,13 @@ const schema = {
   },
 }
 
-const noticeSender = /(?:^|[<\s"'])(?:no-?reply|do-?not-?reply|notice|notification|notifications|system|mailer-daemon|postmaster|alert|alerts|service|support|news|newsletter|billing|account|security)[@.]/i
+// Senders that are automated by construction; mail from them is a notice even when it says "please".
+const automatedSender = /(?:^|[<\s"'])(?:no-?reply|do-?not-?reply|mailer-daemon|postmaster|notifications?|alerts?|newsletter)[@.]/i
+// Role mailboxes that real people also answer from (service@, support@ …): only a hint, never enough to archive a request.
+const roleSender = /(?:^|[<\s"'])(?:notice|system|service|support|news|billing|account|security)[@.]/i
 const noticeSubject = /(通知|提醒|提示|到期|续费|账单|对账单|工资条|验证码|安全提示|登录提醒|订阅|周报订阅|系统消息|服务恢复|自动回复|out of office|automatic reply|notification|reminder|receipt|invoice|statement|verification code|security alert|your account)/i
-const marketing = /(退订|unsubscribe|促销|优惠|广告|活动报名|限时|折扣|newsletter|webinar|promotion|special offer)/i
+const unsubscribe = /(退订|取消订阅|unsubscribe)/i
+const marketing = /(促销|广告|活动报名|限时|折扣|newsletter|webinar|promotion|special offer)/i
 const asks = /(请|麻烦|能否|是否可以|报价|询价|咨询|确认|回复|安排|提供|需要|\?|？|please|could you|can you|quote|inquiry|request)/i
 const urgent = /(今天|今日|尽快|马上|立即|紧急|截止|ASAP|urgent|today|by end of day)/i
 
@@ -24,9 +28,12 @@ const urgent = /(今天|今日|尽快|马上|立即|紧急|截止|ASAP|urgent|to
 export function heuristicTriage(mail: TriageInput['mail']): Omit<TriageOutput, 'ruleId'> {
   const head = `${mail.subject}\n${mail.body.slice(0, 3000)}`
   let category: TriageCategory = 'other'
-  if (marketing.test(head)) category = 'marketing'
-  else if (noticeSender.test(mail.from) || noticeSubject.test(mail.subject)) category = 'notification'
+  // Without a model, err towards processing: anything that asks for something reaches a workflow unless it is plainly automated.
+  if (unsubscribe.test(head)) category = 'marketing'
+  else if (automatedSender.test(mail.from) || (roleSender.test(mail.from) && noticeSubject.test(mail.subject))) category = 'notification'
   else if (asks.test(head)) category = 'request'
+  else if (marketing.test(head)) category = 'marketing'
+  else if (roleSender.test(mail.from) || noticeSubject.test(mail.subject)) category = 'notification'
   return {
     category,
     urgency: category === 'request' && urgent.test(head) ? 'high' : category === 'notification' || category === 'marketing' ? 'low' : 'normal',

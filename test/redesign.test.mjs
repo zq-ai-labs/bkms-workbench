@@ -16,7 +16,7 @@ const quoteRule = { name: '业务来信报价处理', enabled: true, priority: 1
 async function fixture(t, { triage, writer, agentOutput } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'bkms-redesign-'))
   const store = new Store(root), drafts = new Map()
-  let inbox = [], sends = 0, runs = 0, previewBlocked = false
+  let inbox = [], sends = 0, runs = 0, previewBlocked = false, previewFails = false
   let output = agentOutput ?? { summary: '已整理客户需求。', subject: 'Re: 报价咨询', text: '您好，报价如下。' }
   const mails = new Map()
   const email = {
@@ -28,7 +28,7 @@ async function fixture(t, { triage, writer, agentOutput } = {}) {
       async get(id) { return structuredClone(drafts.get(id)) },
       async list() { return [...drafts.values()].map(d => structuredClone(d)) },
       async update(id, revision, fields) { const draft = drafts.get(id); assert.equal(draft.revision, revision); Object.assign(draft, fields, { revision: revision + 1 }); return structuredClone(draft) },
-      async preview(id, revision) { assert.equal(drafts.get(id).revision, revision); return { id: 'preview-' + revision, matching: { blocked: previewBlocked, rows: [] }, draft: structuredClone(drafts.get(id)) } },
+      async preview(id, revision) { if (previewFails) throw new Error('preview unavailable'); assert.equal(drafts.get(id).revision, revision); return { id: 'preview-' + revision, matching: { blocked: previewBlocked, rows: [] }, draft: structuredClone(drafts.get(id)) } },
       async send(id, plan, confirmed) { assert.equal(confirmed, true); sends++; drafts.get(id).state = 'sent'; drafts.get(id).receipt = { accepted: [drafts.get(id).to], rejected: [], response: '250 OK' }; return { draft: structuredClone(drafts.get(id)) } },
     },
   }
@@ -40,7 +40,7 @@ async function fixture(t, { triage, writer, agentOutput } = {}) {
   const deliver = async (subject, address, text, extra = {}) => { uid++; mails.set(uid, { name: extra.name || '', address, text, ...extra }); inbox = [...inbox, { uid, date: new Date(Date.now() - (100 - uid) * 1000).toISOString(), from: [{ name: extra.name || '', address }], subject, hasAttachments: false }]; await engine.poll(); return uid }
   const drain = async () => { for (let i = 0; i < 20 && (await store.read()).tasks.some(t => t.status === 'queued'); i++) await engine.processNext() }
   await engine.poll()
-  return { root, store, engine, api, email, drafts, deliver, drain, get sends() { return sends }, get runs() { return runs }, output: value => { output = value }, block: value => { previewBlocked = value } }
+  return { root, store, engine, api, email, drafts, deliver, drain, get sends() { return sends }, get runs() { return runs }, output: value => { output = value }, block: value => { previewBlocked = value }, failPreview: value => { previewFails = value } }
 }
 const taskBySubject = async (f, subject) => (await f.store.read()).tasks.find(task => task.subject === subject)
 
@@ -106,6 +106,12 @@ test('heuristics and triage parsing are bounded and conservative', () => {
   assert.equal(heuristicTriage({ from: 'DeepSeek <support@sc.mail.deepseek.com>', subject: '关于 DeepSeek 服务恢复及补偿通知', body: '', hasAttachments: false }).category, 'notification')
   assert.equal(heuristicTriage({ from: '阿里云 <system@notice.aliyun.com>', subject: '阿里云域名到期提醒', body: '' }).category, 'notification')
   assert.equal(heuristicTriage({ from: 'shop@example.test', subject: '双十一限时优惠', body: '点击退订' }).category, 'marketing')
+  assert.equal(heuristicTriage({ from: 'DeepSeek <support@sc.mail.deepseek.com>', subject: '关于 DeepSeek 服务恢复及补偿通知', body: '请查收补偿额度。' }).category, 'notification', 'role sender plus notice subject stays a notice')
+  assert.equal(heuristicTriage({ from: 'noreply@github.com', subject: 'Review requested', body: 'Please review' }).category, 'notification')
+  // Real requests are never archived on weak signals.
+  assert.equal(heuristicTriage({ from: '赵晓强 <zxqjava@163.com>', subject: '500 台报价', body: '能否给个优惠价？限时活动下周结束。' }).category, 'request')
+  assert.equal(heuristicTriage({ from: '采购部 <service@customer.example>', subject: '采购询价', body: '请报 200 台的价格。' }).category, 'request')
+  assert.equal(heuristicTriage({ from: '财务 <ap@customer.example>', subject: 'Invoice 补开', body: '麻烦重新开一张发票。' }).category, 'request')
   assert.equal(heuristicTriage({ from: '赵晓强 <zxqjava@163.com>', subject: '报价咨询', body: '请提供含税总价，今天回复' }).urgency, 'high')
   assert.deepEqual(parseTriage({ category: 'request', urgency: 'normal', reason: 'x', nextStep: 'y', ruleId: 'not-a-candidate' }, new Set(['a'])).ruleId, '')
   assert.throws(() => parseTriage({ category: 'spam', urgency: 'normal', reason: '', nextStep: '', ruleId: '' }, new Set()))
@@ -177,10 +183,38 @@ test('withdrawing an automatic reply keeps future replies to that contact manual
   await f.drain()
   const fourth = await taskBySubject(f, '第四封')
   f.block(true)
-  await f.store.mutate(state => { state.tasks.find(item => item.id === fourth.id).autoSend.at = new Date(0).toISOString() })
+  await f.store.mutate(state => { state.tasks.find(item => item.id === fourth.id).autoSend.at = new Date(Date.now() - 1000).toISOString() })
   await f.engine.sendDue()
   assert.equal(f.sends, 0); assert.ok((await taskBySubject(f, '第四封')).autoSend.canceledAt)
   assert.ok((await f.api.snapshot()).activity.some(item => item.kind === 'auto_send_blocked'))
+})
+
+test('scheduled automatic sends re-check the workflow, go stale, and fall back to review on errors', async t => {
+  const triage = { available: () => true, async run(input) { return { category: 'reply_needed', urgency: 'normal', reason: '', nextStep: '', ruleId: input.rules[0]?.id ?? '' } } }
+  const f = await fixture(t, { triage, agentOutput: { summary: '确认。', subject: 'Re', text: '收到，谢谢。', lowRisk: true } })
+  await f.api.action({ action: 'saveRule', revision: 1, rule: { ...quoteRule, autonomy: 'auto' } })
+  const due = async subject => { const task = await taskBySubject(f, subject); await f.store.mutate(state => { state.tasks.find(item => item.id === task.id).autoSend.at = new Date(Date.now() - 1000).toISOString() }) }
+  // Lowering the workflow to draft-only stops a send that was already scheduled.
+  await f.deliver('改为仅起草', 'a@example.test', '请确认。'); await f.drain()
+  const config = await f.api.snapshot()
+  await f.api.action({ action: 'saveRule', revision: config.revision, rule: { ...config.rules[0], autonomy: 'draft' } })
+  await due('改为仅起草'); await f.engine.sendDue()
+  let task = await taskBySubject(f, '改为仅起草')
+  assert.equal(f.sends, 0); assert.ok(task.autoSend.canceledAt); assert.equal(task.status, 'review')
+  const again = await f.api.snapshot()
+  await f.api.action({ action: 'saveRule', revision: again.revision, rule: { ...again.rules[0], autonomy: 'auto' } })
+  // A send far past its announced time is not delivered late.
+  await f.deliver('很久以前', 'b@example.test', '请确认。'); await f.drain()
+  task = await taskBySubject(f, '很久以前')
+  await f.store.mutate(state => { state.tasks.find(item => item.id === task.id).autoSend.at = new Date(Date.now() - 3 * 3600000).toISOString() })
+  await f.engine.sendDue()
+  assert.equal(f.sends, 0); assert.ok((await taskBySubject(f, '很久以前')).autoSend.canceledAt)
+  // An error before submission hands the reply to a person rather than retrying forever.
+  await f.deliver('预览出错', 'c@example.test', '请确认。'); await f.drain()
+  await due('预览出错'); f.failPreview(true); await f.engine.sendDue(); f.failPreview(false)
+  task = await taskBySubject(f, '预览出错')
+  assert.equal(f.sends, 0); assert.equal(task.status, 'review'); assert.ok(task.autoSend.canceledAt)
+  await f.engine.sendDue(); assert.equal(f.sends, 0)
 })
 
 test('automatic sending is bounded by deterministic guards regardless of the model', () => {
