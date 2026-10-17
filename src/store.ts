@@ -3,7 +3,7 @@ import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import lockfile from 'proper-lockfile'
 import { validateRule } from './rules.js'
-import { WorkbenchError, now, type State, type Task } from './types.js'
+import { AUTONOMY, TRIAGE_CATEGORIES, WorkbenchError, now, type State, type Task } from './types.js'
 
 function validateState(state: State): void {
   const positive = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 1
@@ -25,8 +25,22 @@ function validateState(state: State): void {
     if (task.informationGaps !== undefined && typeof task.informationGaps !== 'string') throw new Error('invalid information gaps')
     if (task.needsInfoKind !== undefined && !['information', 'attachments'].includes(task.needsInfoKind)) throw new Error('invalid information blocker')
     if (task.attachments.some(file => !file || typeof file.filename !== 'string' || !Number.isFinite(file.size) || file.size < 0 || (file.localPath !== undefined && typeof file.localPath !== 'string'))) throw new Error('invalid attachment')
+    if (task.triage !== undefined && (!task.triage || !['pending', 'done'].includes(task.triage.state) || (task.triage.category !== undefined && !TRIAGE_CATEGORIES.includes(task.triage.category)))) throw new Error('invalid triage')
+    if (task.checks !== undefined && (!Array.isArray(task.checks) || task.checks.length > 20 || task.checks.some(check => !check || typeof check.item !== 'string' || (check.quote !== undefined && typeof check.quote !== 'string')))) throw new Error('invalid checks')
+    if (task.autoSend !== undefined && (!task.autoSend || typeof task.autoSend.at !== 'string' || !Number.isSafeInteger(task.autoSend.draftRevision) || !AUTONOMY.includes(task.autoSend.autonomy))) throw new Error('invalid automatic send')
   }
+  const s = state.settings
+  for (const key of ['triage', 'briefEnabled', 'weeklyEnabled'] as const) if (s[key] !== undefined && typeof s[key] !== 'boolean') throw new Error('invalid preference')
+  const integer = (value: unknown, min: number, max: number) => value === undefined || (Number.isSafeInteger(value) && Number(value) >= min && Number(value) <= max)
+  if (!integer(s.undoMinutes, 1, 240) || !integer(s.weeklyDay, 0, 6) || !integer(s.meetingBriefMinutes, 5, 240)) throw new Error('invalid preference')
+  for (const key of ['briefTime', 'weeklyTime'] as const) if (s[key] !== undefined && !CLOCK.test(String(s[key]))) throw new Error('invalid preference')
+  if (state.activity !== undefined && (!Array.isArray(state.activity) || state.activity.some(item => !item || typeof item.id !== 'string' || typeof item.at !== 'string' || typeof item.kind !== 'string' || typeof item.title !== 'string'))) throw new Error('invalid activity')
+  if (state.topics !== undefined && (!Array.isArray(state.topics) || state.topics.length > 100 || state.topics.some(topic => !topic || typeof topic.id !== 'string' || typeof topic.name !== 'string' || !Array.isArray(topic.keywords) || !Array.isArray(topic.senders)))) throw new Error('invalid topics')
+  if (state.reports !== undefined && (!Array.isArray(state.reports) || state.reports.some(report => !report || typeof report.id !== 'string' || typeof report.text !== 'string' || !['weekly', 'topic'].includes(report.kind)))) throw new Error('invalid reports')
+  if (state.brief !== undefined && (!state.brief || typeof state.brief.date !== 'string' || typeof state.brief.text !== 'string')) throw new Error('invalid brief')
+  if (state.senders !== undefined && (!state.senders || typeof state.senders !== 'object' || Array.isArray(state.senders))) throw new Error('invalid sender preferences')
 }
+export const CLOCK = /^([01]\d|2[0-3]):[0-5]\d$/
 
 export class Store {
   readonly file: string
@@ -54,6 +68,8 @@ export class Store {
       const state = await this.read(), result = fn(state)
       if (result && typeof (result as any).then === 'function') throw new WorkbenchError('存储修改必须是同步事务。', 'storage', 503)
       state.revision++; state.logs = state.logs.slice(-1000)
+      if (state.activity) state.activity = state.activity.slice(-1000)
+      if (state.reports) state.reports = state.reports.slice(-200)
       if (state.tasks.length > 5000 || state.rules.length > 100) throw new WorkbenchError('任务或规则数量达到上限，请先归档运行数据。')
       validateState(state)
       const data = JSON.stringify(state)
