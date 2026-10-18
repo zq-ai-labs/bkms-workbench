@@ -132,7 +132,13 @@ function RuleEditor({ rule }: { rule: Rule }) {
       </div>
       <div className="bkw-sec"><div><b>{t("什么信息适用")}</b><span>{t("先看来源和字面条件，再由 AI 按含义判断")}</span></div>
         <div className="bkw-stack">
-          <div className="bkw-chips">{(Object.keys(SOURCE) as SourceKind[]).filter(kind => kind !== "meeting").map(kind => { const connected = data.sources.find(source => source.kind === kind)?.connected; return <button type="button" key={kind} className={`bkw-chip ${kind === "email" ? "on" : ""}`} disabled={kind !== "email"} aria-pressed={kind === "email"} title={kind === "email" ? undefined : t("尚未接入")}>{t(SOURCE[kind])}{kind !== "email" && <small>{connected ? "" : t("未接入")}</small>}</button>; })}</div>
+          <div className="bkw-chips">{(Object.keys(SOURCE) as SourceKind[]).filter(kind => kind !== "meeting").map(kind => {
+            // Email and WeChat (read-only) can feed a workflow; a workflow keeps at least one source.
+            const selected = value.sources ?? ["email"], on = selected.includes(kind);
+            const available = kind === "email" || (kind === "wechat" && (on || !!data.sources.find(source => source.kind === "wechat")?.connected || !!data.wechat?.settings.enabled));
+            const toggle = () => { const next = on ? selected.filter(item => item !== kind) : [...selected, kind]; if (next.length) patch({ sources: next }); };
+            return <button type="button" key={kind} className={`bkw-chip ${on ? "on" : ""}`} disabled={!available} aria-pressed={on} title={available ? undefined : t("尚未接入")} onClick={toggle}>{t(SOURCE[kind])}{!available && <small>{t("未接入")}</small>}</button>;
+          })}</div>
           <div className="bkw-grid2">
             <Field label={t("邮箱")}><select value={value.account} onChange={event => patch({ account: event.target.value, folder: data.accounts.find(account => account.id === event.target.value)?.inboxFolder || "INBOX" })}>{data.accounts.map(account => <option key={account.id} value={account.id}>{account.label}</option>)}<option value="">{t("全部邮箱")}</option></select></Field>
             <Field label={t("文件夹")}><FolderPicker account={value.account} value={value.folder} ready={!!data.accounts.length} defaultFolder={data.accounts.find(account => account.id === value.account)?.inboxFolder || "INBOX"} onChange={folder => patch({ folder })} /></Field>
