@@ -1,11 +1,41 @@
 export type Status = 'queued' | 'running' | 'review' | 'needs_info' | 'failed' | 'sending' | 'sent' | 'uncertain' | 'ignored' | 'unmatched' | 'completed'
+/** How far a workflow may act without a person: draft only, bounded low-risk sending, or all bounded replies. */
+export type Autonomy = 'draft' | 'low_risk' | 'auto'
+export const AUTONOMY: readonly Autonomy[] = ['draft', 'low_risk', 'auto']
+/** Information sources. Only email has an adapter today; the others are declared so workflows and UI stay source-neutral. */
+export type SourceKind = 'email' | 'feishu' | 'wecom' | 'wechat' | 'meeting'
+export const SOURCE_KINDS: readonly SourceKind[] = ['email', 'feishu', 'wecom', 'wechat', 'meeting']
+/** AI triage result of one incoming message. */
+export type TriageCategory = 'request' | 'reply_needed' | 'fyi' | 'notification' | 'marketing' | 'other'
+export const TRIAGE_CATEGORIES: readonly TriageCategory[] = ['request', 'reply_needed', 'fyi', 'notification', 'marketing', 'other']
+/** Categories excluded when a workflow does not specify its own exclusions. */
+export const DEFAULT_EXCLUDE: readonly TriageCategory[] = ['notification', 'marketing']
 export interface Rule {
   id: string; name: string; enabled: boolean; priority: number; account: string; folder: string
   match: { from: string; subject: string; hasAttachments: boolean; mode: 'all' | 'any' }
   instructions: string; tools: string[]; skills?: string[]; output: 'reply' | 'report'; maxRetries: number
+  /** Natural-language applicability judged by AI triage, e.g. “客户的报价或询价请求”. Empty = no semantic condition. */
+  semantic?: string
+  /** Triage categories this workflow never handles. Undefined keeps the safe default (notifications and marketing). */
+  exclude?: TriageCategory[]
+  autonomy?: Autonomy
+  sources?: SourceKind[]
 }
 export interface Cursor { uidValidity: number; lastUid: number }
 export interface Source { account: string; folder: string; uid: number; uidValidity: number }
+export interface Triage {
+  state: 'pending' | 'done'
+  category?: TriageCategory
+  urgency?: 'high' | 'normal' | 'low'
+  reason?: string
+  nextStep?: string
+  by?: 'ai' | 'heuristic' | 'preference'
+  at?: string
+  /** Set when triage archived the message without a workflow. */
+  archived?: boolean
+}
+export interface Check { item: string; quote?: string }
+export interface AutoSend { at: string; scheduledAt: string; autonomy: Autonomy; draftRevision: number; canceledAt?: string; reason?: string }
 export interface Task {
   id: string; revision: number; title: string; account: string; status: Status; from: string; subject: string; body: string
   receivedAt: string; updatedAt: string; ruleId?: string; ruleName?: string; rule?: Rule
@@ -14,12 +44,45 @@ export interface Task {
   bodyHtml?: string; to?: string; cc?: string; mailDate?: string; mailSize?: number
   messageId?: string; references?: string; replyTo?: string; attachments: { filename: string; size: number; part?: string; contentType?: string; localPath?: string }[]
   history: { at: string; message: string }[]; attempts: number; nextAttemptAt?: string; supplement?: string; workspace?: string; prepareKey?: string
+  triage?: Triage
+  checks?: Check[]
+  autoSend?: AutoSend
 }
+export type ActivityKind = 'archive' | 'auto_send_scheduled' | 'auto_sent' | 'auto_send_canceled' | 'auto_send_blocked' | 'report' | 'brief' | 'weekly' | 'topic'
+export interface Activity {
+  id: string; at: string; kind: ActivityKind; title: string; detail?: string
+  taskId?: string; ruleName?: string; autonomy?: Autonomy; source?: SourceKind
+  undoUntil?: string; undoneAt?: string
+}
+export interface TopicSummary { text: string; level: 'good' | 'attention' | 'risk'; risks: string[]; todos: string[]; at: string; by: 'ai' | 'template' }
+export interface Topic {
+  id: string; name: string; kind: 'customer' | 'project' | 'other'
+  keywords: string[]; senders: string[]; schedule: 'none' | 'weekly'
+  createdAt: string; updatedAt: string; summary?: TopicSummary
+}
+export interface Report {
+  id: string; kind: 'weekly' | 'topic'; title: string; text: string
+  periodStart: string; periodEnd: string; generatedAt: string; updatedAt: string
+  topicId?: string; by: 'ai' | 'template'
+}
+export interface Brief { date: string; text: string; generatedAt: string; by: 'ai' | 'template' }
+export interface SenderPreference { neverArchive?: boolean; neverAutoSend?: boolean }
 export interface Log { id: string; at: string; level: 'info' | 'error'; message: string; taskId?: string }
-export interface Settings { enabled: boolean; pollSeconds: number; showWorkbench?: boolean; notifyNewTodo?: boolean }
+export interface Settings {
+  enabled: boolean; pollSeconds: number; showWorkbench?: boolean; notifyNewTodo?: boolean
+  /** AI triage before workflow matching. Defaults on. */
+  triage?: boolean
+  /** Delay before an automatic reply is actually submitted; it can be withdrawn meanwhile. */
+  undoMinutes?: number
+  briefEnabled?: boolean; briefTime?: string
+  weeklyEnabled?: boolean; weeklyDay?: number; weeklyTime?: string
+  meetingBriefMinutes?: number
+}
 export interface State {
   version: 1; revision: number; configRevision: number; settings: Settings; rules: Rule[]; tasks: Task[]
   cursors: Record<string, Cursor>; logs: Log[]
+  activity?: Activity[]; topics?: Topic[]; reports?: Report[]; brief?: Brief
+  senders?: Record<string, SenderPreference>
 }
 export interface EmailService {
   version: number
@@ -39,8 +102,13 @@ export interface EmailService {
     resolveSend?(id: string, revision: number, outcome: 'sent' | 'not_sent', confirmed: boolean, signal?: AbortSignal): Promise<any>
   }
 }
-export interface AgentOutput { summary: string; needsInfo?: string; needsInfoKind?: 'information' | 'attachments'; informationGaps?: string; subject?: string; text?: string }
+export interface AgentOutput { summary: string; needsInfo?: string; needsInfoKind?: 'information' | 'attachments'; informationGaps?: string; subject?: string; text?: string; checks?: Check[]; lowRisk?: boolean }
 export interface AgentRunner { available(): boolean; run(task: Task, rule: Rule, signal: AbortSignal): Promise<{ output: AgentOutput; sessionId?: string }> }
+export interface TriageInput { mail: { from: string; subject: string; body: string; hasAttachments: boolean; receivedAt: string }; rules: { id: string; name: string; semantic: string; output: 'reply' | 'report'; hint: string }[]; uiLanguage?: 'zh' | 'en' }
+export interface TriageOutput { category: TriageCategory; urgency: 'high' | 'normal' | 'low'; reason: string; nextStep: string; ruleId: string }
+export interface TriageRunner { available(): boolean; run(input: TriageInput, signal: AbortSignal): Promise<TriageOutput> }
+export type WriterKind = 'brief' | 'weekly' | 'topic' | 'trial'
+export interface WriterRunner { available(): boolean; run(kind: WriterKind, data: unknown, signal: AbortSignal): Promise<Record<string, unknown>> }
 export interface RuleSuggestion { rule: Rule; warnings: string[] }
 export type RuleAssistant = (input: { description: string; account: string; folder: string; uiLanguage?: 'zh' | 'en' }, signal: AbortSignal) => Promise<RuleSuggestion>
 export interface InstructionSuggestion { instructions: string }

@@ -81,10 +81,34 @@ const report = task(3, 'completed', '[演示] 客户反馈 · 本周需求分析
 report.rule = { ...structuredClone(rule), output: 'report' }
 report.history.push({ at: report.updatedAt, message: '演示分析报告已生成，任务完成。' })
 
+// Redesign fixtures: triage results, anchored checks, an archived notice, a pending automatic reply,
+// an unmatched request, activity, a topic, a weekly draft and today's brief. All synthetic.
+quotation.triage = { state: 'done', category: 'request', urgency: 'high', reason: '客户询问 200 套控制模块的报价与交付，希望尽快回复。', nextStep: '核对报价与交期后回复林女士', by: 'ai', at: at(17) }
+quotation.checks = [{ item: '客户未说明接口规格，回复中请对方补充。', quote: '烦请补充所需接口规格、使用环境及期望到货日期' }, { item: '质保与售后条款需人工确认后再承诺。', quote: '同步提供质保与售后支持说明' }]
+quotation.informationGaps = '1. 客户未说明接口规格\n2. 质保与售后条款需人工确认'
+procurement.triage = { state: 'done', category: 'request', urgency: 'normal', reason: '采购意向明确，但缺少规格和交付地点。', nextStep: '补充设备规格、数量和交付地点', by: 'ai', at: at(41) }
+report.triage = { state: 'done', category: 'request', urgency: 'low', by: 'ai', at: at(94) }
+const lowRisk = validateRule({ id: randomUUID(), name: '演示 · 简单确认', enabled: false, priority: 90, account: 'visual-demo', folder: 'INBOX', match: { from: '', subject: '', hasAttachments: false, mode: 'all' }, semantic: '只需确认收到或简单答复的来信', autonomy: 'low_risk', instructions: '仅为视觉 QA。对只需确认收到的来信，起草一句简短确认。此演示规则保持禁用。', tools: [], skills: [], output: 'reply', maxRetries: 0 })
+const ack = task(4, 'review', '[演示] 资料已发你邮箱', '张磊 <colleague@example.test>', '资料已发你邮箱，收到回个话。\n\n【合成演示邮件】', '对方告知资料已发送，回复确认收到。', 12)
+Object.assign(ack, { ruleId: lowRisk.id, ruleName: lowRisk.name, rule: structuredClone(lowRisk), replyTo: 'colleague@example.test', triage: { state: 'done', category: 'reply_needed', urgency: 'normal', reason: '对方请求确认收到。', by: 'ai', at: at(11) } })
+const ackDraft = await drafts.create({ account: 'visual-demo', to: 'colleague@example.test', cc: '', subject: 'Re: [演示] 资料已发你邮箱', text: '收到，谢谢！下午看完给你反馈。' }, [], undefined, { sourceKey: 'visual-qa:ack', inReplyTo: 'ack@example.test', references: 'ack@example.test' })
+ack.draftId = ackDraft.id
+ack.autoSend = { at: new Date(Date.now() + 25 * 60_000).toISOString(), scheduledAt: at(10), autonomy: 'low_risk', draftRevision: ackDraft.revision }
+const notice = task(5, 'ignored', '[演示] 服务恢复及补偿通知', '演示服务 <noreply@service.example.test>', '服务已恢复，补偿将自动到账。\n\n【合成演示邮件】', undefined, 300)
+Object.assign(notice, { ruleId: undefined, ruleName: undefined, rule: undefined, triage: { state: 'done', category: 'notification', urgency: 'low', reason: '服务故障恢复通知，无需处理。', archived: true, by: 'ai', at: at(299) } })
+const urgent = task(6, 'unmatched', '[演示] 能否本周加急发 200 套？', '王工 <partner@example.test>', '客户催了，这周能否加急先发 200 套？\n\n【合成演示邮件】', undefined, 60)
+Object.assign(urgent, { ruleId: undefined, ruleName: undefined, rule: undefined, triage: { state: 'done', category: 'request', urgency: 'high', reason: '对方希望本周加急发货，需要你决定物流方案。', nextStep: '决定是否加急并答复王工', by: 'ai', at: at(59) } })
+const activity = (minutes, kind, item, extra = {}) => ({ id: randomUUID(), at: at(minutes), kind, title: item.subject, taskId: item.id, ruleName: item.ruleName, source: 'email', ...extra })
+const today = new Date(), day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+
 await store.mutate(state => {
   state.settings = { enabled: false, pollSeconds: 60 }
-  state.rules = [rule]
-  state.tasks = [report, procurement, quotation]
-  log(state, '已创建 3 个明确标识的合成演示任务；后台保持关闭，未配置任何真实邮箱或凭据。')
+  state.rules = [rule, lowRisk]
+  state.tasks = [report, procurement, quotation, notice, urgent, ack]
+  state.activity = [activity(299, 'archive', notice, { detail: '服务故障恢复通知，无需处理。' }), activity(93, 'report', report), activity(10, 'auto_send_scheduled', ack, { autonomy: 'low_risk', undoUntil: ack.autoSend.at })]
+  state.topics = [{ id: randomUUID(), name: '[演示] 华东项目', kind: 'project', keywords: ['华东', '控制模块'], senders: [], schedule: 'none', createdAt: at(2000), updatedAt: at(30), summary: { text: '客户询价 200 套控制模块，报价草稿待审核；另有加急发货请求待决定。', level: 'attention', risks: ['交期依据不足'], todos: ['审核报价草稿', '决定是否加急'], at: at(30), by: 'ai' } }]
+  state.reports = [{ id: randomUUID(), kind: 'weekly', title: '[演示] 本周周报', text: '## 本周完成\n- 整理本周客户反馈\n\n## 进行中与风险\n- 华东项目报价待审核\n\n## 下周计划\n- [请补充]', periodStart: day, periodEnd: day, generatedAt: at(20), updatedAt: at(20), by: 'template' }]
+  state.brief = { date: day, text: '【演示】今天有 4 件事需要你决策，建议先处理华东项目的报价回复；另有一条加急发货请求待你决定。AI 已归档 1 条通知，一条确认回复将在 25 分钟后自动发送，可撤回。', generatedAt: at(5), by: 'template' }
+  log(state, '已创建明确标识的合成演示任务；后台保持关闭，未配置任何真实邮箱或凭据。')
 })
-console.log(JSON.stringify({ home: actualHome, tasks: 3, drafts: 1, rules: 1, ruleEnabled: false, backgroundEnabled: false, marker: join(home, 'VISUAL-QA-SYNTHETIC.json') }, null, 2))
+console.log(JSON.stringify({ home: actualHome, tasks: 6, drafts: 2, rules: 2, ruleEnabled: false, backgroundEnabled: false, marker: join(home, 'VISUAL-QA-SYNTHETIC.json') }, null, 2))

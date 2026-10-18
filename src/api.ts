@@ -1,14 +1,27 @@
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { Engine } from './engine.js'
+import { Engine, settingsOf } from './engine.js'
 import { originalMailFields } from './original-mail.js'
-import { matches, validateRule } from './rules.js'
-import { findTask, log, touch } from './store.js'
-import { WorkbenchError, type Task, type State, type RuleAssistant, type InstructionOptimizer } from './types.js'
+import { matches, ruleExcludes, validateRule } from './rules.js'
+import { CLOCK, findTask, log, touch } from './store.js'
+import { activityEntry, localDate, needsAttention, relations, senderAddress, topicMatches, trialData } from './digest.js'
+import { sourceStatuses } from './sources.js'
+import { WorkbenchError, now, type Task, type State, type RuleAssistant, type InstructionOptimizer, type Topic } from './types.js'
 
 const requireRevision = (revision: unknown): number => { if (!Number.isSafeInteger(revision) || Number(revision) < 1) throw new WorkbenchError('缺少有效版本，请刷新后重试。'); return Number(revision) }
 const configCheck = (state: State, revision: unknown): void => { if (requireRevision(revision) !== state.configRevision) throw new WorkbenchError('配置已更新，请刷新后重试。', 'conflict', 409) }
 const editableTask = (task: Task): void => { if (task.status !== 'review') throw new WorkbenchError('只有待审核任务可以修改或发送草稿。', 'state', 409) }
+/** A person acting on a task takes it over: any pending automatic send is withdrawn. */
+const takeOver = (state: State, task: Task, reason: string): void => {
+  if (!task.autoSend || task.autoSend.canceledAt) return
+  task.autoSend.canceledAt = now(); task.autoSend.reason = reason
+  for (const item of state.activity || []) if (item.taskId === task.id && item.kind === 'auto_send_scheduled' && !item.undoneAt) item.undoneAt = now()
+}
+const list = (value: unknown, maxItems: number, maxLength: number, message: string): string[] => {
+  if (!Array.isArray(value) || value.length > maxItems || value.some(item => typeof item !== 'string' || item.length > maxLength || /[\0\r\n]/.test(item))) throw new WorkbenchError(message)
+  return [...new Set(value.map(item => item.trim()).filter(Boolean))]
+}
+const language = (value: unknown): 'zh' | 'en' | undefined => value === 'en' || value === 'zh' ? value : undefined
 const json = (status: number, value: unknown): Response => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } })
 export class WorkbenchApi {
   private busy = new Set<string>()
@@ -67,16 +80,25 @@ export class WorkbenchApi {
       return { ...safe, canResolveSend: task.status === 'uncertain' && draft?.state === 'uncertain' && sendRecoveryAvailable, outputKind: task.rule?.output, ruleUpdated: !!latestRule && !!task.rule && JSON.stringify(latestRule) !== JSON.stringify(task.rule), attachments: task.attachments.map(({ localPath, ...file }) => file), draft: draft ? { ...draft, sourceKey: undefined, attachments: draft.attachments.map(({ id, filename }: any) => ({ id, filename })) } : undefined }
     }))
     const health = this.engine.health()
-    return { tasks, rules: state.rules, revision: state.configRevision, settings: state.settings, logs: state.logs.slice().reverse(), accounts, health: { ...health, error: providerError || health.error }, capabilities: await this.engine.capabilities() }
+    const links = relations(state.tasks)
+    const enriched = tasks.map(task => ({ ...task, relatedIds: links.get(task.id)?.related ?? [], possibleIds: links.get(task.id)?.possible ?? [], topicIds: this.engine.topicIds(state, task as Task), attention: needsAttention(task as Task) }))
+    const topics = (state.topics || []).map(topic => { const items = state.tasks.filter(task => topicMatches(topic, task)); return { ...topic, count: items.length, open: items.filter(needsAttention).length, lastAt: items.map(task => task.receivedAt).sort().at(-1) } })
+    return {
+      tasks: enriched, rules: state.rules, revision: state.configRevision, settings: state.settings, defaults: settingsOf(state.settings), logs: state.logs.slice().reverse(), accounts, health: { ...health, error: providerError || health.error }, capabilities: await this.engine.capabilities(),
+      activity: (state.activity || []).slice(-300).sort((a, b) => b.at.localeCompare(a.at)), topics, reports: (state.reports || []).slice().reverse(), brief: state.brief, today: localDate(),
+      sources: sourceStatuses({ ready: health.email, accounts: accounts.length, error: providerError }), meetings: [],
+    }
   }
   action(body: any, signal: AbortSignal = new AbortController().signal): Promise<unknown> { return this.tracked(() => this.dispatch(body, signal)) }
   private async dispatch(body: any, signal: AbortSignal): Promise<unknown> {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new WorkbenchError('请求格式无效。')
+    const uiLanguage = language(body.uiLanguage)
+    if (uiLanguage) this.engine.language = uiLanguage
     if (body.action === 'snapshot') return this.buildSnapshot()
     if (body.action === 'preferences') {
       const state = await this.engine.store.read()
       // Global navigation and reminders do not need mailbox access or draft bodies.
-      return { revision: state.configRevision, stateRevision: state.revision, settings: state.settings, attention: state.tasks.filter(task => ['review', 'needs_info', 'failed', 'uncertain'].includes(task.status)).map(task => ({ id: task.id, status: task.status })) }
+      return { revision: state.configRevision, stateRevision: state.revision, settings: state.settings, attention: state.tasks.filter(needsAttention).map(task => ({ id: task.id, status: task.status })) }
     }
     if (body.action === 'mailSettings') {
       const state = await this.engine.store.read()
@@ -122,9 +144,13 @@ export class WorkbenchApi {
     }
     if (body.action === 'saveSettings') {
       const settings = body.settings
-      if (!settings || typeof settings !== 'object' || Array.isArray(settings) || !Object.keys(settings).length || Object.keys(settings).some(key => !['enabled', 'pollSeconds', 'showWorkbench', 'notifyNewTodo'].includes(key))) throw new WorkbenchError('工作台设置无效。')
-      for (const key of ['enabled', 'showWorkbench', 'notifyNewTodo']) if (key in settings && typeof settings[key] !== 'boolean') throw new WorkbenchError('工作台开关应为布尔值。')
+      if (!settings || typeof settings !== 'object' || Array.isArray(settings) || !Object.keys(settings).length || Object.keys(settings).some(key => !['enabled', 'pollSeconds', 'showWorkbench', 'notifyNewTodo', 'triage', 'undoMinutes', 'briefEnabled', 'briefTime', 'weeklyEnabled', 'weeklyDay', 'weeklyTime', 'meetingBriefMinutes'].includes(key))) throw new WorkbenchError('工作台设置无效。')
+      for (const key of ['enabled', 'showWorkbench', 'notifyNewTodo', 'triage', 'briefEnabled', 'weeklyEnabled']) if (key in settings && typeof settings[key] !== 'boolean') throw new WorkbenchError('工作台开关应为布尔值。')
       if ('pollSeconds' in settings && (!Number.isSafeInteger(settings.pollSeconds) || settings.pollSeconds < 30 || settings.pollSeconds > 3600)) throw new WorkbenchError('检查间隔应为 30–3600 秒。')
+      if ('undoMinutes' in settings && (!Number.isSafeInteger(settings.undoMinutes) || settings.undoMinutes < 1 || settings.undoMinutes > 240)) throw new WorkbenchError('撤回窗口应为 1–240 分钟。')
+      if ('meetingBriefMinutes' in settings && (!Number.isSafeInteger(settings.meetingBriefMinutes) || settings.meetingBriefMinutes < 5 || settings.meetingBriefMinutes > 240)) throw new WorkbenchError('会前简报提前时间应为 5–240 分钟。')
+      if ('weeklyDay' in settings && (!Number.isSafeInteger(settings.weeklyDay) || settings.weeklyDay < 0 || settings.weeklyDay > 6)) throw new WorkbenchError('周报日期无效。')
+      for (const key of ['briefTime', 'weeklyTime']) if (key in settings && (typeof settings[key] !== 'string' || !CLOCK.test(settings[key]))) throw new WorkbenchError('时间格式应为 HH:MM。')
       return this.engine.store.mutate(state => {
         configCheck(state, body.revision)
         const enabled = state.settings.enabled
@@ -143,6 +169,63 @@ export class WorkbenchApi {
       return { matched: matches(rule, { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.attachments.length > 0 || task.hasAttachments === true }), rule: rule.name, note: '仅匹配预览，不会调用 DSH 或发送邮件。' }
     }
     if (body.action === 'poll') return this.engine.poll()
+    if (body.action === 'generateBrief') return this.engine.generateBrief(uiLanguage, signal)
+    if (body.action === 'generateReport') {
+      if (body.kind === 'weekly') return this.engine.generateWeekly(uiLanguage, signal)
+      if (body.kind === 'topic' && typeof body.topicId === 'string') return this.engine.refreshTopic(body.topicId, uiLanguage, signal, true)
+      throw new WorkbenchError('报告类型无效。')
+    }
+    if (body.action === 'refreshTopic') { if (typeof body.id !== 'string') throw new WorkbenchError('主题不存在。'); return this.engine.refreshTopic(body.id, uiLanguage, signal) }
+    if (body.action === 'saveTopic') {
+      const input = body.topic
+      if (!input || typeof input !== 'object' || typeof input.name !== 'string' || !input.name.trim() || input.name.length > 60) throw new WorkbenchError('请填写 60 字以内的主题名称。')
+      const keywords = list(input.keywords ?? [], 20, 60, '关键词格式无效。'), senders = list(input.senders ?? [], 20, 200, '联系人格式无效。').map(item => item.toLowerCase())
+      if (!keywords.length && !senders.length) throw new WorkbenchError('请至少填写一个关键词或联系人。')
+      if (!['customer', 'project', 'other'].includes(input.kind) || !['none', 'weekly'].includes(input.schedule ?? 'none')) throw new WorkbenchError('主题类型或报告周期无效。')
+      return this.engine.store.mutate(state => {
+        const topics = state.topics ?? (state.topics = [])
+        const existing = typeof input.id === 'string' && input.id ? topics.find(topic => topic.id === input.id) : undefined
+        if (input.id && !existing) throw new WorkbenchError('主题不存在。', 'missing', 404)
+        if (!existing && topics.length >= 100) throw new WorkbenchError('主题数量已达到 100 个上限。')
+        const topic: Topic = { ...(existing ?? { id: randomUUID(), createdAt: now() }), name: input.name.trim(), kind: input.kind, keywords, senders, schedule: input.schedule ?? 'none', updatedAt: now() } as Topic
+        if (existing) Object.assign(existing, topic); else topics.push(topic)
+        log(state, `已保存主题「${topic.name}」。`)
+        return topic
+      })
+    }
+    if (body.action === 'deleteTopic') return this.engine.store.mutate(state => { const topic = state.topics?.find(item => item.id === body.id); if (!topic) throw new WorkbenchError('主题不存在。', 'missing', 404); state.topics = state.topics!.filter(item => item.id !== body.id); log(state, `已删除主题「${topic.name}」，相关信息保留。`); return { deleted: true } })
+    if (body.action === 'saveReport') {
+      if (typeof body.text !== 'string' || body.text.length > 32000 || typeof body.title !== 'string' || !body.title.trim() || body.title.length > 160) throw new WorkbenchError('请填写报告标题和不超过 32000 字的正文。')
+      return this.engine.store.mutate(state => { const report = state.reports?.find(item => item.id === body.id); if (!report) throw new WorkbenchError('报告不存在。', 'missing', 404); report.title = body.title.trim(); report.text = body.text; report.updatedAt = now(); return report })
+    }
+    if (body.action === 'deleteReport') return this.engine.store.mutate(state => { if (!state.reports?.some(item => item.id === body.id)) throw new WorkbenchError('报告不存在。', 'missing', 404); state.reports = state.reports.filter(item => item.id !== body.id); return { deleted: true } })
+    if (body.action === 'trialRule') {
+      const rule = validateRule({ ...body.rule, enabled: true }), state = await this.engine.store.read()
+      const pool = state.tasks.slice().sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)).slice(0, 30)
+      const items = pool.map(task => {
+        const category = task.triage?.category
+        if (!matches(rule, { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.attachments.length > 0 || task.hasAttachments === true })) return { id: task.id, matched: false, reason: '发件人、主题或附件条件不符。', category }
+        if (category && ruleExcludes(rule).includes(category)) return { id: task.id, matched: false, reason: '属于方案排除的信息类别。', category }
+        return { id: task.id, matched: true, reason: '符合发件人、主题和附件条件。', category }
+      })
+      let by: 'ai' | 'rules' = 'rules'
+      const judged = items.filter(item => item.matched)
+      if ((rule.semantic || judged.length) && this.engine.writer?.available() && judged.length) {
+        try {
+          const result = await this.engine.writer.run('trial', { ...trialData(state, rule, judged.map(item => item.id)), uiLanguage: uiLanguage ?? this.engine.language }, AbortSignal.any([signal, this.controller.signal, AbortSignal.timeout(120000)])) as { matches: { id: string; matched: boolean; reason: string }[] }
+          for (const verdict of result.matches) { const item = items.find(entry => entry.id === verdict.id && entry.matched); if (item) { item.matched = verdict.matched; item.reason = verdict.reason || item.reason } }
+          by = 'ai'
+        } catch (error) { if (signal.aborted) throw error }
+      }
+      return { by, total: items.length, items: items.map(item => { const task = pool.find(entry => entry.id === item.id)!; return { ...item, subject: task.subject || task.title, from: task.from, receivedAt: task.receivedAt } }), note: '仅预览匹配结果，不会调用处理流程或发送邮件。' }
+    }
+    if (body.action === 'undoActivity') {
+      const state = await this.engine.store.read(), entry = state.activity?.find(item => item.id === body.activityId)
+      if (!entry || entry.undoneAt || !entry.taskId) throw new WorkbenchError('这条记录无法撤回。', 'state', 409)
+      if (entry.kind === 'archive') return this.restore(entry.taskId)
+      if (entry.kind === 'auto_send_scheduled') return this.cancelAutoSend(entry.taskId)
+      throw new WorkbenchError('这条记录无法撤回。', 'state', 409)
+    }
     if (body.action === 'resetBaseline') {
       configCheck(await this.engine.store.read(), body.revision)
       if (body.confirmed !== true || typeof body.account !== 'string' || typeof body.folder !== 'string') throw new WorkbenchError('重建基线需要明确确认，当前已有邮件不会重新处理。')
@@ -169,7 +252,8 @@ export class WorkbenchApi {
         return this.engine.store.mutate(state => {
           const item = findTask(state, id, body.revision)
           if (body.action === 'runRule') { if (body.ruleRevision !== undefined) configCheck(state, body.ruleRevision); const rule = state.rules.find(r => r.id === body.ruleId); if (!rule) throw new WorkbenchError('请选择已有规则。'); item.rule = structuredClone(rule); item.ruleId = rule.id; item.ruleName = rule.name }
-          if (!item.rule) throw new WorkbenchError('请先为任务选择处理规则。')
+          // A message whose triage failed has no workflow yet; retrying runs triage again.
+          if (!item.rule && item.triage?.state !== 'pending') throw new WorkbenchError('请先为任务选择处理规则。')
           if (body.action === 'supplement' || (body.action === 'runRule' && body.text !== undefined)) {
             if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 16000) throw new WorkbenchError('请填写不超过 16000 字的补充信息。')
             const text = [item.supplement, body.text.trim()].filter(Boolean).join('\n\n')
@@ -178,17 +262,20 @@ export class WorkbenchApi {
           }
           if (item.summary) item.history.push({ at: new Date().toISOString(), message: `重新处理前的结果：\n${item.summary}${item.informationGaps ? '\n待人工核实：\n' + item.informationGaps : ''}${item.error ? '\n阻塞原因：\n' + item.error : ''}` })
           delete item.needsInfoKind
+          takeOver(state, item, '已重新处理，原自动发送取消。')
           item.status = 'queued'; item.attempts = 0; item.prepareKey = randomUUID(); delete item.nextAttemptAt; delete item.error; touch(item, '已排队重新处理；原草稿保留，重新生成后关联新草稿。'); log(state, '任务已重新排队。', id); return item
         })
       }
-      if (body.action === 'ignore') return this.engine.store.mutate(state => { const item = findTask(state, id, body.revision); if (['running', 'sending', 'uncertain', 'sent'].includes(item.status)) throw new WorkbenchError('当前状态不允许忽略。'); item.status = 'ignored'; touch(item, '已人工忽略。'); log(state, '任务已忽略。', id); return item })
+      if (body.action === 'ignore') return this.engine.store.mutate(state => { const item = findTask(state, id, body.revision); if (['running', 'sending', 'uncertain', 'sent'].includes(item.status)) throw new WorkbenchError('当前状态不允许忽略。'); takeOver(state, item, '已人工忽略，自动发送取消。'); item.status = 'ignored'; touch(item, '已人工忽略。'); log(state, '任务已忽略。', id); return item })
+      if (body.action === 'restore') return this.restoreTask(state => findTask(state, id, body.revision))
+      if (body.action === 'cancelAutoSend') return this.cancelTaskAutoSend(state => findTask(state, id, body.revision))
       if (body.action === 'saveDraft') {
         editableTask(task)
         if (!task.draftId) throw new WorkbenchError('任务没有回复草稿。')
         const original = await this.engine.email().drafts.get(task.draftId), fields = body.draft
         if (!fields || typeof fields !== 'object') throw new WorkbenchError('请填写草稿。')
         const draft = await this.engine.email().drafts.update(task.draftId, requireRevision(body.draftRevision), { account: task.account, to: fields.to, cc: fields.cc, subject: fields.subject, text: fields.text, attachments: fields.attachments ?? original.attachments.map((file: any) => file.id) }, signal)
-        await this.engine.store.mutate(state => { const item = findTask(state, id, body.revision); touch(item, '已保存人工编辑的草稿。') })
+        await this.engine.store.mutate(state => { const item = findTask(state, id, body.revision); takeOver(state, item, '你修改了草稿，自动发送已取消。'); touch(item, '已保存人工编辑的草稿。') })
         return draft
       }
       if (body.action === 'previewSend') {
@@ -203,7 +290,7 @@ export class WorkbenchApi {
         const email = this.engine.email()
         const before = await email.drafts.get(task.draftId)
         if (before.revision !== requireRevision(body.draftRevision)) throw new WorkbenchError('草稿已变化，请重新预览。', 'conflict', 409)
-        await this.engine.store.mutate(state => { const item = findTask(state, id, body.revision); editableTask(item); item.status = 'sending'; touch(item, '人工确认发送。'); log(state, '开始发送审核后的草稿。', id) })
+        await this.engine.store.mutate(state => { const item = findTask(state, id, body.revision); editableTask(item); takeOver(state, item, '已人工确认发送。'); item.status = 'sending'; touch(item, '人工确认发送。'); log(state, '开始发送审核后的草稿。', id) })
         try {
           const result = await email.drafts.send(task.draftId, body.planId, true, signal)
           await this.engine.store.mutate(state => { const item = findTask(state, id); item.status = result.draft.state === 'sent' ? 'sent' : result.draft.state === 'draft' ? 'review' : 'uncertain'; item.error = result.draft.error; touch(item, item.status === 'review' ? '发送未提交，草稿保留，请修复连接后重新预览发送。' : item.status === 'sent' ? 'SMTP 已接受邮件，请以邮箱最终投递结果为准。' : '发送结果待核实，不会自动重发。'); log(state, item.status === 'review' ? '发送未提交，已保留待审核草稿。' : item.status === 'sent' ? '邮件发送已获得 SMTP 回执。' : '发送结果待核实。', id) })
@@ -235,6 +322,34 @@ export class WorkbenchApi {
       throw new WorkbenchError('不支持此操作。')
     })
   }
+  /** Bring an AI-archived message back and stop archiving that sender automatically. */
+  private restoreTask(pick: (state: State) => Task): Promise<unknown> {
+    return this.engine.store.mutate(state => {
+      const item = pick(state)
+      if (item.status !== 'ignored' || !item.triage?.archived) throw new WorkbenchError('只有 AI 归档的信息可以恢复。', 'state', 409)
+      item.status = 'unmatched'; item.triage.archived = false
+      const sender = senderAddress(item.from)
+      state.senders = { ...(state.senders || {}), [sender]: { ...(state.senders?.[sender] || {}), neverArchive: true } }
+      for (const entry of state.activity || []) if (entry.taskId === item.id && entry.kind === 'archive' && !entry.undoneAt) entry.undoneAt = now()
+      touch(item, '已恢复 AI 归档的信息；该发件人的信息以后不再自动归档。'); log(state, '已恢复归档信息。', item.id)
+      return item
+    })
+  }
+  private restore(taskId: string): Promise<unknown> { return this.exclusive(taskId, () => this.restoreTask(state => findTask(state, taskId))) }
+  /** Withdraw a pending automatic reply; future replies to this contact stay manual. */
+  private cancelTaskAutoSend(pick: (state: State) => Task): Promise<unknown> {
+    return this.engine.store.mutate(state => {
+      const item = pick(state)
+      if (item.status !== 'review' || !item.autoSend || item.autoSend.canceledAt) throw new WorkbenchError('自动发送已执行或已取消，无法撤回。', 'state', 409)
+      takeOver(state, item, '你撤回了自动发送。')
+      const to = (item.replyTo || '').trim().toLowerCase()
+      if (to) state.senders = { ...(state.senders || {}), [to]: { ...(state.senders?.[to] || {}), neverAutoSend: true } }
+      state.activity = [...(state.activity || []), activityEntry({ kind: 'auto_send_canceled', title: item.subject || item.title, detail: item.replyTo, taskId: item.id, ruleName: item.ruleName, source: 'email' }, randomUUID())]
+      touch(item, '已撤回自动发送，转为人工审核；以后发给该联系人的回复都需要你确认。'); log(state, '已撤回自动发送。', item.id)
+      return item
+    })
+  }
+  private cancelAutoSend(taskId: string): Promise<unknown> { return this.exclusive(taskId, () => this.cancelTaskAutoSend(state => findTask(state, taskId))) }
   async fetch(request: Request): Promise<Response> {
     try { return await this.tracked(() => this.dispatchFetch(request)) }
     catch (error) { return json(error instanceof WorkbenchError ? error.status : 400, { ok: false, error: this.engine.safe(error), code: (error as any)?.code ?? 'invalid' }) }

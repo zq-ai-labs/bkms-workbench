@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { WorkbenchError, type Rule } from './types.js'
+import { AUTONOMY, DEFAULT_EXCLUDE, SOURCE_KINDS, TRIAGE_CATEGORIES, WorkbenchError, type Rule, type TriageCategory } from './types.js'
 import { isPreparationTool } from './agent.js'
 const string = (v: unknown, max: number): string => { if (typeof v !== 'string' || v.length > max || v.includes('\0')) throw new WorkbenchError('规则字段格式或长度无效。'); return v.trim() }
 export function validateRule(input: any): Rule {
@@ -16,16 +16,49 @@ export function validateRule(input: any): Rule {
   const skills = input.skills ?? []
   if (!Array.isArray(skills) || skills.length > 10 || skills.some((s: unknown) => typeof s !== 'string' || !s.trim() || s.length > 200 || /[\r\n\0]/.test(s))) throw new WorkbenchError('请选择最多 10 个有效技能。')
   rule.skills = [...new Set<string>(skills)]
-  // The background runner is read/prepare only. Sending is exclusively a reviewed UI action.
+  // The background runner is read/prepare only. Sending is exclusively a reviewed UI action
+  // or a bounded, withdrawable automatic reply scheduled by the engine itself.
   if (rule.tools.some(t => !isPreparationTool(t))) throw new WorkbenchError('后台规则仅允许读取与查询工具；发送、写入、执行及转交能力由人工确认入口控制。')
+  // Optional fields are only written when present so legacy rules keep their exact persisted shape.
+  if (input.semantic !== undefined && input.semantic !== '') rule.semantic = string(input.semantic, 1000)
+  if (rule.semantic === '') delete rule.semantic
+  if (input.exclude !== undefined) {
+    if (!Array.isArray(input.exclude) || input.exclude.some((c: unknown) => !TRIAGE_CATEGORIES.includes(c as TriageCategory))) throw new WorkbenchError('排除类别无效。')
+    rule.exclude = [...new Set<TriageCategory>(input.exclude)]
+  }
+  if (input.autonomy !== undefined) {
+    if (!AUTONOMY.includes(input.autonomy)) throw new WorkbenchError('自主级别无效。')
+    if (input.autonomy !== 'draft') rule.autonomy = input.autonomy
+  }
+  if (rule.autonomy && rule.output !== 'reply') delete rule.autonomy
+  if (input.sources !== undefined) {
+    if (!Array.isArray(input.sources) || !input.sources.length || input.sources.some((s: unknown) => !SOURCE_KINDS.includes(s as any))) throw new WorkbenchError('信息来源无效。')
+    const sources = [...new Set(input.sources)] as Rule['sources']
+    if (!(sources!.length === 1 && sources![0] === 'email')) rule.sources = sources
+  }
   return rule
 }
+export const ruleExcludes = (rule: Rule): readonly TriageCategory[] => rule.exclude ?? DEFAULT_EXCLUDE
+export const ruleSources = (rule: Rule) => rule.sources ?? ['email']
 export function matches(rule: Rule, mail: { account: string; folder?: string; from: string; subject: string; hasAttachments: boolean }): boolean {
-  if (!rule.enabled || (rule.account && rule.account !== mail.account) || (mail.folder && rule.folder !== mail.folder)) return false
+  if (!rule.enabled || !ruleSources(rule).includes('email') || (rule.account && rule.account !== mail.account) || (mail.folder && rule.folder !== mail.folder)) return false
   const tests: boolean[] = []
   if (rule.match.from) tests.push(mail.from.toLowerCase().includes(rule.match.from.toLowerCase()))
   if (rule.match.subject) tests.push(mail.subject.toLowerCase().includes(rule.match.subject.toLowerCase()))
   if (rule.match.hasAttachments) tests.push(mail.hasAttachments)
   return !tests.length || (rule.match.mode === 'any' ? tests.some(Boolean) : tests.every(Boolean))
 }
-export const chooseRule = (rules: Rule[], mail: Parameters<typeof matches>[1]): Rule | undefined => [...rules].sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id)).find(rule => matches(rule, mail))
+const byPriority = (rules: Rule[]) => [...rules].sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
+export const chooseRule = (rules: Rule[], mail: Parameters<typeof matches>[1]): Rule | undefined => byPriority(rules).find(rule => matches(rule, mail))
+/** All enabled workflows whose literal conditions accept the mail, highest priority first. */
+export const candidateRules = (rules: Rule[], mail: Parameters<typeof matches>[1]): Rule[] => byPriority(rules).filter(rule => matches(rule, mail))
+/**
+ * Pick the workflow after triage. An AI decision is authoritative among the literal
+ * candidates; a heuristic decision only falls back to literal priority. Either way a
+ * workflow never receives a category it excludes.
+ */
+export function chooseAfterTriage(candidates: Rule[], category: TriageCategory, aiRuleId: string | undefined, decidedByAi: boolean): Rule | undefined {
+  const allowed = candidates.filter(rule => !ruleExcludes(rule).includes(category))
+  if (decidedByAi) return allowed.find(rule => rule.id === aiRuleId)
+  return allowed.find(rule => !rule.semantic) ?? allowed[0]
+}

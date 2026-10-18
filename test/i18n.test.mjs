@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import vm from 'node:vm'
 import { join } from 'node:path'
@@ -16,34 +16,36 @@ const module = { exports: {} }
 vm.runInNewContext(bundle.outputFiles[0].text, { module, exports: module.exports, require })
 const i18n = module.exports
 
+const clientFiles = readdirSync(new URL('../client/', import.meta.url)).filter(name => /\.tsx?$/.test(name) && !name.endsWith('.d.ts') && name !== 'i18n.ts')
 test('every workbench UI label has English text and matching placeholders', () => {
-  const source = readFileSync(new URL('../client/index.tsx', import.meta.url), 'utf8')
-  const sf = ts.createSourceFile('client.tsx', source, 99, true, ts.ScriptKind.TSX)
   const placeholders = text => (text.match(/\{\d+\}/g) || []).sort()
   for (const [key, value] of Object.entries(en)) {
     assert.ok(value.trim(), key)
     assert.doesNotMatch(value, /[\u4e00-\u9fff]/, key)
     assert.deepEqual(placeholders(value), placeholders(key), key)
   }
+  assert.ok(clientFiles.includes('index.tsx') && clientFiles.length > 5)
+  for (const file of clientFiles) check(file)
+})
+function check(file) {
+  const source = readFileSync(new URL(`../client/${file}`, import.meta.url), 'utf8')
+  const sf = ts.createSourceFile(file, source, 99, true, file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
+  // Label tables are constant, upper-case declarations translated at render time; every entry needs English.
+  const table = node => { for (let parent = node.parent; parent; parent = parent.parent) if (ts.isVariableDeclaration(parent)) return /^[A-Z][A-Z_]+$/.test(parent.name.getText(sf)); return false }
   function visit(node) {
-    if (ts.isVariableDeclaration(node) && node.name.getText(sf) === 'LABELS') {
-      for (const property of node.initializer.properties) assert.ok(en[property.initializer.text])
-      return
-    }
-    if (ts.isCallExpression(node) && node.expression.getText(sf) === 't' && ts.isStringLiteral(node.arguments[0])) assert.ok(en[node.arguments[0].text], node.arguments[0].text)
-    if (ts.isJsxText(node)) assert.doesNotMatch(node.getText(sf), /[\u4e00-\u9fff。]/)
+    if (ts.isCallExpression(node) && node.expression.getText(sf) === 't' && ts.isStringLiteral(node.arguments[0])) assert.ok(en[node.arguments[0].text], `${file}: ${node.arguments[0].text}`)
+    if (ts.isJsxText(node)) assert.doesNotMatch(node.getText(sf), /[\u4e00-\u9fff。]/, file)
     if (ts.isStringLiteral(node) && /[\u4e00-\u9fff]/.test(node.text)) {
       let parent = node.parent
       while (ts.isConditionalExpression(parent)) parent = parent.parent
       const translated = ts.isCallExpression(parent) && parent.expression.getText(sf) === 't'
-      if (translated) assert.ok(en[node.text], node.text)
-      const emptySubject = node.text === '无主题邮件' && ts.isBinaryExpression(node.parent)
-      assert.ok(translated || emptySubject, `Unlocalized string: ${node.text}`)
+      if (translated || table(node)) assert.ok(en[node.text], `${file}: ${node.text}`)
+      assert.ok(translated || table(node), `Unlocalized string in ${file}: ${node.text}`)
     }
     ts.forEachChild(node, visit)
   }
   visit(sf)
-})
+}
 
 test('system messages change language without modifying dynamic user content', () => {
   let active = 'en', revision = 0, dictionaries, listeners = new Set()
