@@ -173,15 +173,15 @@ export function WechatSettingsCard({ value, disabled, save }: { value?: WechatSe
       <span className="bkw-set-control"><Tag tone={tone}>{!settings.enabled ? t("未开启") : status?.ready ? t("正常") : checking ? t("连接中") : t("未连接")}</Tag><Switch label={t("微信读取")} checked={settings.enabled} disabled={disabled} onChange={enabled => update({ enabled }, enabled ? t("已开启微信读取，请添加要处理的会话") : t("已关闭微信读取"))} /></span>
     </div>
     {settings.enabled && <div className="bkw-wx-panel">
-      {status && !status.ready && !checking && <Alert tone="warn">{t("读取不到微信时请检查：微信 4.x 已登录、已安装 64 位 Python 和 wechatauto-replica。可在下方“读取组件”中指定 Python 和组件目录。")}<button type="button" className="bkw-link" onClick={() => void check()}>{t("重新检测")}</button></Alert>}
+      {status && !status.ready && !checking && <Alert tone="warn">{t("读取不到微信时请检查：微信 4.x 已登录，并已安装 64 位 Python 3.9 或更高版本。Python 命令不是 py -3 时，可在下方“读取组件”中填写。")}<button type="button" className="bkw-link" onClick={() => void check()}>{t("重新检测")}</button></Alert>}
       {list("people")}
       {list("groups")}
       <div className="bkw-wx-row"><span><strong>{t("合并连续消息")}</strong><small>{t("对方停顿多久后，把连发的几条消息作为一件事处理。")}</small></span>
         <select aria-label={t("合并连续消息")} value={settings.quietMinutes ?? 3} disabled={disabled} onChange={event => update({ quietMinutes: Number(event.target.value) })}>{[1, 3, 5, 10].map(value => <option key={value} value={value}>{t("{0} 分钟", value)}</option>)}</select></div>
-      <details className="bkw-details"><summary>{t("读取组件")}<small>{settings.python || settings.library ? t("已自定义") : t("默认：py -3，组件已用 pip 安装")}</small></summary>
+      <details className="bkw-details"><summary>{t("读取组件")}<small>{settings.python || settings.library ? t("已自定义") : t("默认：py -3，使用内置读取组件")}</small></summary>
         <form className="bkw-wx-form" onSubmit={event => { event.preventDefault(); const next: WechatSettings = { ...settings }; if (python.trim()) next.python = python.trim(); else delete next.python; if (library.trim()) next.library = library.trim(); else delete next.library; void save(next); }}>
           <label>{t("Python 命令")}<input value={python} placeholder="py -3" disabled={disabled} onChange={event => setPython(event.target.value)} /></label>
-          <label>{t("wechatauto-replica 目录（未用 pip 安装时填写）")}<input value={library} placeholder="D:\ai\weixin\wechatauto-replica" disabled={disabled} onChange={event => setLibrary(event.target.value)} /></label>
+          <label>{t("上游 wechatauto-replica 目录（可选：微信升级后临时改用上游的修复）")}<input value={library} placeholder={t("留空即可")} disabled={disabled} onChange={event => setLibrary(event.target.value)} /></label>
           <div className="bkw-actions"><button type="submit" className="bkw-btn small" disabled={disabled || (python === (settings.python || "") && library === (settings.library || ""))}>{t("保存")}</button></div>
         </form>
       </details>

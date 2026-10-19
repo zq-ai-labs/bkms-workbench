@@ -1,0 +1,97 @@
+# -*- coding: utf-8 -*-
+"""内置读取组件 wxread 的测试：python -m unittest wechat/test_wxread.py
+
+不依赖微信：用标准 AES 按微信页面格式加密一页，验证移植后的解密路径；
+用 zstandard（若已安装）生成压缩帧，验证纯 Python 解压与库的结果一致。
+"""
+import os
+import sqlite3
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.dirname(__file__))
+from wxread import _crypto, _zstd  # noqa: E402
+from wxread import db  # noqa: E402
+
+try:
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+except Exception:  # pragma: no cover
+    Cipher = None
+try:
+    import zstandard
+except Exception:  # pragma: no cover
+    zstandard = None
+
+
+@unittest.skipIf(Cipher is None, "需要 cryptography 生成加密样本")
+class PageDecryptTest(unittest.TestCase):
+    def encrypt(self, key, iv, data):
+        enc = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+        return enc.update(data) + enc.finalize()
+
+    def test_pages_decrypt_to_a_readable_sqlite_database(self):
+        # 生成一个真实的两页以上 SQLite 库，按微信格式逐页加密，再用移植代码解密并打开。
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = os.path.join(tmp, "plain.db")
+            conn = sqlite3.connect(plain)
+            conn.execute("PRAGMA page_size=4096")
+            conn.execute("PRAGMA auto_vacuum=0")
+            conn.execute("CREATE TABLE t(x TEXT)")
+            conn.executemany("INSERT INTO t VALUES (?)", [("消息 %d" % i * 20,) for i in range(400)])
+            conn.commit(); conn.execute("VACUUM"); conn.close()
+            raw = open(plain, "rb").read()
+            # SQLCipher 页面保留 80 字节尾部（IV + HMAC），这里用 reserve 为 80 的库来模拟
+            conn = sqlite3.connect(plain)
+            pages = len(raw) // db.PAGE_SZ
+            conn.close()
+            key, salt = os.urandom(32), os.urandom(16)
+            encrypted = bytearray()
+            for pgno in range(1, pages + 1):
+                page = raw[(pgno - 1) * db.PAGE_SZ: pgno * db.PAGE_SZ]
+                iv = os.urandom(16)
+                body = page[16: db.PAGE_SZ - db.RESERVE_SZ] if pgno == 1 else page[: db.PAGE_SZ - db.RESERVE_SZ]
+                cipher = self.encrypt(key, iv, body)
+                head = salt if pgno == 1 else b""
+                encrypted += head + cipher + iv + b"\0" * 64
+            for pgno in range(1, pages + 1):
+                page = bytes(encrypted[(pgno - 1) * db.PAGE_SZ: pgno * db.PAGE_SZ])
+                out = db._decrypt_page(key, page, pgno)
+                expected = raw[(pgno - 1) * db.PAGE_SZ: pgno * db.PAGE_SZ - db.RESERVE_SZ]
+                if pgno == 1:
+                    expected = b"SQLite format 3\x00" + raw[16: db.PAGE_SZ - db.RESERVE_SZ]
+                self.assertEqual(out[: db.PAGE_SZ - db.RESERVE_SZ], expected, pgno)
+
+    def test_known_answer(self):
+        self.assertEqual(_crypto.aes_cbc_decrypt(_crypto._KAT_KEY, _crypto._KAT_IV, _crypto._KAT_CT), _crypto._KAT_PT)
+
+
+@unittest.skipIf(zstandard is None, "需要 zstandard 生成压缩样本")
+class ZstdTest(unittest.TestCase):
+    def test_matches_reference_on_message_like_data(self):
+        samples = [
+            b"", b"a", "短消息".encode(), ("<msg><appmsg><title>回复</title><type>57</type><refermsg><content>原话</content></refermsg></appmsg></msg>" * 30).encode(),
+            os.urandom(3000), ("长文本" * 40000).encode(), bytes(range(256)) * 600,
+        ]
+        for level in (1, 3, 9, 19, 22, -3):
+            for data in samples:
+                for checksum in (False, True):
+                    frame = zstandard.ZstdCompressor(level=level, write_checksum=checksum).compress(data)
+                    self.assertEqual(_zstd.decompress(frame), data, (level, len(data), checksum))
+
+    def test_reader_uses_fallback_for_compressed_messages(self):
+        frame = zstandard.ZstdCompressor(level=19).compress(("<msg><appmsg><title>链接</title><type>5</type></appmsg></msg>" * 10).encode())
+        saved = db._ZSTD_MODULE
+        try:
+            db._ZSTD_MODULE = _zstd
+            self.assertTrue(db.WeChatDB._friendly_content(frame, "文件/链接/卡片").startswith("<msg><appmsg><title>链接"))
+        finally:
+            db._ZSTD_MODULE = saved
+
+    def test_rejects_garbage(self):
+        with self.assertRaises(_zstd.ZstdError):
+            _zstd.decompress(b"\x28\xb5\x2f\xfd\x00\x00\x00\x00\xff")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -5,8 +5,8 @@
     请求 {"id": 1, "method": "poll", "params": {...}}
     响应 {"id": 1, "ok": true, "result": ...} 或 {"id": 1, "ok": false, "error": "...", "code": "..."}
 
-只读：只调用 wechatauto 的数据库读取接口（WeChatDB），从不导入或调用发送、
-界面自动化相关能力。哪些会话可以读取由工作台按白名单/黑名单决定，本进程只
+只读：只调用内置 wxread（移植自 wechatauto-replica 的数据库读取部分）的 WeChatDB，
+不包含也不调用发送、界面自动化相关能力。哪些会话可以读取由工作台按白名单/黑名单决定，本进程只
 返回被请求的会话的数据；会话列表只返回名称和类型，不返回消息摘要。
 
 --fixture <file> 使用 JSON 样例代替真实数据库，用于测试和演示。
@@ -223,9 +223,26 @@ class FixtureDB:
         self.data.setdefault("messages", {}).setdefault(chat, []).append(row)
 
 
-def open_real_db(workdir: str):
-    """打开真实微信数据库。本进程的标准输出留给协议，库的打印改到标准错误。"""
-    from wechatauto.db import WeChatDB  # noqa: 只读接口
+LIBRARY = ""
+
+
+def open_real_db(workdir: str, upstream: bool = False):
+    """打开真实微信数据库。本进程的标准输出留给协议，库的打印改到标准错误。
+
+    默认使用内置的 wxread（移植自 wechatauto-replica 的只读部分，无需另外安装）；
+    设置里指定了上游项目目录时改用上游的 wechatauto，便于微信升级后先用上游的修复。
+    """
+    global LIBRARY
+    if upstream:
+        import wechatauto  # noqa: 只读接口
+        from wechatauto.db import WeChatDB
+        LIBRARY = "wechatauto " + getattr(wechatauto, "__version__", "")
+    else:
+        if sys.platform != "win32":
+            raise RuntimeError("微信读取目前只支持 Windows 版微信 4.x")
+        import wxread
+        from wxread.db import WeChatDB
+        LIBRARY = "wxread " + wxread.__version__
 
     original = WeChatDB._msg_row_to_dict
 
@@ -295,11 +312,7 @@ class Bridge:
     # -- methods --------------------------------------------------------
     def status(self, params):
         wxid, names = self._self()
-        try:
-            import wechatauto  # noqa
-            version = getattr(wechatauto, "__version__", "")
-        except Exception:
-            version = "fixture" if isinstance(self._db, FixtureDB) else ""
+        version = "fixture" if isinstance(self._db, FixtureDB) else LIBRARY
         return {"protocol": PROTOCOL, "wxid": wxid, "name": names[0] if names else wxid, "library": version}
 
     def chats(self, params):
@@ -363,6 +376,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--workdir", default=os.path.join(os.path.expanduser("~"), ".dsh", "wechat-cache"))
     parser.add_argument("--fixture")
+    parser.add_argument("--upstream", action="store_true", help="使用 PYTHONPATH 中的上游 wechatauto 而不是内置 wxread")
     args = parser.parse_args(argv)
     for stream in (sys.stdin, sys.stdout, sys.stderr):
         try:
@@ -371,7 +385,7 @@ def main(argv=None):
             pass
     out = sys.stdout
     sys.stdout = sys.stderr  # 库内的 print 不得混入协议
-    bridge = Bridge(lambda: FixtureDB(args.fixture) if args.fixture else open_real_db(args.workdir))
+    bridge = Bridge(lambda: FixtureDB(args.fixture) if args.fixture else open_real_db(args.workdir, args.upstream))
     methods = {"status": bridge.status, "chats": bridge.chats, "search": bridge.search, "latest": bridge.latest,
                "poll": bridge.poll, "history": bridge.history, "fixture_append": bridge.fixture_append}
     out.write(json.dumps({"event": "ready", "protocol": PROTOCOL}) + "\n")
