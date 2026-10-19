@@ -20,7 +20,19 @@ export interface Rule {
   exclude?: TriageCategory[]
   autonomy?: Autonomy
   sources?: SourceKind[]
+  /**
+   * How a message is assigned. `ai` (default): only when AI confirms the workflow fits; uncertain cases are
+   * suggested to you and nothing is assigned without a model. `literal`: every message meeting the literal
+   * conditions is handled, e.g. everything in a dedicated folder.
+   */
+  matchMode?: MatchMode
 }
+export type MatchMode = 'ai' | 'literal'
+export type Confidence = 'high' | 'medium' | 'low'
+/** How a task got (or was offered) its workflow, shown as “why this workflow”. */
+export interface MatchInfo { ruleId: string; ruleName: string; by: 'ai' | 'literal' | 'manual'; state: 'applied' | 'suggested' | 'rejected'; confidence?: Confidence; reason?: string; at: string }
+/** A message you confirmed or rejected for a workflow, kept as a short summary and shown to AI as an example. */
+export interface RuleExample { id: string; match: boolean; text: string; at: string; taskId?: string }
 export interface Cursor { uidValidity: number; lastUid: number }
 /** Where a task came from. Email uses mailbox coordinates; a WeChat segment reuses the same shape (account `wechat`, folder = chat id, uid = last message sequence) so older builds can still read the data. */
 export interface Source { account: string; folder: string; uid: number; uidValidity: number; kind?: 'wechat' }
@@ -88,6 +100,7 @@ export interface Task {
   checks?: Check[]
   autoSend?: AutoSend
   wechat?: WechatSegment
+  match?: MatchInfo
 }
 export type ActivityKind = 'archive' | 'auto_send_scheduled' | 'auto_sent' | 'auto_send_canceled' | 'auto_send_blocked' | 'report' | 'brief' | 'weekly' | 'topic'
 export interface Activity {
@@ -126,6 +139,8 @@ export interface State {
   activity?: Activity[]; topics?: Topic[]; reports?: Report[]; brief?: Brief
   senders?: Record<string, SenderPreference>
   wechat?: WechatState
+  /** Learned examples per workflow, outside `rules` so learning never bumps the configuration revision. */
+  ruleExamples?: Record<string, RuleExample[]>
 }
 export interface EmailService {
   version: number
@@ -147,8 +162,8 @@ export interface EmailService {
 }
 export interface AgentOutput { summary: string; needsInfo?: string; needsInfoKind?: 'information' | 'attachments'; informationGaps?: string; subject?: string; text?: string; checks?: Check[]; lowRisk?: boolean }
 export interface AgentRunner { available(): boolean; run(task: Task, rule: Rule, signal: AbortSignal): Promise<{ output: AgentOutput; sessionId?: string }> }
-export interface TriageInput { mail: { from: string; subject: string; body: string; hasAttachments: boolean; receivedAt: string; channel?: 'email' | 'wechat' }; rules: { id: string; name: string; semantic: string; output: 'reply' | 'report'; hint: string }[]; uiLanguage?: 'zh' | 'en' }
-export interface TriageOutput { category: TriageCategory; urgency: 'high' | 'normal' | 'low'; reason: string; nextStep: string; ruleId: string }
+export interface TriageInput { mail: { from: string; subject: string; body: string; hasAttachments: boolean; receivedAt: string; channel?: 'email' | 'wechat' }; rules: { id: string; name: string; semantic: string; output: 'reply' | 'report'; hint: string; examples?: { match: boolean; text: string }[] }[]; uiLanguage?: 'zh' | 'en' }
+export interface TriageOutput { category: TriageCategory; urgency: 'high' | 'normal' | 'low'; reason: string; nextStep: string; ruleId: string; confidence?: Confidence; ruleReason?: string }
 export interface TriageRunner { available(): boolean; run(input: TriageInput, signal: AbortSignal): Promise<TriageOutput> }
 export type WriterKind = 'brief' | 'weekly' | 'topic' | 'trial'
 export interface WriterRunner { available(): boolean; run(kind: WriterKind, data: unknown, signal: AbortSignal): Promise<Record<string, unknown>> }

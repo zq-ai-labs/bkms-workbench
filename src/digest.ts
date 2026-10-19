@@ -2,7 +2,7 @@ import type { Activity, State, Task, Topic, TopicSummary } from './types.js'
 
 /** Statuses that require the user's decision. Unmatched requests count too once triage says they need someone. */
 export const ATTENTION = new Set(['review', 'needs_info', 'failed', 'uncertain'])
-export const needsAttention = (task: Task): boolean => ATTENTION.has(task.status) || (task.status === 'unmatched' && ['request', 'reply_needed'].includes(task.triage?.category ?? ''))
+export const needsAttention = (task: Task): boolean => ATTENTION.has(task.status) || (task.status === 'unmatched' && (['request', 'reply_needed'].includes(task.triage?.category ?? '') || task.match?.state === 'suggested'))
 
 const pad = (value: number) => String(value).padStart(2, '0')
 /** Local calendar date of the DSH host, which runs on the user's machine. */
@@ -13,6 +13,11 @@ export const startOfWeek = (date = new Date()): Date => { const day = new Date(d
 
 export const senderAddress = (from: string): string => (from.match(/<([^>]+)>/)?.[1] || from).trim().toLowerCase()
 /** Preference key for a task's counterpart: the email address, or the WeChat conversation. */
+/** Short, content-light summary used as a learned example for a workflow. */
+export const exampleText = (task: Task): string => {
+  const what = task.triage?.reason || task.body.replace(/\s+/g, ' ').slice(0, 160)
+  return `${task.source?.kind === 'wechat' ? '微信 ' + (task.wechat?.chatName || '') : '发件人 ' + senderAddress(task.from)}｜主题：${(task.subject || task.title).slice(0, 80)}｜${what}`.slice(0, 300)
+}
 export const senderKey = (task: Task): string => task.source?.kind === 'wechat' ? `wechat:${task.source.folder}` : senderAddress(task.from)
 const normalizedSubject = (subject: string) => subject.replace(/^\s*((re|fw|fwd|回复|答复|转发)\s*[:：]\s*)+/gi, '').trim().toLowerCase()
 
@@ -127,9 +132,10 @@ export function topicTemplate(data: ReturnType<typeof topicData>, en: boolean): 
   }
 }
 
-export function trialData(state: State, rule: { name: string; semantic?: string; instructions: string; exclude?: string[] }, taskIds?: string[]) {
+export function trialData(state: State, rule: { id?: string; name: string; semantic?: string; instructions: string; exclude?: string[] }, taskIds?: string[]) {
   const pool = state.tasks.slice().sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)).filter(task => !taskIds || taskIds.includes(task.id)).slice(0, 30)
-  return { rule: { name: rule.name, semantic: rule.semantic || '', hint: rule.instructions.slice(0, 600), exclude: rule.exclude }, mails: pool.map(task => ({ id: task.id, from: task.from, subject: task.subject, category: task.triage?.category, excerpt: (task.summary || task.body || '').slice(0, 300) })) }
+  const examples = (rule.id ? state.ruleExamples?.[rule.id] ?? [] : []).slice(-8).map(({ match, text }) => ({ match, text }))
+  return { rule: { name: rule.name, semantic: rule.semantic || '', hint: rule.instructions.slice(0, 600), exclude: rule.exclude, examples }, mails: pool.map(task => ({ id: task.id, from: task.from, subject: task.subject, category: task.triage?.category, excerpt: (task.summary || task.body || '').slice(0, 300) })) }
 }
 
 export const activityEntry = (input: Omit<Activity, 'id' | 'at'> & { at?: string }, id: string): Activity => ({ ...input, id, at: input.at ?? new Date().toISOString() })

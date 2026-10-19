@@ -323,5 +323,22 @@
   "微信读取已停止。": "WeChat reading has stopped.",
   "微信未就绪。": "WeChat is not ready.",
   "DSH 未生成建议回复。": "DSH produced no suggested reply.",
-  "微信读取目前只支持 Windows 版微信 4.x": "WeChat reading currently supports only WeChat 4.x for Windows"
+  "微信读取目前只支持 Windows 版微信 4.x": "WeChat reading currently supports only WeChat 4.x for Windows",
+  "AI 建议用方案「{0}」处理，但把握不足，等待你确认。": "AI suggests workflow “{0}” but is not confident enough; waiting for your confirmation.",
+  "有方案需要 AI 判断是否适用，但当前没有可用的 AI 判断，等待你选择。": "Some workflows need AI to judge whether they apply, but no AI verdict is available. Waiting for you to choose.",
+  "已确认 AI 建议的方案「{0}」，AI 会参考这次判断。": "Confirmed the suggested workflow “{0}”; AI will learn from this.",
+  "已手动选择方案「{0}」，AI 会参考这次判断。": "Chose workflow “{0}” by hand; AI will learn from this.",
+  "你判断这项信息不属于方案「{0}」，AI 以后会参考这次纠正。可以选择其他方案或忽略。": "You marked this as not belonging to workflow “{0}”; AI will learn from the correction. Choose another workflow or ignore it.",
+  "已从方案「{0}」移出并记为反例。": "Removed from workflow “{0}” and saved as a counter-example.",
+  "更改方案前的结果：\n{0}": "Result before changing the workflow:\n{0}",
+  "你更改了方案，自动发送取消。": "You changed the workflow; the automatic send was canceled.",
+  "当前状态不能更改方案。": "The workflow cannot be changed in this state.",
+  "这项信息还没有方案。": "This item has no workflow yet.",
+  "例子不存在。": "Example not found.",
+  "匹配方式无效。": "Invalid matching mode.",
+  "分拣结果把握程度无效。": "Invalid triage confidence.",
+  "符合字面条件，方案设为“字面命中就处理”。": "Meets the literal conditions; the workflow handles every literal match.",
+  "你确认了 AI 的建议。": "You confirmed the AI suggestion.",
+  "你手动选择了这个方案。": "You chose this workflow by hand.",
+  "字面条件符合，但需要 AI 判断是否适用；当前没有可用的 AI，不会自动处理。": "Meets the literal conditions, but AI must judge whether it applies; no AI is available, so it would not be handled automatically."
 }

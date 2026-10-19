@@ -2,12 +2,12 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { Engine, settingsOf } from './engine.js'
 import { originalMailFields } from './original-mail.js'
-import { matches, ruleExcludes, validateRule } from './rules.js'
+import { matches, ruleExcludes, ruleMode, validateRule } from './rules.js'
 import { CLOCK, findTask, log, touch, validateWechatSettings } from './store.js'
 import { chatAllowed, wechatSettingsOf } from './wechat.js'
-import { activityEntry, localDate, needsAttention, relations, senderKey, topicMatches, trialData } from './digest.js'
+import { activityEntry, exampleText, localDate, needsAttention, relations, senderKey, topicMatches, trialData } from './digest.js'
 import { sourceStatuses } from './sources.js'
-import { WorkbenchError, now, type Task, type State, type RuleAssistant, type InstructionOptimizer, type Topic } from './types.js'
+import { WorkbenchError, now, type RuleExample, type Task, type State, type RuleAssistant, type InstructionOptimizer, type Topic } from './types.js'
 
 const requireRevision = (revision: unknown): number => { if (!Number.isSafeInteger(revision) || Number(revision) < 1) throw new WorkbenchError('缺少有效版本，请刷新后重试。'); return Number(revision) }
 const configCheck = (state: State, revision: unknown): void => { if (requireRevision(revision) !== state.configRevision) throw new WorkbenchError('配置已更新，请刷新后重试。', 'conflict', 409) }
@@ -17,6 +17,13 @@ const takeOver = (state: State, task: Task, reason: string): void => {
   if (!task.autoSend || task.autoSend.canceledAt) return
   task.autoSend.canceledAt = now(); task.autoSend.reason = reason
   for (const item of state.activity || []) if (item.taskId === task.id && item.kind === 'auto_send_scheduled' && !item.undoneAt) item.undoneAt = now()
+}
+/** Remember a confirmed or rejected message for a workflow (latest 20 kept; a newer verdict on the same task replaces the older one). */
+const learn = (state: State, ruleId: string, task: Task, match: boolean): void => {
+  const examples = (state.ruleExamples ??= {})
+  const current = (examples[ruleId] ?? []).filter(example => example.taskId !== task.id)
+  const example: RuleExample = { id: randomUUID(), match, text: exampleText(task), at: now(), taskId: task.id }
+  examples[ruleId] = [...current, example].slice(-20)
 }
 const list = (value: unknown, maxItems: number, maxLength: number, message: string): string[] => {
   if (!Array.isArray(value) || value.length > maxItems || value.some(item => typeof item !== 'string' || item.length > maxLength || /[\0\r\n]/.test(item))) throw new WorkbenchError(message)
@@ -89,6 +96,7 @@ export class WorkbenchApi {
       activity: (state.activity || []).slice(-300).sort((a, b) => b.at.localeCompare(a.at)), topics, reports: (state.reports || []).slice().reverse(), brief: state.brief, today: localDate(),
       sources: sourceStatuses({ ready: health.email, accounts: accounts.length, error: providerError }, health.wechat ? { enabled: wechatSettingsOf(state.settings.wechat).enabled, ...health.wechat } : undefined), meetings: [],
       wechat: { settings: wechatSettingsOf(state.settings.wechat), pending: Object.keys(state.wechat?.pending ?? {}).length, watching: Object.keys(state.wechat?.watermarks ?? {}).length },
+      ruleExamples: state.ruleExamples ?? {},
     }
   }
   action(body: any, signal: AbortSignal = new AbortController().signal): Promise<unknown> { return this.tracked(() => this.dispatch(body, signal)) }
@@ -166,7 +174,13 @@ export class WorkbenchApi {
       const rule = validateRule(body.rule)
       return this.engine.store.mutate(state => { configCheck(state, body.revision); const index = state.rules.findIndex(r => r.id === rule.id); if (index < 0) state.rules.push(rule); else state.rules[index] = rule; state.configRevision++; log(state, `已保存规则「${rule.name}」。`); return { ...rule, revision: state.configRevision } })
     }
-    if (body.action === 'deleteRule') return this.engine.store.mutate(state => { configCheck(state, body.revision); const rule = state.rules.find(r => r.id === body.id); if (!rule) throw new WorkbenchError('规则不存在。'); state.rules = state.rules.filter(r => r.id !== body.id); state.configRevision++; log(state, `已删除规则「${rule.name}」，历史任务保留原规则快照。`); return { deleted: true } })
+    if (body.action === 'deleteExample') return this.engine.store.mutate(state => {
+      const list = state.ruleExamples?.[body.ruleId]
+      if (typeof body.ruleId !== 'string' || !list?.some(example => example.id === body.exampleId)) throw new WorkbenchError('例子不存在。', 'missing', 404)
+      state.ruleExamples![body.ruleId] = list.filter(example => example.id !== body.exampleId)
+      return { deleted: true }
+    })
+    if (body.action === 'deleteRule') return this.engine.store.mutate(state => { configCheck(state, body.revision); const rule = state.rules.find(r => r.id === body.id); if (!rule) throw new WorkbenchError('规则不存在。'); state.rules = state.rules.filter(r => r.id !== body.id); if (state.ruleExamples) delete state.ruleExamples[body.id]; state.configRevision++; log(state, `已删除规则「${rule.name}」，历史任务保留原规则快照。`); return { deleted: true } })
     if (body.action === 'testRule') {
       const rule = validateRule(body.rule), task = findTask(await this.engine.store.read(), body.taskId)
       return { matched: matches(rule, { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.attachments.length > 0 || task.hasAttachments === true, kind: task.source.kind === 'wechat' ? 'wechat' : 'email' }), rule: rule.name, note: '仅匹配预览，不会调用 DSH 或发送邮件。' }
@@ -213,13 +227,16 @@ export class WorkbenchApi {
       })
       let by: 'ai' | 'rules' = 'rules'
       const judged = items.filter(item => item.matched)
-      if ((rule.semantic || judged.length) && this.engine.writer?.available() && judged.length) {
+      // Literal-mode workflows take every literal match; only AI-mode workflows need the AI verdict.
+      if (ruleMode(rule) === 'ai' && this.engine.writer?.available() && judged.length) {
         try {
           const result = await this.engine.writer.run('trial', { ...trialData(state, rule, judged.map(item => item.id)), uiLanguage: uiLanguage ?? this.engine.language }, AbortSignal.any([signal, this.controller.signal, AbortSignal.timeout(120000)])) as { matches: { id: string; matched: boolean; reason: string }[] }
           for (const verdict of result.matches) { const item = items.find(entry => entry.id === verdict.id && entry.matched); if (item) { item.matched = verdict.matched; item.reason = verdict.reason || item.reason } }
           by = 'ai'
         } catch (error) { if (signal.aborted) throw error }
       }
+      // Without an AI verdict an AI-mode workflow takes nothing automatically; say so instead of showing literal hits as matches.
+      if (ruleMode(rule) === 'ai' && by === 'rules') for (const item of judged) { item.matched = false; item.reason = '字面条件符合，但需要 AI 判断是否适用；当前没有可用的 AI，不会自动处理。' }
       return { by, total: items.length, items: items.map(item => { const task = pool.find(entry => entry.id === item.id)!; return { ...item, subject: task.subject || task.title, from: task.from, receivedAt: task.receivedAt } }), note: '仅预览匹配结果，不会调用处理流程或发送邮件。' }
     }
     if (body.action === 'undoActivity') {
@@ -291,7 +308,20 @@ export class WorkbenchApi {
         if (task.draftId) { const draft = await this.engine.email().drafts.get(task.draftId); if (draft.state !== 'draft') throw new WorkbenchError('草稿已提交或结果待核实，不能重新处理。', 'state', 409) }
         return this.engine.store.mutate(state => {
           const item = findTask(state, id, body.revision)
-          if (body.action === 'runRule') { if (body.ruleRevision !== undefined) configCheck(state, body.ruleRevision); const rule = state.rules.find(r => r.id === body.ruleId); if (!rule) throw new WorkbenchError('请选择已有规则。'); item.rule = structuredClone(rule); item.ruleId = rule.id; item.ruleName = rule.name }
+          if (body.action === 'runRule') {
+            if (body.ruleRevision !== undefined) configCheck(state, body.ruleRevision)
+            const rule = state.rules.find(r => r.id === body.ruleId); if (!rule) throw new WorkbenchError('请选择已有规则。')
+            const previous = item.ruleId
+            item.rule = structuredClone(rule); item.ruleId = rule.id; item.ruleName = rule.name
+            // Choosing a workflow for a message teaches AI that such messages belong to it.
+            const confirmed = item.match?.state === 'suggested' && item.match.ruleId === rule.id
+            // Re-running the same workflow (e.g. after editing it) is not a new judgement.
+            if (previous !== rule.id || confirmed) {
+              learn(state, rule.id, item, true)
+              item.match = { ruleId: rule.id, ruleName: rule.name, by: 'manual', state: 'applied', reason: confirmed ? '你确认了 AI 的建议。' : '你手动选择了这个方案。', at: now() }
+              touch(item, confirmed ? `已确认 AI 建议的方案「${rule.name}」，AI 会参考这次判断。` : `已手动选择方案「${rule.name}」，AI 会参考这次判断。`)
+            }
+          }
           // A message whose triage failed has no workflow yet; retrying runs triage again.
           if (!item.rule && item.triage?.state !== 'pending') throw new WorkbenchError('请先为任务选择处理规则。')
           if (body.action === 'supplement' || (body.action === 'runRule' && body.text !== undefined)) {
@@ -304,6 +334,25 @@ export class WorkbenchApi {
           delete item.needsInfoKind
           takeOver(state, item, '已重新处理，原自动发送取消。')
           item.status = 'queued'; item.attempts = 0; item.prepareKey = randomUUID(); delete item.nextAttemptAt; delete item.error; touch(item, '已排队重新处理；原草稿保留，重新生成后关联新草稿。'); log(state, '任务已重新排队。', id); return item
+        })
+      }
+      if (body.action === 'rejectRule') {
+        // “Not this workflow”: undo the assignment or decline the suggestion, and remember it as a counter-example.
+        if (['running', 'sending', 'sent', 'uncertain'].includes(task.status)) throw new WorkbenchError('当前状态不能更改方案。', 'state', 409)
+        const ruleId = task.match?.state === 'rejected' ? task.ruleId : task.match?.ruleId ?? task.ruleId
+        if (!ruleId) throw new WorkbenchError('这项信息还没有方案。', 'state', 409)
+        return this.engine.store.mutate(state => {
+          const item = findTask(state, id, body.revision)
+          const name = item.match?.ruleName ?? item.ruleName ?? ''
+          learn(state, ruleId, item, false)
+          takeOver(state, item, '你更改了方案，自动发送取消。')
+          if (item.summary) item.history.push({ at: now(), message: `更改方案前的结果：\n${item.summary}` })
+          item.match = { ruleId, ruleName: name, by: 'manual', state: 'rejected', at: now() }
+          delete item.rule; delete item.ruleId; delete item.ruleName; delete item.summary; delete item.checks; delete item.informationGaps; delete item.error; delete item.needsInfoKind
+          if (item.wechat) delete item.wechat.reply
+          item.status = 'unmatched'
+          touch(item, `你判断这项信息不属于方案「${name}」，AI 以后会参考这次纠正。可以选择其他方案或忽略。`); log(state, `已从方案「${name}」移出并记为反例。`, id)
+          return item
         })
       }
       if (body.action === 'ignore') return this.engine.store.mutate(state => { const item = findTask(state, id, body.revision); if (['running', 'sending', 'uncertain', 'sent'].includes(item.status)) throw new WorkbenchError('当前状态不允许忽略。'); takeOver(state, item, '已人工忽略，自动发送取消。'); item.status = 'ignored'; touch(item, '已人工忽略。'); log(state, '任务已忽略。', id); return item })

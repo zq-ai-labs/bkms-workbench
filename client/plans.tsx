@@ -2,7 +2,7 @@ import * as React from "react";
 import { useEffect, useRef, useState } from "react";
 import { systemMessage, t } from "./i18n";
 import { useWorkbench } from "./context";
-import { AUTONOMY_LABEL, CATEGORY, SOURCE, api, errorMessage, type Autonomy, type Capabilities, type Category, type Rule, type SourceKind } from "./lib";
+import { AUTONOMY_LABEL, CATEGORY, SOURCE, api, errorMessage, when, type Autonomy, type Capabilities, type Category, type MatchMode, type Rule, type SourceKind } from "./lib";
 import { Alert, AutoTextarea, Empty, Field, Icon, Switch, Tag } from "./ui";
 
 const DEFAULT_EXCLUDE: Category[] = ["notification", "marketing"];
@@ -19,6 +19,7 @@ export function PlansView({ ruleId }: { ruleId?: string }) {
   const sorted = [...data.rules].sort((a, b) => b.priority - a.priority);
   const week = Date.now() - 7 * 864e5;
   const hits = (id: string) => data.tasks.filter(task => task.ruleId === id && Date.parse(task.receivedAt) >= week).length;
+  const corrections = (id: string) => (data.ruleExamples?.[id] ?? []).filter(example => !example.match).length;
   const open = (route: string) => go({ view: "plans", rule: route });
   const selected = ruleId === "new" ? undefined : ruleId === "triage" ? undefined : data.rules.find(rule => rule.id === ruleId) ?? (ruleId ? undefined : sorted[0]);
   const showTriage = ruleId === "triage" || (!ruleId && !sorted.length);
@@ -34,7 +35,7 @@ export function PlansView({ ruleId }: { ruleId?: string }) {
         </div>
         <div className="bkw-nav-group"><h4>{t("处理方案")}</h4>
           {sorted.map(rule => <button type="button" key={rule.id} className={`bkw-nav-item tall ${selected?.id === rule.id && !showTriage ? "on" : ""} ${rule.enabled ? "" : "paused"}`} onClick={() => open(rule.id)}>
-            <span><strong>{rule.name}</strong><small>{rule.enabled ? t("本周命中 {0} 次 · {1}", hits(rule.id), rule.output === "reply" ? t("回复草稿") : t("分析报告")) : t("已停用")}</small></span>
+            <span><strong>{rule.name}</strong><small>{rule.enabled ? corrections(rule.id) ? t("本周命中 {0} 次 · 纠正 {1} 次", hits(rule.id), corrections(rule.id)) : t("本周命中 {0} 次 · {1}", hits(rule.id), rule.output === "reply" ? t("回复草稿") : t("分析报告")) : t("已停用")}</small></span>
             <Tag tone={rule.autonomy === "auto" ? "warn" : rule.autonomy === "low_risk" ? "accent" : "muted"}>{t(AUTONOMY_LABEL[rule.autonomy || "draft"])}</Tag>
           </button>)}
           {!sorted.length && <p className="bkw-card-empty">{t("还没有处理方案。")}</p>}
@@ -54,15 +55,30 @@ function TriagePanel() {
     <header className="bkw-plan-head"><div><h2>{t("AI 分拣")}</h2><p className="bkw-muted">{t("每条新信息先判断“是什么、要不要处理、交给哪个方案”，再进入方案。系统通知和营销邮件默认直接归档，不会被当作业务来信处理。")}</p></div>
       <Switch label={t("AI 分拣")} checked={data.defaults.triage} disabled={!!busy} onChange={value => void perform("triage", async () => { await api("saveSettings", { revision: data.revision, settings: { triage: value } }); await refresh(); notify(value ? t("已开启 AI 分拣") : t("已关闭 AI 分拣，按字面条件匹配方案")); })} />
     </header>
-    {!data.health.triage && data.defaults.triage && <Alert tone="warn">{t("DSH 默认模型未就绪，当前用规则判断代替 AI 分拣：只能识别明显的通知和营销邮件。")}</Alert>}
+    {!data.health.triage && data.defaults.triage && <Alert tone="warn">{t("DSH 默认模型未就绪，当前用规则判断代替 AI 分拣：只能识别明显的通知和营销邮件；设为“AI 确认后处理”的方案不会自动接收信息，会交给你选择。")}</Alert>}
     <div className="bkw-sec"><div><b>{t("分类")}</b><span>{t("AI 为每条信息选择一个类别")}</span></div>
       <div className="bkw-kv-rows">{(Object.keys(CATEGORY) as Category[]).map(id => <div key={id}><span>{t(CATEGORY[id])}</span><small className="bkw-muted">{t(CATEGORY_HINT[id])}</small></div>)}</div>
+    </div>
+    <div className="bkw-sec"><div><b>{t("匹配方案")}</b><span>{t("分类决定要不要处理，匹配决定交给哪个方案")}</span></div>
+      <div className="bkw-kv-rows">{MATCH_STEPS.map(([title, hint]) => <div key={title}><span>{t(title)}</span><small className="bkw-muted">{t(hint)}</small></div>)}</div>
     </div>
     <div className="bkw-sec"><div><b>{t("可撤销")}</b><span>{t("归档不会改动邮箱")}</span></div>
       <p className="bkw-muted">{t("归档只在工作台内进行，原邮件保留在邮箱中。在“AI 已代办”中恢复后，该发件人的信息以后不再自动归档。")}</p>
     </div>
   </div>;
 }
+
+const MATCH_STEPS: [string, string][] = [
+  ["把握高", "直接按方案处理，事项上显示匹配理由"],
+  ["把握一般或低", "不处理，在“待我决策”里建议方案，由你确认或点“不是这个”"],
+  ["没有合适方案", "列为未匹配，可手动选择方案或忽略"],
+  ["没有可用的 AI", "只有设为“字面命中就处理”的方案会自动接收"],
+  ["你的确认与纠正", "记为方案的例子，之后判断相似信息时参考"],
+];
+const MATCH_MODES: [MatchMode, string, string][] = [
+  ["ai", "AI 确认后处理（推荐）", "AI 判断符合适用说明才处理；拿不准时交给你确认；没有 AI 时不自动处理。"],
+  ["literal", "字面命中就处理", "符合来源、文件夹和字面条件的信息都交给这个方案，不经 AI 判断。适合专用文件夹，例如“招聘简历”。"],
+];
 
 function RuleEditor({ rule }: { rule: Rule }) {
   const { data, busy, perform, refresh, notify, go, leave } = useWorkbench();
@@ -79,6 +95,7 @@ function RuleEditor({ rule }: { rule: Rule }) {
   const working = !!busy || generating || optimizing || trialing;
   const aiReady = !!data.health.agent;
   const exclude = value.exclude ?? DEFAULT_EXCLUDE;
+  const examples = rule.id ? data.ruleExamples?.[rule.id] ?? [] : [];
   const autonomy = value.autonomy ?? "draft";
   useEffect(() => { leave.current = () => !dirty || window.confirm(t("方案有尚未保存的修改，确认放弃？")); return () => { leave.current = undefined; }; }, [dirty]);
   const patch = (partial: Partial<Rule>) => { setValue(current => ({ ...current, ...partial })); setValidation(""); setTrial(undefined); if (partial.instructions !== undefined) setOptimization(undefined); };
@@ -143,7 +160,11 @@ function RuleEditor({ rule }: { rule: Rule }) {
             <Field label={t("邮箱")}><select value={value.account} onChange={event => patch({ account: event.target.value, folder: data.accounts.find(account => account.id === event.target.value)?.inboxFolder || "INBOX" })}>{data.accounts.map(account => <option key={account.id} value={account.id}>{account.label}</option>)}<option value="">{t("全部邮箱")}</option></select></Field>
             <Field label={t("文件夹")}><FolderPicker account={value.account} value={value.folder} ready={!!data.accounts.length} defaultFolder={data.accounts.find(account => account.id === value.account)?.inboxFolder || "INBOX"} onChange={folder => patch({ folder })} /></Field>
           </div>
-          <Field label={t("AI 判断为")} hint={t("用一句话描述适用的信息，例如“客户的报价或询价请求”。留空则字面条件命中即处理。")}><input maxLength={1000} value={value.semantic || ""} onChange={event => patch({ semantic: event.target.value })} placeholder={t("例如：外部客户发来的报价或询价请求")} /></Field>
+          <div className="bkw-field"><span>{t("匹配方式")}</span><div className="bkw-levels two" role="radiogroup" aria-label={t("匹配方式")}>
+            {MATCH_MODES.map(([mode, title, hint]) => <button type="button" role="radio" key={mode} aria-checked={(value.matchMode ?? "ai") === mode} className={`bkw-level ${(value.matchMode ?? "ai") === mode ? "on" : ""}`} onClick={() => patch({ matchMode: mode })}><strong>{t(title)}</strong><small>{t(hint)}</small></button>)}
+          </div></div>
+          {(value.matchMode ?? "ai") === "ai" && <Field label={t("适用说明")} hint={t("写清楚适用和不适用的情况，AI 按这段判断。没写时只能参考方案名称和处理要求，容易误判。")}><textarea rows={2} maxLength={1000} value={value.semantic || ""} onChange={event => patch({ semantic: event.target.value })} placeholder={t("例如：客户正式下单、改单或催单；不包括询价、售后、发票和内部通知")} /></Field>}
+          {(value.matchMode ?? "ai") === "ai" && !value.semantic?.trim() && <Alert tone="warn">{t("建议填写适用说明，尤其是名称宽泛的方案（如“订单处理”）。")}</Alert>}
           <div className="bkw-field"><span>{t("不处理这些类别")}</span><div className="bkw-chips">{(["notification", "marketing", "fyi", "other"] as Category[]).map(category => <label key={category} className={`bkw-chip ${exclude.includes(category) ? "on" : ""}`}><input type="checkbox" checked={exclude.includes(category)} onChange={() => patch({ exclude: exclude.includes(category) ? exclude.filter(item => item !== category) : [...exclude, category] })} />{t(CATEGORY[category])}</label>)}</div></div>
           <details className="bkw-details"><summary>{t("字面条件")}<small>{literal || t("不限")}</small></summary>
             <div className="bkw-grid2">
@@ -155,6 +176,16 @@ function RuleEditor({ rule }: { rule: Rule }) {
           </details>
         </div>
       </div>
+      {!!rule.id && (value.matchMode ?? "ai") === "ai" && <div className="bkw-sec"><div><b>{t("AI 学到的例子")}</b><span>{t("来自你的确认和纠正，最近 8 条提供给 AI")}</span></div>
+        <div className="bkw-stack">
+          {examples.length ? <div className="bkw-examples">{examples.slice().reverse().map(example => <div key={example.id} className="bkw-example-row">
+            <Tag tone={example.match ? "good" : "warn"}>{example.match ? t("属于") : t("不属于")}</Tag>
+            <span title={example.text}>{example.text}</span>
+            <small className="bkw-muted">{when(example.at)}</small>
+            <button type="button" className="bkw-icon-btn small" aria-label={t("删除这个例子")} title={t("删除这个例子")} disabled={!!busy} onClick={() => void perform("deleteExample", async () => { await api("deleteExample", { ruleId: rule.id, exampleId: example.id }); await refresh(); notify(t("例子已删除")); })}><Icon name="trash" size={13} /></button>
+          </div>)}</div> : <p className="bkw-muted">{t("还没有例子。在事项上确认 AI 的建议、手动选择这个方案，或点“不是这个方案”时会自动记录。")}</p>}
+        </div>
+      </div>}
       <div className="bkw-sec"><div><b>{t("自主级别")}</b><span>{t("AI 做完以后，哪些动作可以不经你确认")}</span></div>
         <div className="bkw-stack">
           <div className="bkw-levels" role="radiogroup" aria-label={t("自主级别")}>
