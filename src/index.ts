@@ -8,6 +8,7 @@ import { createRuleAssistant } from './rule-assistant.js'
 import { createInstructionOptimizer } from './instruction-optimizer.js'
 import { createTriageRunner } from './triage.js'
 import { createWriter } from './writer.js'
+import { WechatConnector } from './wechat.js'
 import type { EmailService } from './types.js'
 
 export const name = 'bkms-workbench'
@@ -21,7 +22,9 @@ export function apply(ctx: any): void {
     const restore = email?.suppressPopups?.()
     mailCtx.effect(() => () => { email = undefined; restore?.() }, 'bkms-workbench: mail provider')
   })
-  const engine = new Engine(store, () => email, createAgentRunner(ctx, join(store.root, 'tasks')), () => getCapabilities(ctx), createTriageRunner(ctx), createWriter(ctx))
+  // WeChat is read through a local read-only bridge process, started only when enabled in settings.
+  const wechat = new WechatConnector(join(store.root, 'wechat-cache'))
+  const engine = new Engine(store, () => email, createAgentRunner(ctx, join(store.root, 'tasks')), () => getCapabilities(ctx), createTriageRunner(ctx), createWriter(ctx), wechat)
   const api = new WorkbenchApi(engine, createRuleAssistant(ctx), createInstructionOptimizer(ctx))
   const ready = engine.start()
   ready.catch((error: unknown) => ctx.logger?.error?.('bkms-workbench startup: %s', error instanceof Error ? error.message : 'failed'))
@@ -31,6 +34,7 @@ export function apply(ctx: any): void {
     await api.close()
     await ready.catch(() => {})
     await engine.stop()
+    wechat.close()
   }, 'bkms-workbench: background worker')
   for (const path of ['/api/bkms-workbench', '/api/bkms-workbench/attachment']) ctx.connection.fetch.register({ path, methods: ['POST'], requestBody: 'buffered', fetch: async (request: Request) => {
     try { await ready } catch (error) { return new Response(JSON.stringify({ ok: false, error: engine.safe(error) }), { status: 503, headers: { 'content-type': 'application/json' } }) }

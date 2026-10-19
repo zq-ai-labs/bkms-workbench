@@ -54,7 +54,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-workbench.ps1
 
 ### 信息源
 
-当前只接入邮件。飞书、企业微信、微信和会议平台在界面中显示为「待接入」，需要实现 `src/sources.ts` 中的 `SourceAdapter` 后才能连接；工作台不会模拟未接入的来源。
+已接入邮件和微信（只读）。微信通过本机的 wechatauto-replica 读取 Windows 微信 4.x 聊天记录，按联系人、群聊的白名单或黑名单处理，群聊默认只处理 @我 的消息；AI 写建议回复，由你复制到微信发送，工作台不发送微信消息。安装和隐私说明见 [docs/WECHAT.md](docs/WECHAT.md)。
+
+飞书、企业微信和会议平台在界面中显示为「待接入」，需要实现 `src/sources.ts` 中的 `SourceAdapter` 后才能连接；工作台不会模拟未接入的来源。
 
 原邮件可独立加载并下载附件；回复草稿可添加或移除附件。上传前需要先保存正文修改，上传后重新预览，避免发送旧版本内容。
 

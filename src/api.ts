@@ -3,8 +3,9 @@ import { readFile } from 'node:fs/promises'
 import { Engine, settingsOf } from './engine.js'
 import { originalMailFields } from './original-mail.js'
 import { matches, ruleExcludes, validateRule } from './rules.js'
-import { CLOCK, findTask, log, touch } from './store.js'
-import { activityEntry, localDate, needsAttention, relations, senderAddress, topicMatches, trialData } from './digest.js'
+import { CLOCK, findTask, log, touch, validateWechatSettings } from './store.js'
+import { chatAllowed, wechatSettingsOf } from './wechat.js'
+import { activityEntry, localDate, needsAttention, relations, senderKey, topicMatches, trialData } from './digest.js'
 import { sourceStatuses } from './sources.js'
 import { WorkbenchError, now, type Task, type State, type RuleAssistant, type InstructionOptimizer, type Topic } from './types.js'
 
@@ -86,7 +87,8 @@ export class WorkbenchApi {
     return {
       tasks: enriched, rules: state.rules, revision: state.configRevision, settings: state.settings, defaults: settingsOf(state.settings), logs: state.logs.slice().reverse(), accounts, health: { ...health, error: providerError || health.error }, capabilities: await this.engine.capabilities(),
       activity: (state.activity || []).slice(-300).sort((a, b) => b.at.localeCompare(a.at)), topics, reports: (state.reports || []).slice().reverse(), brief: state.brief, today: localDate(),
-      sources: sourceStatuses({ ready: health.email, accounts: accounts.length, error: providerError }), meetings: [],
+      sources: sourceStatuses({ ready: health.email, accounts: accounts.length, error: providerError }, health.wechat ? { enabled: wechatSettingsOf(state.settings.wechat).enabled, ...health.wechat } : undefined), meetings: [],
+      wechat: { settings: wechatSettingsOf(state.settings.wechat), pending: Object.keys(state.wechat?.pending ?? {}).length, watching: Object.keys(state.wechat?.watermarks ?? {}).length },
     }
   }
   action(body: any, signal: AbortSignal = new AbortController().signal): Promise<unknown> { return this.tracked(() => this.dispatch(body, signal)) }
@@ -144,7 +146,8 @@ export class WorkbenchApi {
     }
     if (body.action === 'saveSettings') {
       const settings = body.settings
-      if (!settings || typeof settings !== 'object' || Array.isArray(settings) || !Object.keys(settings).length || Object.keys(settings).some(key => !['enabled', 'pollSeconds', 'showWorkbench', 'notifyNewTodo', 'triage', 'undoMinutes', 'briefEnabled', 'briefTime', 'weeklyEnabled', 'weeklyDay', 'weeklyTime', 'meetingBriefMinutes'].includes(key))) throw new WorkbenchError('工作台设置无效。')
+      if (!settings || typeof settings !== 'object' || Array.isArray(settings) || !Object.keys(settings).length || Object.keys(settings).some(key => !['enabled', 'pollSeconds', 'showWorkbench', 'notifyNewTodo', 'triage', 'undoMinutes', 'briefEnabled', 'briefTime', 'weeklyEnabled', 'weeklyDay', 'weeklyTime', 'meetingBriefMinutes', 'wechat'].includes(key))) throw new WorkbenchError('工作台设置无效。')
+      if ('wechat' in settings) { validateWechatSettings(settings.wechat); for (const key of ['people', 'groups'] as const) settings.wechat[key].list = [...new Set(settings.wechat[key].list)] }
       for (const key of ['enabled', 'showWorkbench', 'notifyNewTodo', 'triage', 'briefEnabled', 'weeklyEnabled']) if (key in settings && typeof settings[key] !== 'boolean') throw new WorkbenchError('工作台开关应为布尔值。')
       if ('pollSeconds' in settings && (!Number.isSafeInteger(settings.pollSeconds) || settings.pollSeconds < 30 || settings.pollSeconds > 3600)) throw new WorkbenchError('检查间隔应为 30–3600 秒。')
       if ('undoMinutes' in settings && (!Number.isSafeInteger(settings.undoMinutes) || settings.undoMinutes < 1 || settings.undoMinutes > 240)) throw new WorkbenchError('撤回窗口应为 1–240 分钟。')
@@ -157,7 +160,7 @@ export class WorkbenchApi {
         state.settings = { ...state.settings, ...settings }; state.configRevision++
         log(state, enabled !== state.settings.enabled ? state.settings.enabled ? '已开启后台自动处理。' : '已暂停接收和排队执行，正在运行的任务继续完成。' : '已更新工作台设置。')
         return state.settings
-      })
+      }).finally(() => { if ('wechat' in settings) this.engine.wechatChanged() })
     }
     if (body.action === 'saveRule') {
       const rule = validateRule(body.rule)
@@ -166,7 +169,7 @@ export class WorkbenchApi {
     if (body.action === 'deleteRule') return this.engine.store.mutate(state => { configCheck(state, body.revision); const rule = state.rules.find(r => r.id === body.id); if (!rule) throw new WorkbenchError('规则不存在。'); state.rules = state.rules.filter(r => r.id !== body.id); state.configRevision++; log(state, `已删除规则「${rule.name}」，历史任务保留原规则快照。`); return { deleted: true } })
     if (body.action === 'testRule') {
       const rule = validateRule(body.rule), task = findTask(await this.engine.store.read(), body.taskId)
-      return { matched: matches(rule, { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.attachments.length > 0 || task.hasAttachments === true }), rule: rule.name, note: '仅匹配预览，不会调用 DSH 或发送邮件。' }
+      return { matched: matches(rule, { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.attachments.length > 0 || task.hasAttachments === true, kind: task.source.kind === 'wechat' ? 'wechat' : 'email' }), rule: rule.name, note: '仅匹配预览，不会调用 DSH 或发送邮件。' }
     }
     if (body.action === 'poll') return this.engine.poll()
     if (body.action === 'generateBrief') return this.engine.generateBrief(uiLanguage, signal)
@@ -204,7 +207,7 @@ export class WorkbenchApi {
       const pool = state.tasks.slice().sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)).slice(0, 30)
       const items = pool.map(task => {
         const category = task.triage?.category
-        if (!matches(rule, { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.attachments.length > 0 || task.hasAttachments === true })) return { id: task.id, matched: false, reason: '发件人、主题或附件条件不符。', category }
+        if (!matches(rule, { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.attachments.length > 0 || task.hasAttachments === true, kind: task.source.kind === 'wechat' ? 'wechat' : 'email' })) return { id: task.id, matched: false, reason: '发件人、主题或附件条件不符。', category }
         if (category && ruleExcludes(rule).includes(category)) return { id: task.id, matched: false, reason: '属于方案排除的信息类别。', category }
         return { id: task.id, matched: true, reason: '符合发件人、主题和附件条件。', category }
       })
@@ -226,6 +229,28 @@ export class WorkbenchApi {
       if (entry.kind === 'auto_send_scheduled') return this.cancelAutoSend(entry.taskId)
       throw new WorkbenchError('这条记录无法撤回。', 'state', 409)
     }
+    if (body.action === 'wechatStatus') return this.engine.wechatStatus(signal)
+    if (body.action === 'wechatChats') return this.engine.wechatChats(signal)
+    if (body.action === 'wechatSearch') {
+      if (typeof body.q !== 'string' || !body.q.trim() || body.q.length > 50) throw new WorkbenchError('请输入 50 字以内的名称。')
+      const { service } = await this.engine.wechatService()
+      return service.search(body.q.trim(), signal)
+    }
+    if (body.action === 'wechatHistory') {
+      // Only conversations allowed by the lists can be read, and only in pages.
+      const { service, settings } = await this.engine.wechatService()
+      if (typeof body.chat !== 'string' || !chatAllowed(settings, body.chat)) throw new WorkbenchError('这个会话不在允许读取的范围内。', 'wechat-blocked', 403)
+      const offset = Number(body.offset ?? 0), limit = Number(body.limit ?? 50)
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100000 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new WorkbenchError('分页参数无效。')
+      return service.history(body.chat, offset, limit, signal)
+    }
+    if (body.action === 'clearWechatCache') {
+      if (body.confirmed !== true) throw new WorkbenchError('请确认清除。')
+      await this.engine.wechat?.clear?.()
+      this.engine.wechatChanged()
+      await this.engine.store.mutate(state => log(state, '已清除微信本地解密缓存，下次读取时重新生成。'))
+      return { cleared: true }
+    }
     if (body.action === 'resetBaseline') {
       configCheck(await this.engine.store.read(), body.revision)
       if (body.confirmed !== true || typeof body.account !== 'string' || typeof body.folder !== 'string') throw new WorkbenchError('重建基线需要明确确认，当前已有邮件不会重新处理。')
@@ -235,6 +260,21 @@ export class WorkbenchApi {
     const id = typeof body.id === 'string' ? body.id : ''
     return this.exclusive(id, async () => {
       const task = findTask(await this.engine.store.read(), id, requireRevision(body.revision))
+      if (task.source.kind === 'wechat' && ['loadMail', 'saveDraft', 'previewSend', 'send', 'resolveSend'].includes(body.action)) throw new WorkbenchError('微信消息只读：请复制建议回复，在微信中发送。', 'wechat-readonly', 409)
+      if (body.action === 'saveReply') {
+        if (task.source.kind !== 'wechat' || task.status !== 'review') throw new WorkbenchError('只有待审核的微信事项可以修改建议回复。', 'state', 409)
+        if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 16000) throw new WorkbenchError('请填写不超过 16000 字的回复。')
+        return this.engine.store.mutate(state => {
+          const item = findTask(state, id, body.revision)
+          if (body.replyRevision !== undefined && item.wechat?.replyRevision !== body.replyRevision) throw new WorkbenchError('建议回复已更新，请刷新后重试。', 'conflict', 409)
+          item.wechat!.reply = body.text.trim(); item.wechat!.replyRevision = (item.wechat!.replyRevision ?? 0) + 1
+          touch(item, '已保存修改后的回复。'); return item
+        })
+      }
+      if (body.action === 'markHandled') {
+        if (task.source.kind !== 'wechat' || ['running', 'queued', 'completed', 'ignored'].includes(task.status)) throw new WorkbenchError('当前状态不能标记为已处理。', 'state', 409)
+        return this.engine.store.mutate(state => { const item = findTask(state, id, body.revision); item.status = 'completed'; touch(item, '已在微信中处理。'); log(state, '微信事项已标记为已处理。', id); return item })
+      }
       if (body.action === 'loadMail') {
         if (['running', 'sending'].includes(task.status)) throw new WorkbenchError('任务正在执行，请稍后查看原邮件。')
         const read = await this.engine.readOriginal(task, signal)
@@ -328,7 +368,7 @@ export class WorkbenchApi {
       const item = pick(state)
       if (item.status !== 'ignored' || !item.triage?.archived) throw new WorkbenchError('只有 AI 归档的信息可以恢复。', 'state', 409)
       item.status = 'unmatched'; item.triage.archived = false
-      const sender = senderAddress(item.from)
+      const sender = senderKey(item)
       state.senders = { ...(state.senders || {}), [sender]: { ...(state.senders?.[sender] || {}), neverArchive: true } }
       for (const entry of state.activity || []) if (entry.taskId === item.id && entry.kind === 'archive' && !entry.undoneAt) entry.undoneAt = now()
       touch(item, '已恢复 AI 归档的信息；该发件人的信息以后不再自动归档。'); log(state, '已恢复归档信息。', item.id)

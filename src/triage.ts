@@ -58,7 +58,7 @@ export function createTriageRunner(ctx: any): TriageRunner {
       system: `你是工作台的信息分拣助手。判断一条新信息是什么、是否需要收件人处理，以及应该交给哪个候选处理方案。
 只在候选方案中选择 ruleId。候选方案已通过发件人、主题等字面条件；你需要根据方案名称、语义条件(semantic)和处理要求摘要(hint)判断这条信息是否真正属于该方案。例如“报价处理”方案不应接收服务故障通知、域名续费提醒或工资条。没有合适方案时 ruleId 为空字符串。
 系统自动通知、账单、提醒、验证码归为 notification；营销推广归为 marketing。只有对方需要收件人做事或回复时才归为 request 或 reply_needed。
-nextStep 要具体，例如“确认 500 台报价并今天回复”“补充 10/09 的高铁票”；无需行动时留空。reason 和 nextStep 使用${input.uiLanguage === 'en' ? '英文' : '中文'}。不要编造邮件中没有的事实。`,
+nextStep 要具体，例如“确认 500 台报价并今天回复”“补充 10/09 的高铁票”；无需行动时留空。reason 和 nextStep 使用${input.uiLanguage === 'en' ? '英文' : '中文'}。不要编造邮件中没有的事实。${input.mail.channel === 'wechat' ? '\n本条信息是一段微信对话记录（channel=wechat），“我”是收件人本人，subject 是会话名称。判断对方是否需要我做事或回复；微信里来自真人的消息不要归为 marketing。' : ''}`,
     }),
   }
 }

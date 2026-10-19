@@ -12,6 +12,8 @@ export const parseClock = (value: string | undefined, fallback: string): number 
 export const startOfWeek = (date = new Date()): Date => { const day = new Date(date.getFullYear(), date.getMonth(), date.getDate()); day.setDate(day.getDate() - ((day.getDay() + 6) % 7)); return day }
 
 export const senderAddress = (from: string): string => (from.match(/<([^>]+)>/)?.[1] || from).trim().toLowerCase()
+/** Preference key for a task's counterpart: the email address, or the WeChat conversation. */
+export const senderKey = (task: Task): string => task.source?.kind === 'wechat' ? `wechat:${task.source.folder}` : senderAddress(task.from)
 const normalizedSubject = (subject: string) => subject.replace(/^\s*((re|fw|fwd|回复|答复|转发)\s*[:：]\s*)+/gi, '').trim().toLowerCase()
 
 /** Reliable thread links (Message-ID references) and weaker same-sender/same-subject suggestions. */
@@ -26,8 +28,13 @@ export function relations(tasks: Task[]): Map<string, { related: string[]; possi
       if (other && other.id !== task.id) { entry(task.id).related.add(other.id); entry(other.id).related.add(task.id) }
     }
   }
+  // Segments of the same WeChat conversation are reliably related.
+  const chats = new Map<string, Task[]>()
+  for (const task of tasks) if (task.source?.kind === 'wechat') chats.set(task.source.folder, [...(chats.get(task.source.folder) || []), task])
+  for (const items of chats.values()) for (const a of items) for (const b of items) if (a.id !== b.id) entry(a.id).related.add(b.id)
   const groups = new Map<string, Task[]>()
   for (const task of tasks) {
+    if (task.source?.kind === 'wechat') continue
     const subject = normalizedSubject(task.subject)
     if (subject.length < 2) continue
     const key = `${senderAddress(task.from)}\n${subject}`

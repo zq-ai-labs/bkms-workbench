@@ -7,8 +7,9 @@ import { candidateRules, chooseAfterTriage, chooseRule } from './rules.js'
 import { originalMailFields } from './original-mail.js'
 import { Store, findTask, log, touch } from './store.js'
 import { heuristicTriage } from './triage.js'
-import { activityEntry, briefData, briefTemplate, localDate, localMinutes, parseClock, senderAddress, startOfWeek, topicData, topicMatches, topicTemplate, weeklyData, weeklyTemplate } from './digest.js'
-import { WorkbenchError, now, type AgentOutput, type AgentRunner, type Check, type EmailService, type Rule, type Settings, type State, type Task, type TopicSummary, type TriageRunner, type WriterRunner } from './types.js'
+import { activityEntry, briefData, briefTemplate, localDate, localMinutes, parseClock, senderKey, startOfWeek, topicData, topicMatches, topicTemplate, weeklyData, weeklyTemplate } from './digest.js'
+import { appendPending, chatAllowed, chatKind, segmentDue, segmentTitle, segmentVerdict, transcript, wechatSettingsOf } from './wechat.js'
+import { WorkbenchError, now, type AgentOutput, type AgentRunner, type Check, type EmailService, type Rule, type Settings, type State, type Task, type TopicSummary, type TriageRunner, type WechatChat, type WechatPending, type WechatService, type WechatSettings, type WechatStatus, type WriterRunner } from './types.js'
 
 const address = (entries: any[]): string => (entries || []).map(e => e.address || '').filter(Boolean).join(', ')
 const readableFrom = (entries: any[]): string => (entries || []).map(e => e.name ? `${e.name} <${e.address || ''}>` : e.address || '').filter(Boolean).join(', ')
@@ -53,11 +54,23 @@ export class Engine {
   private error?: string
   private lastCheck = 0
   private attempts = new Map<string, number>()
+  private wechatPolling = false
+  private wechatInfo?: WechatStatus & { at: number }
+  private wechatChatList?: { at: number; chats: WechatChat[] }
+  private wechatError?: string
+  /** Last-message time per conversation at the last successful poll; unchanged conversations are not queried. */
+  private wechatSeen = new Map<string, string>()
+  private wechatSweepAt = 0
   /** Language of the most recent client request; used for scheduled generation. */
   language: 'zh' | 'en' = 'zh'
-  constructor(readonly store: Store, private emailSource: () => EmailService | undefined, readonly agent: AgentRunner, readonly capabilities: () => Promise<unknown> = async () => ({ tools: [], skills: [] }), readonly triage?: TriageRunner, readonly writer?: WriterRunner) {}
+  constructor(readonly store: Store, private emailSource: () => EmailService | undefined, readonly agent: AgentRunner, readonly capabilities: () => Promise<unknown> = async () => ({ tools: [], skills: [] }), readonly triage?: TriageRunner, readonly writer?: WriterRunner, readonly wechat?: { service(settings: WechatSettings | undefined): WechatService | undefined; clear?(): Promise<void> }) {}
   email(): EmailService { const email = this.emailSource(); if (!email || email.version !== 1) throw new WorkbenchError('需要启用提供工作台接口的 dsh-email 本地构建。', 'email-unavailable', 503); return email }
-  health() { return { email: this.emailSource()?.version === 1, agent: this.agent.available(), running: !!this.release && !this.stopping, lastPoll: this.lastPoll, error: this.error, triage: !!this.triage?.available(), writer: !!this.writer?.available() } }
+  health() { return { email: this.emailSource()?.version === 1, agent: this.agent.available(), running: !!this.release && !this.stopping, lastPoll: this.lastPoll, error: this.error, triage: !!this.triage?.available(), writer: !!this.writer?.available(), wechat: this.wechatHealth() } }
+  wechatHealth(): { ready: boolean; name?: string; library?: string; error?: string } | undefined {
+    if (!this.wechat) return undefined
+    const info = this.wechatInfo
+    return { ready: !!info?.ready && !this.wechatError, name: info?.name, library: info?.library, error: this.wechatError || info?.error }
+  }
   async start(): Promise<void> {
     this.release = await this.store.ownWorker(error => { this.error = this.safe(error); void this.stop() }, true)
     try { await this.store.mutate(state => {
@@ -77,7 +90,8 @@ export class Engine {
   private async tick(): Promise<void> {
     const state = await this.store.read()
     if (!state.settings.enabled) return
-    if (Date.now() - this.lastCheck >= state.settings.pollSeconds * 1000) { this.lastCheck = Date.now(); await this.poll() }
+    if (this.emailSource() && Date.now() - this.lastCheck >= state.settings.pollSeconds * 1000) { this.lastCheck = Date.now(); await this.poll().catch(error => { this.error = this.safe(error) }) }
+    if (wechatSettingsOf(state.settings.wechat).enabled) await this.pollWechat().catch(error => { this.wechatError = this.safe(error) })
     await this.processNext()
     await this.sendDue()
     // Scheduled writing is best effort: a busy writer simply waits for the next slot; other failures are logged once per attempt.
@@ -86,7 +100,7 @@ export class Engine {
   async stop(): Promise<void> {
     this.stopping = true; clearTimeout(this.timer); this.controller.abort(new Error('工作台已停止'))
     // Do not release the worker lock while an execution can still mutate state.
-    while (this.polling || this.processing || this.sending || this.generating) await new Promise(resolve => setTimeout(resolve, 50))
+    while (this.polling || this.wechatPolling || this.processing || this.sending || this.generating) await new Promise(resolve => setTimeout(resolve, 50))
     await this.release?.(); this.release = undefined
   }
   safe(error: unknown): string {
@@ -183,32 +197,166 @@ export class Engine {
     task.messageId = read.messageId; task.references = read.references; task.replyTo = address(read.replyTo?.length ? read.replyTo : read.from)
     return read
   }
+  /** Conversations currently readable under the allow/block lists, with display names. */
+  /** The bridge for the current settings, or an error explaining why WeChat cannot be read. */
+  async wechatService(): Promise<{ service: WechatService; settings: WechatSettings | undefined }> {
+    const settings = (await this.store.read()).settings.wechat
+    const service = wechatSettingsOf(settings).enabled ? this.wechat?.service(settings) : undefined
+    if (!service) throw new WorkbenchError('请先在设置中开启微信读取。', 'wechat-disabled', 409)
+    return { service, settings }
+  }
+  async wechatStatus(signal: AbortSignal): Promise<WechatStatus> {
+    const { service } = await this.wechatService()
+    this.wechatInfo = { ...(await service.status(signal)), at: Date.now() }
+    if (this.wechatInfo.ready) this.wechatError = undefined
+    return this.wechatInfo
+  }
+  async wechatChats(signal: AbortSignal): Promise<WechatChat[]> {
+    const { service } = await this.wechatService()
+    this.wechatChatList = { at: Date.now(), chats: await service.chats(signal) }
+    return this.wechatChatList.chats
+  }
+  /** Forget cached chat names and status after the lists change. */
+  wechatChanged(): void { this.wechatChatList = undefined; this.wechatSeen.clear(); this.wechatSweepAt = 0 }
+  private async wechatEligible(service: WechatService, settings: WechatSettings | undefined, signal: AbortSignal): Promise<Map<string, WechatChat>> {
+    // The session list is one cheap query; it tells which conversations have anything new.
+    if (!this.wechatChatList || Date.now() - this.wechatChatList.at > 4000) this.wechatChatList = { at: Date.now(), chats: await service.chats(signal) }
+    const s = wechatSettingsOf(settings), eligible = new Map<string, WechatChat>()
+    for (const chat of this.wechatChatList.chats) if (chatAllowed(settings, chat.id)) eligible.set(chat.id, chat)
+    // Listed chats outside the recent session list are still read.
+    for (const id of [...(s.people.mode === 'allow' ? s.people.list : []), ...(s.groups.mode === 'allow' ? s.groups.list : [])]) {
+      const kind = chatKind(id)
+      if (!eligible.has(id) && kind !== 'other' && chatAllowed(settings, id)) eligible.set(id, { id, name: s.names?.[id] || id, kind })
+    }
+    return eligible
+  }
+  /** Read new messages from allowed conversations, group them into segments and queue finished segments as tasks. Read-only. */
+  async pollWechat(): Promise<number> {
+    if (this.wechatPolling || this.stopping || !this.release) return 0
+    const state = await this.store.read(), settings = state.settings.wechat, s = wechatSettingsOf(settings)
+    const service = this.wechat?.service(settings)
+    if (!service || !s.enabled) return 0
+    this.wechatPolling = true
+    const signal = AbortSignal.any([this.controller.signal, AbortSignal.timeout(180000)])
+    try {
+      if (!this.wechatInfo?.ready || Date.now() - this.wechatInfo.at > 300000) {
+        this.wechatInfo = { ...(await service.status(signal)), at: Date.now() }
+        if (!this.wechatInfo.ready) throw new WorkbenchError(this.wechatInfo.error || '微信未就绪。', 'wechat-unavailable', 503)
+      }
+      const eligible = await this.wechatEligible(service, settings, signal)
+      const marks = state.wechat?.watermarks ?? {}, pending = state.wechat?.pending ?? {}
+      // New conversations get a baseline in batches so a large block-list setup does not stall one poll.
+      const fresh = [...eligible.keys()].filter(id => marks[id] === undefined).slice(0, 100)
+      // Query only conversations whose last-message time moved, plus a full sweep every minute.
+      const sweep = Date.now() - this.wechatSweepAt > 60000
+      const changed = (id: string) => sweep || !eligible.get(id)?.lastAt || this.wechatSeen.get(id) !== eligible.get(id)!.lastAt
+      const known = Object.fromEntries([...eligible.keys()].filter(id => marks[id] !== undefined && changed(id)).map(id => [id, marks[id]]))
+      const baseline = fresh.length ? await service.latest(fresh, signal) : {}
+      const batch = Object.keys(known).length ? await service.poll(known, signal) : {}
+      this.wechatError = undefined
+      for (const id of Object.keys(known)) { const at = eligible.get(id)?.lastAt; if (at) this.wechatSeen.set(id, at) }
+      if (sweep) this.wechatSweepAt = Date.now()
+      const nowMs = Date.now(), arrived = now()
+      const stale = Object.keys(marks).some(id => !eligible.has(id)) || Object.keys(pending).some(id => !eligible.has(id))
+      const due = Object.values(pending).some(item => segmentDue(item, nowMs, s.quietMinutes))
+      const incoming = Object.values(batch).some(list => list.length)
+      if (!stale && !due && !incoming && !Object.keys(baseline).length) return 0
+      return await this.store.mutate(doc => {
+        const st = doc.wechat ??= { watermarks: {}, pending: {} }
+        // A conversation removed from the lists is forgotten, so adding it back starts from new messages only.
+        for (const id of Object.keys(st.watermarks)) if (!eligible.has(id)) delete st.watermarks[id]
+        for (const id of Object.keys(st.pending)) if (!eligible.has(id)) delete st.pending[id]
+        for (const [id, seq] of Object.entries(baseline)) if (st.watermarks[id] === undefined && Number.isSafeInteger(seq) && seq >= 0) { st.watermarks[id] = seq; log(doc, `微信会话「${eligible.get(id)?.name || id}」已建立基线，之后的新消息开始处理。`) }
+        for (const [id, list] of Object.entries(batch)) {
+          const chat = eligible.get(id)
+          if (!chat || st.watermarks[id] !== known[id]) continue
+          const messages = list.filter(m => Number.isSafeInteger(m.seq) && m.seq > known[id])
+          if (!messages.length) continue
+          st.watermarks[id] = Math.max(...messages.map(m => m.seq))
+          let next = appendPending(st.pending[id], chat.name, chat.kind === 'group', messages, arrived)
+          // Groups outside the mention scope only keep a short context until someone mentions you.
+          if (next.group && s.groups.scope === 'mention' && !next.messages.some(m => m.mentionsMe)) next = { ...next, messages: next.messages.slice(-10) }
+          st.pending[id] = next
+        }
+        let created = 0
+        for (const [id, item] of Object.entries(st.pending)) {
+          if (!segmentDue(item, nowMs, s.quietMinutes)) continue
+          delete st.pending[id]
+          if (segmentVerdict(item, s.groups.scope) === 'task' && this.createWechatTask(doc, id, item)) created++
+        }
+        if (created) log(doc, `微信新增 ${created} 个待处理事项。`)
+        return created
+      })
+    } finally { this.wechatPolling = false }
+  }
+  private createWechatTask(doc: State, chat: string, item: WechatPending): boolean {
+    const seqs = item.messages.map(m => m.seq), toSeq = Math.max(...seqs), fromSeq = Math.min(...seqs)
+    if (!(toSeq >= 1) || doc.tasks.some(t => t.source.kind === 'wechat' && t.source.folder === chat && t.source.uid === toSeq)) return false
+    const { from, title } = segmentTitle(item), timestamp = now()
+    const task: Task = {
+      id: randomUUID(), revision: 1, title, account: 'wechat', status: 'queued', from, subject: item.chatName, body: transcript(item.messages),
+      receivedAt: item.messages.at(-1)?.at || timestamp, updatedAt: timestamp, source: { account: 'wechat', folder: chat, uid: toSeq, uidValidity: 1, kind: 'wechat' },
+      attachments: [], history: [], attempts: 0, mailLoaded: true,
+      wechat: { chat, chatName: item.chatName, group: item.group, messages: item.messages, fromSeq, toSeq, ...(item.messages.some(m => m.mentionsMe) ? { mentioned: true } : {}) },
+    }
+    if (this.triageOn(doc)) { task.triage = { state: 'pending' }; task.history.push({ at: timestamp, message: '等待 AI 分拣。' }) }
+    else {
+      const rule = chooseRule(doc.rules, { account: 'wechat', from, subject: item.chatName, hasAttachments: false, kind: 'wechat' })
+      task.status = rule ? 'queued' : 'unmatched'
+      task.history.push({ at: timestamp, message: rule ? `命中规则「${rule.name}」，等待处理。` : '未匹配规则，可手动选择规则处理。' })
+      if (rule) { task.ruleId = rule.id; task.ruleName = rule.name; task.rule = structuredClone(rule) }
+    }
+    doc.tasks.push(task)
+    return true
+  }
+  /** Prepare a WeChat segment: the AI suggests a reply that you copy into WeChat yourself. Nothing is sent. */
+  private async prepareWechat(task: Task, signal: AbortSignal): Promise<void> {
+    const workspace = join(this.store.root, 'tasks', task.id)
+    await mkdir(workspace, { recursive: true, mode: 0o700 })
+    task.workspace = workspace
+    const result = await this.agent.run(task, task.rule!, signal)
+    signal.throwIfAborted()
+    const reply = task.rule!.output === 'reply' && !result.output.needsInfo
+    if (reply && !result.output.text?.trim()) throw new WorkbenchError('DSH 未生成建议回复。')
+    const checks = reply ? cleanChecks(result.output.checks, result.output.text) : []
+    const informationGaps = result.output.informationGaps?.trim() || (checks.length ? checks.map((check, index) => `${index + 1}. ${check.item}`).join('\n') : undefined)
+    await this.store.mutate(state => {
+      const item = findTask(state, task.id)
+      const status = result.output.needsInfo ? 'needs_info' : reply ? 'review' : 'completed'
+      Object.assign(item, { summary: result.output.summary, informationGaps, checks: checks.length ? checks : undefined, needsInfoKind: result.output.needsInfo ? result.output.needsInfoKind || 'information' : undefined, sessionId: result.sessionId, workspace, status, error: result.output.needsInfo || undefined })
+      if (reply && item.wechat) { item.wechat.reply = result.output.text!.trim(); item.wechat.replyRevision = (item.wechat.replyRevision ?? 0) + 1 }
+      touch(item, result.output.needsInfo ? '需要补充信息后继续。' : reply ? '已生成建议回复，复制到微信后发送。' : '分析报告已生成。'); log(state, 'DSH 处理完成。', item.id)
+      if (status === 'completed') state.activity = [...(state.activity || []), activityEntry({ kind: 'report', title: item.title, detail: item.ruleName, taskId: item.id, ruleName: item.ruleName, source: 'wechat' }, randomUUID())]
+    })
+  }
   /** Decide what the message is and which workflow, if any, should handle it. */
   private async runTriage(task: Task, signal: AbortSignal): Promise<void> {
-    const read = await this.loadForProcessing(task, signal)
+    const wechat = task.source.kind === 'wechat'
+    const read = wechat ? undefined : await this.loadForProcessing(task, signal)
     const state = await this.store.read()
-    const meta = { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.hasAttachments === true || task.attachments.length > 0 }
+    const meta = { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.hasAttachments === true || task.attachments.length > 0, kind: wechat ? 'wechat' as const : 'email' as const }
     const candidates = candidateRules(state.rules, meta)
-    const mail = { from: task.from, subject: task.subject, body: task.body.slice(0, 6000), hasAttachments: meta.hasAttachments, receivedAt: task.receivedAt }
+    const mail = { from: task.from, subject: task.subject, body: task.body.slice(0, 6000), hasAttachments: meta.hasAttachments, receivedAt: task.receivedAt, channel: meta.kind }
     let result: { category: any; urgency: any; reason: string; nextStep: string; ruleId?: string }, by: 'ai' | 'heuristic' = 'heuristic'
     if (this.triage?.available()) {
       try { result = await this.triage.run({ mail, rules: candidates.map(rule => ({ id: rule.id, name: rule.name, semantic: rule.semantic || '', output: rule.output, hint: rule.instructions.slice(0, 400) })), uiLanguage: this.language }, AbortSignal.any([signal, AbortSignal.timeout(90000)])); by = 'ai' }
       catch (error) { if (signal.aborted) throw error; result = heuristicTriage(mail); await this.store.mutate(doc => log(doc, `AI 分拣失败，已改用规则判断：${this.safe(error)}`, task.id, 'error')) }
     } else result = heuristicTriage(mail)
     signal.throwIfAborted()
-    const sender = senderAddress(task.from), keep = state.senders?.[sender]?.neverArchive === true
+    const sender = senderKey(task), keep = state.senders?.[sender]?.neverArchive === true
     const rule = chooseAfterTriage(candidates, result.category, result.ruleId, by === 'ai')
     await this.store.mutate(doc => {
       const item = findTask(doc, task.id)
       if (item.status !== 'running') return
-      Object.assign(item, originalMailFields(read), { body: task.body, mailLoaded: true, attachments: task.attachments, messageId: task.messageId, references: task.references, replyTo: task.replyTo })
+      if (read) Object.assign(item, originalMailFields(read), { body: task.body, mailLoaded: true, attachments: task.attachments, messageId: task.messageId, references: task.references, replyTo: task.replyTo })
       item.triage = { state: 'done', category: result.category, urgency: result.urgency, reason: result.reason || undefined, nextStep: result.nextStep || undefined, by: keep ? 'preference' : by, at: now() }
       item.attempts = 0
       if (result.reason) touch(item, `AI 分拣：${result.reason}`)
+      // WeChat is read-only: it is never archived silently, so nothing from a person disappears from view.
       if (rule) {
         item.rule = structuredClone(rule); item.ruleId = rule.id; item.ruleName = rule.name; item.status = 'queued'
         touch(item, `命中方案「${rule.name}」，等待处理。`)
-      } else if (!keep && (result.category === 'notification' || result.category === 'marketing')) {
+      } else if (!keep && !wechat && (result.category === 'notification' || result.category === 'marketing')) {
         item.status = 'ignored'; item.triage.archived = true
         touch(item, '已归档，可随时恢复。')
         doc.activity = [...(doc.activity || []), activityEntry({ kind: 'archive', title: item.subject || item.title, detail: result.reason, taskId: item.id, source: 'email' }, randomUUID())]
@@ -220,7 +368,8 @@ export class Engine {
     })
   }
   async processNext(): Promise<void> {
-    if (this.processing || this.stopping || !this.release || !this.emailSource()) return
+    if (this.processing || this.stopping || !this.release) return
+    const emailReady = !!this.emailSource()
     this.processing = true
     let task: Task | undefined
     const signal = AbortSignal.any([this.controller.signal, AbortSignal.timeout(5 * 60 * 1000)])
@@ -228,7 +377,7 @@ export class Engine {
       const agentReady = this.agent.available()
       task = await this.store.mutate(state => {
         // Triage needs no workflow agent; preparation does. Pick accordingly so triage keeps working without a preparation model.
-        const item = state.tasks.find(t => t.status === 'queued' && (!t.nextAttemptAt || t.nextAttemptAt <= now()) && (t.triage?.state === 'pending' || agentReady))
+        const item = state.tasks.find(t => t.status === 'queued' && (!t.nextAttemptAt || t.nextAttemptAt <= now()) && (t.triage?.state === 'pending' || agentReady) && (t.source.kind === 'wechat' || emailReady))
         if (!item) return undefined
         item.status = 'running'; item.attempts++; item.prepareKey ??= randomUUID(); delete item.error
         touch(item, item.triage?.state === 'pending' ? '开始读取邮件并分拣。' : '开始读取资料并调用 DSH。'); log(state, '任务开始处理。', item.id)
@@ -237,6 +386,7 @@ export class Engine {
       if (!task) return
       if (task.triage?.state === 'pending') { await this.runTriage(task, signal); this.error = undefined; return }
       if (!task.rule) throw new WorkbenchError('任务缺少规则快照。')
+      if (task.source.kind === 'wechat') { await this.prepareWechat(task, signal); this.error = undefined; return }
       const email = this.email(), read = await this.loadForProcessing(task, signal)
       const workspace = join(this.store.root, 'tasks', task.id)
       await mkdir(workspace, { recursive: true, mode: 0o700 })
