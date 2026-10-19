@@ -4,6 +4,7 @@ import { open, stat, unlink } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import { join, basename } from 'node:path'
 import { candidateRules, chooseRule, decideAfterTriage } from './rules.js'
+import { historyForPrompt, splitQuoted } from './quoted.js'
 import { originalMailFields } from './original-mail.js'
 import { Store, findTask, log, touch } from './store.js'
 import { heuristicTriage } from './triage.js'
@@ -338,10 +339,18 @@ export class Engine {
     const state = await this.store.read()
     const meta = { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.hasAttachments === true || task.attachments.length > 0, kind: wechat ? 'wechat' as const : 'email' as const }
     const candidates = candidateRules(state.rules, meta)
-    const mail = { from: task.from, subject: task.subject, body: task.body.slice(0, 6000), hasAttachments: meta.hasAttachments, receivedAt: task.receivedAt, channel: meta.kind }
+    // Replies carry the earlier exchange below the new text: classify by what was written now, read the rest as context.
+    const split = wechat ? { latest: task.body, history: [] } : splitQuoted(task.body)
+    const quotedHistory = historyForPrompt(split.history, 2500)
+    const mail = { from: task.from, subject: task.subject, body: split.latest.slice(0, 5000), ...(quotedHistory ? { quotedHistory } : {}), hasAttachments: meta.hasAttachments, receivedAt: task.receivedAt, channel: meta.kind }
+    // The workflow that handled the previous message of the same thread, when it is still a candidate.
+    const refs = new Set((task.references || '').split(/\s+/).map(ref => ref.replace(/[<>]/g, '')).filter(Boolean))
+    const previous = state.tasks.filter(item => item.id !== task.id && item.ruleId && item.messageId && refs.has(item.messageId.replace(/[<>]/g, ''))).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))[0]
+    const previousRule = previous && candidates.find(rule => rule.id === previous.ruleId)
+    const thread = previousRule ? { previousRule: { id: previousRule.id, name: previousRule.name } } : undefined
     let result: { category: any; urgency: any; reason: string; nextStep: string; ruleId?: string; confidence?: Confidence; ruleReason?: string }, by: 'ai' | 'heuristic' = 'heuristic'
     if (this.triage?.available()) {
-      try { result = await this.triage.run({ mail, rules: candidates.map(rule => ({ id: rule.id, name: rule.name, semantic: rule.semantic || '', output: rule.output, hint: rule.instructions.slice(0, 400), examples: (state.ruleExamples?.[rule.id] ?? []).slice(-EXAMPLES_IN_PROMPT).map(({ match, text }) => ({ match, text })) })), uiLanguage: this.language }, AbortSignal.any([signal, AbortSignal.timeout(90000)])); by = 'ai' }
+      try { result = await this.triage.run({ mail, ...(thread ? { thread } : {}), rules: candidates.map(rule => ({ id: rule.id, name: rule.name, semantic: rule.semantic || '', output: rule.output, hint: rule.instructions.slice(0, 400), examples: (state.ruleExamples?.[rule.id] ?? []).slice(-EXAMPLES_IN_PROMPT).map(({ match, text }) => ({ match, text })) })), uiLanguage: this.language }, AbortSignal.any([signal, AbortSignal.timeout(90000)])); by = 'ai' }
       catch (error) { if (signal.aborted) throw error; result = heuristicTriage(mail); await this.store.mutate(doc => log(doc, `AI 分拣失败，已改用规则判断：${this.safe(error)}`, task.id, 'error')) }
     } else result = heuristicTriage(mail)
     signal.throwIfAborted()

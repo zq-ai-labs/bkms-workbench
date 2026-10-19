@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { useMemo, useState } from 'react';
 import { t } from './i18n';
+import { splitQuoted } from '../src/quoted';
 
 const tags = new Set('div span p br hr table thead tbody tfoot tr td th colgroup col caption h1 h2 h3 h4 h5 h6 b strong i em u s small sub sup blockquote pre code ul ol li dl dt dd center font a'.split(' '));
 const discard = new Set('script style iframe frame frameset object embed applet form input button textarea select option link meta base svg math video audio source template noscript'.split(' '));
@@ -58,6 +59,20 @@ export function OriginalMailBody({ html, text }: { html?: string; text: string }
       <button type="button" aria-pressed={plain} onClick={() => setPlain(true)}>{t('纯文本')}</button>
     </div>}
     {srcDoc && !plain ? <iframe className="bkw-original-frame" title={t('原邮件正文')} sandbox="" referrerPolicy="no-referrer" srcDoc={srcDoc} /> :
-      <pre className="bkw-original">{text.replace(/\r\n?/g, '\n').replace(/^[\t ]+$/gm, '').replace(/\n{3,}/g, '\n\n').trim()}</pre>}
+      <PlainMail text={text} />}
   </div>;
+}
+
+const clean = (value: string) => value.replace(/\r\n?/g, '\n').replace(/^[\t ]+$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+/** Plain text with the quoted history folded below the new message, the same split AI uses. */
+function PlainMail({ text }: { text: string }) {
+  const split = useMemo(() => splitQuoted(text), [text]);
+  if (!split.history.length) return <pre className="bkw-original">{clean(text)}</pre>;
+  return <>
+    <pre className="bkw-original">{clean(split.latest)}</pre>
+    <details className="bkw-quoted">
+      <summary>{t('引用的历史往来（{0} 段）', split.history.length)}</summary>
+      {split.history.map((part, index) => <div key={index} className="bkw-quoted-part">{part.header && <div className="bkw-quoted-head">{part.header}</div>}<pre>{clean(part.text)}</pre></div>)}
+    </details>
+  </>;
 }

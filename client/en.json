@@ -966,5 +966,6 @@
   "不是这个": "Not this one",
   "你已判断这条信息不属于「{0}」。可以选择其他方案或忽略。": "You marked this as not belonging to “{0}”. Choose another workflow or ignore it.",
   "不属于这个方案": "Not this workflow",
-  "移出方案并记为反例，之后可另选方案": "Remove it from the workflow as a counter-example, then choose another"
+  "移出方案并记为反例，之后可另选方案": "Remove it from the workflow as a counter-example, then choose another",
+  "引用的历史往来（{0} 段）": "Quoted earlier messages ({0})"
 }

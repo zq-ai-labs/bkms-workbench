@@ -162,7 +162,7 @@ export interface EmailService {
 }
 export interface AgentOutput { summary: string; needsInfo?: string; needsInfoKind?: 'information' | 'attachments'; informationGaps?: string; subject?: string; text?: string; checks?: Check[]; lowRisk?: boolean }
 export interface AgentRunner { available(): boolean; run(task: Task, rule: Rule, signal: AbortSignal): Promise<{ output: AgentOutput; sessionId?: string }> }
-export interface TriageInput { mail: { from: string; subject: string; body: string; hasAttachments: boolean; receivedAt: string; channel?: 'email' | 'wechat' }; rules: { id: string; name: string; semantic: string; output: 'reply' | 'report'; hint: string; examples?: { match: boolean; text: string }[] }[]; uiLanguage?: 'zh' | 'en' }
+export interface TriageInput { mail: { from: string; subject: string; body: string; quotedHistory?: string; hasAttachments: boolean; receivedAt: string; channel?: 'email' | 'wechat' }; thread?: { previousRule?: { id: string; name: string } }; rules: { id: string; name: string; semantic: string; output: 'reply' | 'report'; hint: string; examples?: { match: boolean; text: string }[] }[]; uiLanguage?: 'zh' | 'en' }
 export interface TriageOutput { category: TriageCategory; urgency: 'high' | 'normal' | 'low'; reason: string; nextStep: string; ruleId: string; confidence?: Confidence; ruleReason?: string }
 export interface TriageRunner { available(): boolean; run(input: TriageInput, signal: AbortSignal): Promise<TriageOutput> }
 export type WriterKind = 'brief' | 'weekly' | 'topic' | 'trial'

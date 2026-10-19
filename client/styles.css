@@ -530,6 +530,13 @@ body[data-ds-dark-theme] .bkw-check-no { color: #1d1606; }
 
 /* Narrow layouts: panes stack, the page scrolls as a whole */
 
+/* Quoted history in plain-text mail */
+.bkw-quoted { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surf2); }
+.bkw-quoted > summary { padding: 8px 12px; font-size: 12px; color: var(--ink2); cursor: pointer; }
+.bkw-quoted-part { padding: 10px 12px; border-top: 1px solid var(--line2); }
+.bkw-quoted-head { font-size: 12px; color: var(--ink3); margin-bottom: 6px; overflow-wrap: anywhere; }
+.bkw-quoted-part pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 13px; color: var(--ink2); }
+
 /* AI matching */
 .bkw-levels.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .bkw-suggest { border: 1px solid var(--acc); background: var(--accS); }

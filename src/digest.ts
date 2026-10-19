@@ -1,3 +1,4 @@
+import { splitQuoted } from './quoted.js'
 import type { Activity, State, Task, Topic, TopicSummary } from './types.js'
 
 /** Statuses that require the user's decision. Unmatched requests count too once triage says they need someone. */
@@ -15,7 +16,7 @@ export const senderAddress = (from: string): string => (from.match(/<([^>]+)>/)?
 /** Preference key for a task's counterpart: the email address, or the WeChat conversation. */
 /** Short, content-light summary used as a learned example for a workflow. */
 export const exampleText = (task: Task): string => {
-  const what = task.triage?.reason || task.body.replace(/\s+/g, ' ').slice(0, 160)
+  const what = task.triage?.reason || splitQuoted(task.body).latest.replace(/\s+/g, ' ').slice(0, 160)
   return `${task.source?.kind === 'wechat' ? '微信 ' + (task.wechat?.chatName || '') : '发件人 ' + senderAddress(task.from)}｜主题：${(task.subject || task.title).slice(0, 80)}｜${what}`.slice(0, 300)
 }
 export const senderKey = (task: Task): string => task.source?.kind === 'wechat' ? `wechat:${task.source.folder}` : senderAddress(task.from)
@@ -135,7 +136,7 @@ export function topicTemplate(data: ReturnType<typeof topicData>, en: boolean): 
 export function trialData(state: State, rule: { id?: string; name: string; semantic?: string; instructions: string; exclude?: string[] }, taskIds?: string[]) {
   const pool = state.tasks.slice().sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)).filter(task => !taskIds || taskIds.includes(task.id)).slice(0, 30)
   const examples = (rule.id ? state.ruleExamples?.[rule.id] ?? [] : []).slice(-8).map(({ match, text }) => ({ match, text }))
-  return { rule: { name: rule.name, semantic: rule.semantic || '', hint: rule.instructions.slice(0, 600), exclude: rule.exclude, examples }, mails: pool.map(task => ({ id: task.id, from: task.from, subject: task.subject, category: task.triage?.category, excerpt: (task.summary || task.body || '').slice(0, 300) })) }
+  return { rule: { name: rule.name, semantic: rule.semantic || '', hint: rule.instructions.slice(0, 600), exclude: rule.exclude, examples }, mails: pool.map(task => ({ id: task.id, from: task.from, subject: task.subject, category: task.triage?.category, excerpt: (task.summary || splitQuoted(task.body || '').latest).slice(0, 300) })) }
 }
 
 export const activityEntry = (input: Omit<Activity, 'id' | 'at'> & { at?: string }, id: string): Activity => ({ ...input, id, at: input.at ?? new Date().toISOString() })
