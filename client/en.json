@@ -882,15 +882,12 @@
   "微信读取": "WeChat reading",
   "已开启微信读取，请添加要处理的会话": "WeChat reading is on. Add the conversations to handle.",
   "已关闭微信读取": "WeChat reading is off",
-  "读取不到微信时请检查：微信 4.x 已登录、已安装 64 位 Python 和 wechatauto-replica。可在下方“读取组件”中指定 Python 和组件目录。": "If WeChat cannot be read, check that WeChat 4.x is signed in and 64-bit Python with wechatauto-replica is installed. You can set the Python command and library folder under “Reader” below.",
   "重新检测": "Check again",
   "合并连续消息": "Group consecutive messages",
   "对方停顿多久后，把连发的几条消息作为一件事处理。": "How long the other side must pause before messages sent in a row are handled as one item.",
   "读取组件": "Reader",
   "已自定义": "Customized",
-  "默认：py -3，组件已用 pip 安装": "Default: py -3 with the library installed by pip",
   "Python 命令": "Python command",
-  "wechatauto-replica 目录（未用 pip 安装时填写）": "wechatauto-replica folder (if not installed with pip)",
   "本地解密缓存": "Local decrypted cache",
   "为了读取聊天记录，解密后的数据库副本保存在本机工作台数据目录。清除后下次读取时重新生成。": "To read chats, decrypted database copies are kept in the workbench data folder on this computer. After clearing they are rebuilt on the next read.",
   "清除": "Clear",
@@ -922,5 +919,9 @@
   "名单为空：不处理任何联系人。": "The list is empty, so no contacts are handled.",
   "名单为空：处理全部联系人。": "The list is empty, so all contacts are handled.",
   "名单为空：不处理任何群聊。": "The list is empty, so no groups are handled.",
-  "名单为空：处理全部群聊。": "The list is empty, so all groups are handled."
+  "名单为空：处理全部群聊。": "The list is empty, so all groups are handled.",
+  "默认：py -3，使用内置读取组件": "Default: py -3 with the built-in reader",
+  "上游 wechatauto-replica 目录（可选：微信升级后临时改用上游的修复）": "Upstream wechatauto-replica folder (optional: temporarily use upstream fixes after a WeChat update)",
+  "读取不到微信时请检查：微信 4.x 已登录，并已安装 64 位 Python 3.9 或更高版本。Python 命令不是 py -3 时，可在下方“读取组件”中填写。": "If WeChat cannot be read, check that WeChat 4.x is signed in and 64-bit Python 3.9 or later is installed. If the Python command is not py -3, set it under “Reader” below.",
+  "留空即可": "Leave empty"
 }

@@ -6,7 +6,7 @@
 
 ```
 Windows 微信 4.x（已登录）
-   └─ 本地加密数据库 ── wechatauto-replica（Python）解密读取
+   └─ 本地加密数据库 ── wechat/wxread（内置，移植自 wechatauto-replica）解密读取
                               └─ wechat/bridge.py：只读桥，标准输入输出逐行 JSON
 工作台后台（Node，src/wechat.ts）
    ├─ 按名单决定读哪些会话（白名单 / 黑名单，人员和群聊分开）
@@ -15,22 +15,15 @@ Windows 微信 4.x（已登录）
    └─ 复用现有的 AI 分拣、处理方案、建议回复、审核与记录
 ```
 
-- 读取部分来自 [wechatauto-replica](https://github.com/zq-ai-labs/wechatauto-replica)：从微信进程内存取得数据库密钥、解密 SQLCipher 数据库、按序号增量读取新消息。桥只调用它的数据库读取接口（`WeChatDB`），不导入发送和界面自动化能力。
+- 读取部分移植自 [wechatauto-replica](https://github.com/zq-ai-labs/wechatauto-replica) 1.2.7.0 的数据库读取代码，内置在 `wechat/wxread/`（Apache-2.0，来源与修改见其中的 `NOTICE.md`）：从微信进程内存取得数据库密钥、解密 SQLCipher 数据库、按序号增量读取新消息。不需要另外安装 wechatauto；只移植了读取，发送和界面自动化不在其中。
+- 内置组件只用 Python 标准库：AES 解密优先用已安装的 `cryptography`，否则调用 Windows 自带的加密接口（CNG）；长消息、引用、链接卡片的 zstd 压缩优先用已安装的 `zstandard` 或 Python 3.14 自带模块，否则用内置的纯 Python 解压。
 - 工作台每 5 秒查看一次会话列表，只查询最后消息时间有变化的会话，并每分钟全量核对一次。实际延迟主要来自“停顿合并”的等待时间（默认 3 分钟）。
 
 ## 安装（Windows）
 
-1. 安装 **64 位** Python 3.9 或更高版本（32 位 Python 读不了微信进程内存）。
-2. 安装读取组件：
-   ```powershell
-   cd D:\ai\weixin\wechatauto-replica
-   py -3 -m pip install -e .
-   py -3 -m wechatauto 体检
-   ```
-   `体检` 能读到会话即可。
-3. 保持微信登录。在 DSH 设置的「工作台设置 → 信息源 → 微信」中打开开关，状态显示「已连接：你的昵称」即可。
-   - Python 命令不是 `py -3` 时，在「读取组件」里填写，例如 `C:\Python312\python.exe`。
-   - 没有用 pip 安装组件时，在「读取组件」里填写 wechatauto-replica 的目录。
+1. 安装 **64 位** Python 3.9 或更高版本（32 位 Python 读不了微信进程内存）。不需要 pip 安装任何包。
+2. 保持微信登录。在 DSH 设置的「工作台设置 → 信息源 → 微信」中打开开关，状态显示「已连接：你的昵称 · 读取组件 wxread 1.2.7.0+bkms」即可。
+3. Python 命令不是 `py -3` 时（例如没装 Python 启动器），在「读取组件」里填写 python.exe 的完整路径，例如 `C:\Python312\python.exe`。
 4. 添加要处理的会话（见下），并确认「后台自动处理」已开启。
 
 ## 名单：把工作和私人分开
@@ -73,12 +66,13 @@ Windows 微信 4.x（已登录）
 | 现象 | 处理 |
 | --- | --- |
 | 状态显示「未连接」，提示无法启动 Python | 检查 Python 命令；在「读取组件」中填写 python.exe 的完整路径 |
-| 提示找不到模块 `wechatauto` | 用 pip 安装组件，或在「读取组件」中填写组件目录 |
-| 提示找不到数据库或密钥失败 | 确认微信已登录；运行 `py -3 -m wechatauto.diagnose_keys` 查看原因 |
-| 微信升级后读不到 | 组件里的内存偏移与微信版本有关，升级 wechatauto-replica 后重新检测 |
+| 提示找不到模块 `wechatauto` | 「读取组件」里填了上游目录但该目录不是 wechatauto-replica 项目；清空该项即可使用内置组件 |
+| 提示找不到数据库或密钥失败 | 确认微信已登录、Python 为 64 位；仍失败时可用上游项目的 `py -3 -m wechatauto.diagnose_keys` 排查 |
+| 微信升级后读不到 | 密钥提取依赖与微信版本有关的内存偏移。上游修复后：临时在「读取组件」填写最新的上游项目目录；之后按 `wechat/wxread/NOTICE.md` 把修复同步到内置组件 |
+| 提示 AES 自检失败 | 解密组件异常，已停止读取以免读出错误数据；安装 `cryptography`（`py -3 -m pip install cryptography`）后重试 |
 | 首次连接较慢 | 第一次解密约需几秒到一分钟，之后是增量读取 |
 
 ## 开发
 
-- 桥的协议和消息整理在 `wechat/bridge.py`，纯函数测试：`python -m unittest wechat/test_bridge.py`。
+- 桥的协议和消息整理在 `wechat/bridge.py`，内置读取组件在 `wechat/wxread/`。Python 测试：`python -m unittest wechat/test_bridge.py wechat/test_wxread.py`（后者用 `cryptography`、`zstandard` 生成样本，未安装时跳过）。
 - `bridge.py --fixture test/fixtures/wechat.json` 用合成数据代替真实数据库；`test/wechat.test.mjs` 用它跑通“桥 → 后台 → 事项”的完整链路。

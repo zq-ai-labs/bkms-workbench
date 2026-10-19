@@ -235,8 +235,19 @@ test('settings validation, status in the snapshot and clearing the local cache',
 
 const python = ['python3', 'python'].find(cmd => spawnSync(cmd, ['--version']).status === 0)
 test('bridge unit tests (Python)', { skip: !python && 'Python not available' }, () => {
-  const result = spawnSync(python, ['-m', 'unittest', 'wechat/test_bridge.py'], { cwd: join(here, '..'), encoding: 'utf8' })
+  const result = spawnSync(python, ['-m', 'unittest', 'wechat/test_bridge.py', 'wechat/test_wxread.py'], { cwd: join(here, '..'), encoding: 'utf8' })
   assert.equal(result.status, 0, result.stderr)
+})
+
+test('without a fixture the bridge uses the built-in reader and needs no wechatauto install', { skip: !python && 'Python not available' }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'bkms-wechat-builtin-'))
+  // An empty PYTHONPATH and no upstream flag: the bridge must not try to import wechatauto.
+  const bridge = new WechatBridge({ python, workdir: join(root, 'cache') })
+  t.after(async () => { bridge.close(); await rm(root, { recursive: true, force: true }) })
+  const status = await bridge.status()
+  assert.equal(status.ready, false, 'no WeChat on this machine')
+  assert.doesNotMatch(status.error, /No module named/, status.error)
+  if (process.platform !== 'win32') assert.match(status.error, /只支持 Windows/)
 })
 
 test('end to end through the real bridge process with a fixture database', { skip: !python && 'Python not available' }, async t => {

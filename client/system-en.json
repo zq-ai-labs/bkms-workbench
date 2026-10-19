@@ -322,5 +322,6 @@
   "微信读取超时。": "WeChat read timed out.",
   "微信读取已停止。": "WeChat reading has stopped.",
   "微信未就绪。": "WeChat is not ready.",
-  "DSH 未生成建议回复。": "DSH produced no suggested reply."
+  "DSH 未生成建议回复。": "DSH produced no suggested reply.",
+  "微信读取目前只支持 Windows 版微信 4.x": "WeChat reading currently supports only WeChat 4.x for Windows"
 }

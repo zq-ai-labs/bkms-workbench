@@ -21,6 +21,7 @@
   "files": [
     "lib",
     "wechat/bridge.py",
+    "wechat/wxread",
     "cordis.patch.yml",
     "README.md",
     "docs",

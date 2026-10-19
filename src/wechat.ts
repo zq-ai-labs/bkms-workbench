@@ -107,7 +107,7 @@ export class WechatBridge implements WechatService {
     this.stderr = ''
     this.starting = new Promise<void>((resolve, reject) => {
       let child: ChildProcess
-      try { child = spawn(command, [...prefix, BRIDGE_PATH, '--workdir', this.options.workdir, ...(this.options.args ?? [])], { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }) }
+      try { child = spawn(command, [...prefix, BRIDGE_PATH, '--workdir', this.options.workdir, ...(this.options.library ? ['--upstream'] : []), ...(this.options.args ?? [])], { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }) }
       catch (error) { this.failedAt = Date.now(); reject(new WorkbenchError(`无法启动 Python：${(error as Error).message}`, 'wechat-unavailable', 503)); return }
       const timer = setTimeout(() => { child.kill(); reject(new WorkbenchError('微信读取进程启动超时。', 'wechat-unavailable', 503)) }, 20000)
       child.stdin!.on('error', () => {})
