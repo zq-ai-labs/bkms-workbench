@@ -2,7 +2,7 @@ import * as React from "react";
 import { useEffect, useState } from "react";
 import { t } from "./i18n";
 import { useWorkbench } from "./context";
-import { api, dateTime, downloadText, nextStep, senderName, when, type Report, type Topic } from "./lib";
+import { api, dateTime, downloadText, nextStep, senderName, sourceOf, taskTitle, when, type Report, type Topic } from "./lib";
 import { AutoTextarea, Empty, Field, Icon, Modal, SourceTag, StatusTag, Tag } from "./ui";
 
 const KIND: Record<Topic["kind"], string> = { customer: "客户", project: "项目", other: "其他" };
@@ -71,14 +71,14 @@ function TopicDetail({ topic, onEdit }: { topic: Topic; onEdit: () => void }) {
     <div className="bkw-two">
       <section className="bkw-card"><div className="bkw-card-head"><h3>{t("风险")}</h3></div>{topic.summary?.risks.length ? <ul className="bkw-list">{topic.summary.risks.map((risk, index) => <li key={index}><i className="bkw-dot attention" />{risk}</li>)}</ul> : <p className="bkw-card-empty">{t("暂无有依据的风险。")}</p>}</section>
       <section className="bkw-card"><div className="bkw-card-head"><h3>{t("待办")}</h3><small className="bkw-muted">{t("{0} 件等你处理", open.length)}</small></div>
-        {open.length ? open.slice(0, 6).map(task => <button type="button" key={task.id} className="bkw-row tight" onClick={() => go({ view: "decide", task: task.id })}><span className="bkw-row-main"><strong>{task.subject || task.title}</strong><span className="bkw-row-sub">{nextStep(task)}</span></span><StatusTag task={task} /></button>)
+        {open.length ? open.slice(0, 6).map(task => <button type="button" key={task.id} className="bkw-row tight" onClick={() => go({ view: "decide", task: task.id })}><span className="bkw-row-main"><strong>{taskTitle(task)}</strong><span className="bkw-row-sub">{nextStep(task)}</span></span><StatusTag task={task} /></button>)
           : topic.summary?.todos.length ? <ul className="bkw-list">{topic.summary.todos.map((todo, index) => <li key={index}>{todo}</li>)}</ul> : <p className="bkw-card-empty">{t("没有等你处理的事。")}</p>}
       </section>
     </div>
     <section className="bkw-card">
       <div className="bkw-card-head"><h3>{t("相关往来")}</h3>{items.length > 8 && <button type="button" className="bkw-link" onClick={() => setAll(!all)}>{all ? t("收起") : t("全部 {0} 条", items.length)}</button>}</div>
       {items.length ? (all ? items : items.slice(0, 8)).map(task => <button type="button" key={task.id} className="bkw-timeline-row" onClick={() => go({ view: "items", task: task.id })}>
-        <time className="bkw-mono">{when(task.receivedAt)}</time><SourceTag kind="email" /><span className="bkw-tl-main"><strong>{task.subject || task.title}</strong><small>{senderName(task.from)}{task.summary ? ` · ${task.summary.split("\n")[0].slice(0, 60)}` : ""}</small></span><StatusTag task={task} />
+        <time className="bkw-mono">{when(task.receivedAt)}</time><SourceTag kind={sourceOf(task)} /><span className="bkw-tl-main"><strong>{taskTitle(task)}</strong><small>{senderName(task.from)}{task.summary ? ` · ${task.summary.split("\n")[0].slice(0, 60)}` : ""}</small></span><StatusTag task={task} />
       </button>) : <p className="bkw-card-empty">{t("还没有匹配的信息。检查关键词和联系人是否准确。")}</p>}
     </section>
   </div>;

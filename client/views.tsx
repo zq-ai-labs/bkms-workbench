@@ -2,8 +2,9 @@ import * as React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { systemMessage, t } from "./i18n";
 import { useWorkbench } from "./context";
-import { AUTONOMY_LABEL, CATEGORY, LABELS, api, dayLabel, longDate, fullDate, minutesLeft, nextStep, senderName, statusLabel, time, urgencyRank, when, type Activity, type Status, type Task } from "./lib";
+import { AUTONOMY_LABEL, CATEGORY, LABELS, api, counterpart, dayLabel, longDate, fullDate, minutesLeft, nextStep, senderName, sourceOf, statusLabel, taskTitle, time, urgencyRank, when, type Activity, type Status, type Task } from "./lib";
 import { Empty, Icon, PageHeader, Section, SourceTag, StatusTag, Tag } from "./ui";
+import { ChatsView } from "./wechat";
 import { TaskWorkspace } from "./workspace";
 
 const DAY = 864e5;
@@ -70,10 +71,10 @@ export function TodayView() {
       <div className="bkw-col-main">
         <Section title={t("需要你决策")} aside={decisions.length > 5 && <button type="button" className="bkw-link" onClick={() => go({ view: "decide" })}>{t("全部 {0} 件", decisions.length)}<Icon name="arrow" size={12} /></button>}>
           {decisions.length ? decisions.slice(0, 5).map(task => <button type="button" key={task.id} className="bkw-row" onClick={() => go({ view: "decide", task: task.id })}>
-            <SourceTag kind="email" />
+            <SourceTag kind={sourceOf(task)} />
             <span className="bkw-row-main">
-              <span className="bkw-row-title"><strong>{task.subject || task.title}</strong>{task.triage?.urgency === "high" && <Tag tone="danger">{t("紧急")}</Tag>}</span>
-              <span className="bkw-row-sub">{senderName(task.from)} · {nextStep(task)}</span>
+              <span className="bkw-row-title"><strong>{taskTitle(task)}</strong>{task.triage?.urgency === "high" && <Tag tone="danger">{t("紧急")}</Tag>}</span>
+              <span className="bkw-row-sub">{counterpart(task)} · {nextStep(task)}</span>
             </span>
             <StatusTag task={task} />
           </button>) : <Empty icon="done" title={t("没有需要你决策的事")} text={t("新的待办出现时会显示在这里。")} />}
@@ -87,7 +88,7 @@ export function TodayView() {
           {recent.length ? recent.slice(0, 5).map(item => <ActivityRow key={item.id} item={item} compact />) : <p className="bkw-card-empty">{t("暂无自动处理记录。")}</p>}
         </Section>
         <Section title={t("值得关注")} aside={<small className="bkw-muted">{t("无需处理")}</small>}>
-          {notable.length ? notable.map(task => <button type="button" key={task.id} className="bkw-note" onClick={() => go({ view: "items", task: task.id })}><span>{task.triage?.reason || task.subject}</span><small><SourceTag kind="email" />{senderName(task.from)} · {when(task.receivedAt)}</small></button>) : <p className="bkw-card-empty">{t("AI 判断为“值得关注”的信息会显示在这里。")}</p>}
+          {notable.length ? notable.map(task => <button type="button" key={task.id} className="bkw-note" onClick={() => go({ view: "items", task: task.id })}><span>{task.triage?.reason || task.subject}</span><small><SourceTag kind={sourceOf(task)} />{counterpart(task)} · {when(task.receivedAt)}</small></button>) : <p className="bkw-card-empty">{t("AI 判断为“值得关注”的信息会显示在这里。")}</p>}
         </Section>
         <Section title={t("主题追踪")} aside={<button type="button" className="bkw-link" onClick={() => go({ view: "topics" })}>{t("全部")}</button>}>
           {data.topics.length ? data.topics.slice(0, 4).map(topic => <button type="button" key={topic.id} className="bkw-topic-row" onClick={() => go({ view: "topics", topic: topic.id })}>
@@ -138,9 +139,9 @@ export function DecideView({ selected }: { selected?: string }) {
       {groups.map(([id, label, items]) => items.length ? <div key={id} className="bkw-group">
         <h4>{label}</h4>
         {items.map(task => <button type="button" key={task.id} className={`bkw-li ${task.id === current?.id ? "on" : ""}`} aria-current={task.id === current?.id} onClick={() => go({ view: "decide", task: task.id })}>
-          <span className="bkw-li-top"><SourceTag kind="email" />{task.triage?.urgency === "high" && <Tag tone="danger">{t("紧急")}</Tag>}<time>{when(task.receivedAt)}</time></span>
-          <strong>{task.subject || task.title}</strong>
-          <span className="bkw-li-sub">{senderName(task.from)} · {nextStep(task)}</span>
+          <span className="bkw-li-top"><SourceTag kind={sourceOf(task)} />{task.triage?.urgency === "high" && <Tag tone="danger">{t("紧急")}</Tag>}<time>{when(task.receivedAt)}</time></span>
+          <strong>{taskTitle(task)}</strong>
+          <span className="bkw-li-sub">{counterpart(task)} · {nextStep(task)}</span>
         </button>)}
       </div> : null)}
       {!shown.length && <p className="bkw-card-empty">{t("没有符合条件的事项。")}</p>}
@@ -189,7 +190,7 @@ export function DoneView() {
   </div>;
 }
 
-export function ItemsView({ selected }: { selected?: string }) {
+export function ItemsView({ selected, chats }: { selected?: string; chats?: boolean }) {
   const { data, go } = useWorkbench();
   const [search, setSearch] = useState(""), [status, setStatus] = useState("all"), [category, setCategory] = useState("all");
   const task = selected ? data.tasks.find(item => item.id === selected) : undefined;
@@ -198,10 +199,17 @@ export function ItemsView({ selected }: { selected?: string }) {
       actions={!!task.topicIds?.length && <span className="bkw-tags">{task.topicIds.map(id => { const topic = data.topics.find(item => item.id === id); return topic ? <button type="button" key={id} className="bkw-link" onClick={() => go({ view: "topics", topic: id })}>#{topic.name}</button> : null; })}</span>} />
     <TaskWorkspace key={task.id} task={task} />
   </div>;
+  const wechatOn = !!data.wechat?.settings.enabled;
+  const modes = wechatOn && <div className="bkw-seg" role="tablist" aria-label={t("查看方式")}>
+    <button type="button" role="tab" aria-selected={!chats} className={!chats ? "on" : ""} onClick={() => go({ view: "items" })}>{t("按事项")}</button>
+    <button type="button" role="tab" aria-selected={!!chats} className={chats ? "on" : ""} onClick={() => go({ view: "items", chats: true })}>{t("按会话")}</button>
+  </div>;
+  if (chats && wechatOn) return <div className="bkw-chats-page"><div className="bkw-chats-bar">{modes}<span className="bkw-muted">{t("像微信一样按会话阅读，AI 识别的事项直接标在对话里。")}</span></div><ChatsView /></div>;
   const rows = data.tasks.filter(item => (status === "all" || item.status === status || (status === "archived" && item.status === "ignored" && item.triage?.archived)) && (category === "all" || item.triage?.category === category)
-    && `${item.subject} ${item.from} ${item.ruleName || ""} ${item.summary || ""}`.toLowerCase().includes(search.trim().toLowerCase())).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
+    && `${item.subject} ${item.title} ${item.from} ${item.ruleName || ""} ${item.summary || ""}`.toLowerCase().includes(search.trim().toLowerCase())).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
   return <div className="bkw-pad">
     <div className="bkw-toolbar">
+      {modes}
       <label className="bkw-search"><Icon name="search" size={15} /><input placeholder={t("搜索主题、发件人、方案或摘要")} aria-label={t("搜索事项")} value={search} onChange={event => setSearch(event.target.value)} /></label>
       <select aria-label={t("按状态筛选")} value={status} onChange={event => setStatus(event.target.value)}>
         <option value="all">{t("全部状态")}</option><option value="archived">{t("已归档")}</option>
@@ -216,8 +224,8 @@ export function ItemsView({ selected }: { selected?: string }) {
     {rows.length ? <div className="bkw-table" role="table" aria-label={t("全部事项")}>
       <div className="bkw-tr head" role="row"><span role="columnheader">{t("事项 / 下一步")}</span><span role="columnheader">{t("来源")}</span><span role="columnheader">{t("处理方案")}</span><span role="columnheader">{t("状态")}</span><span role="columnheader">{t("时间")}</span></div>
       {rows.map(item => <button type="button" role="row" key={item.id} className="bkw-tr" onClick={() => go({ view: "items", task: item.id })}>
-        <span className="bkw-td-title" role="cell"><strong>{item.subject || item.title || t("无主题邮件")}</strong><small>{nextStep(item)}</small></span>
-        <span className="bkw-td-from" role="cell"><SourceTag kind="email" /><span title={item.from}>{senderName(item.from)}</span></span>
+        <span className="bkw-td-title" role="cell"><strong>{taskTitle(item) || t("无主题邮件")}</strong><small>{nextStep(item)}</small></span>
+        <span className="bkw-td-from" role="cell"><SourceTag kind={sourceOf(item)} /><span title={item.from}>{counterpart(item)}</span></span>
         <span className={`bkw-td-rule ${item.ruleName ? "" : "muted"}`} role="cell" title={item.ruleName}>{item.ruleName || (item.triage?.category ? t(CATEGORY[item.triage.category]) : t("尚未匹配方案"))}</span>
         <span role="cell"><StatusTag task={item} /></span>
         <time role="cell">{when(item.receivedAt)}</time>

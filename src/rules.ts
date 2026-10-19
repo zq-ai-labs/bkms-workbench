@@ -40,8 +40,11 @@ export function validateRule(input: any): Rule {
 }
 export const ruleExcludes = (rule: Rule): readonly TriageCategory[] => rule.exclude ?? DEFAULT_EXCLUDE
 export const ruleSources = (rule: Rule) => rule.sources ?? ['email']
-export function matches(rule: Rule, mail: { account: string; folder?: string; from: string; subject: string; hasAttachments: boolean }): boolean {
-  if (!rule.enabled || !ruleSources(rule).includes('email') || (rule.account && rule.account !== mail.account) || (mail.folder && rule.folder !== mail.folder)) return false
+export function matches(rule: Rule, mail: { account: string; folder?: string; from: string; subject: string; hasAttachments: boolean; kind?: 'email' | 'wechat' }): boolean {
+  if (!rule.enabled) return false
+  // Mailbox and folder only narrow email; a WeChat segment matches by source plus sender and chat name.
+  if (mail.kind === 'wechat') { if (!ruleSources(rule).includes('wechat')) return false }
+  else if (!ruleSources(rule).includes('email') || (rule.account && rule.account !== mail.account) || (mail.folder && rule.folder !== mail.folder)) return false
   const tests: boolean[] = []
   if (rule.match.from) tests.push(mail.from.toLowerCase().includes(rule.match.from.toLowerCase()))
   if (rule.match.subject) tests.push(mail.subject.toLowerCase().includes(rule.match.subject.toLowerCase()))

@@ -98,13 +98,30 @@ const notice = task(5, 'ignored', '[演示] 服务恢复及补偿通知', '演�
 Object.assign(notice, { ruleId: undefined, ruleName: undefined, rule: undefined, triage: { state: 'done', category: 'notification', urgency: 'low', reason: '服务故障恢复通知，无需处理。', archived: true, by: 'ai', at: at(299) } })
 const urgent = task(6, 'unmatched', '[演示] 能否本周加急发 200 套？', '王工 <partner@example.test>', '客户催了，这周能否加急先发 200 套？\n\n【合成演示邮件】', undefined, 60)
 Object.assign(urgent, { ruleId: undefined, ruleName: undefined, rule: undefined, triage: { state: 'done', category: 'request', urgency: 'high', reason: '对方希望本周加急发货，需要你决定物流方案。', nextStep: '决定是否加急并答复王工', by: 'ai', at: at(59) } })
+// A synthetic WeChat group segment with a suggested reply. WeChat reading stays off; nothing is read or sent.
+const wx = (seq, minutes, sender, senderName, text, extra = {}) => ({ seq, at: at(minutes), sender, senderName, self: sender === 'wxid_demo_me', type: '文本', text, ...extra })
+const wechatMessages = [
+  wx(1001, 26, 'wxid_demo_a', '王工（演示）', '@我 200 套控制模块能不能这周加急发？周五前要到现场', { mentionsMe: true }),
+  wx(1002, 25, 'wxid_demo_a', '王工（演示）', '加急走零担大概多 1800，要今天中午前确认'),
+  wx(1003, 24, 'wxid_demo_b', '钱女士（演示）', '客户说周五到就可以', { quote: { sender: '王工（演示）', text: '周五前要到现场' } }),
+]
+const wechatTask = {
+  id: randomUUID(), revision: 1, title: '王工（演示）：加急走零担大概多 1800，要今天中午前确认', subject: '[演示] 交付协调群', account: 'wechat', status: 'review', from: '王工（演示）',
+  body: wechatMessages.map(m => `${m.senderName}：${m.text}`).join('\n'), summary: '王工问能否加急，周五前到现场；加急需中午前确认，多约 ¥1,800。【合成演示】',
+  receivedAt: at(24), updatedAt: at(20), source: { account: 'wechat', folder: 'demo@chatroom', uid: 1003, uidValidity: 1, kind: 'wechat' },
+  attachments: [], history: [{ at: at(24), message: '已导入合成演示微信对话，仅用于工作台视觉验证。' }], attempts: 1, mailLoaded: true,
+  ruleId: rule.id, ruleName: rule.name, rule: structuredClone(rule),
+  triage: { state: 'done', category: 'request', urgency: 'high', reason: '群里 @你，问能否加急发货，需中午前确认。', nextStep: '决定是否走加急并答复王工', by: 'ai', at: at(23) },
+  checks: [{ item: '库存与出库时间需要核实。', quote: '今天下午可以出库' }],
+  wechat: { chat: 'demo@chatroom', chatName: '[演示] 交付协调群', group: true, mentioned: true, messages: wechatMessages, fromSeq: 1001, toSeq: 1003, reply: '@王工 走加急吧，今天下午可以出库，麻烦安排零担，周五前送到。', replyRevision: 1 },
+}
 const activity = (minutes, kind, item, extra = {}) => ({ id: randomUUID(), at: at(minutes), kind, title: item.subject, taskId: item.id, ruleName: item.ruleName, source: 'email', ...extra })
 const today = new Date(), day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
 
 await store.mutate(state => {
   state.settings = { enabled: false, pollSeconds: 60 }
   state.rules = [rule, lowRisk]
-  state.tasks = [report, procurement, quotation, notice, urgent, ack]
+  state.tasks = [report, procurement, quotation, notice, urgent, ack, wechatTask]
   state.activity = [activity(299, 'archive', notice, { detail: '服务故障恢复通知，无需处理。' }), activity(93, 'report', report), activity(10, 'auto_send_scheduled', ack, { autonomy: 'low_risk', undoUntil: ack.autoSend.at })]
   state.topics = [{ id: randomUUID(), name: '[演示] 华东项目', kind: 'project', keywords: ['华东', '控制模块'], senders: [], schedule: 'none', createdAt: at(2000), updatedAt: at(30), summary: { text: '客户询价 200 套控制模块，报价草稿待审核；另有加急发货请求待决定。', level: 'attention', risks: ['交期依据不足'], todos: ['审核报价草稿', '决定是否加急'], at: at(30), by: 'ai' } }]
   state.reports = [{ id: randomUUID(), kind: 'weekly', title: '[演示] 本周周报', text: '## 本周完成\n- 整理本周客户反馈\n\n## 进行中与风险\n- 华东项目报价待审核\n\n## 下周计划\n- [请补充]', periodStart: day, periodEnd: day, generatedAt: at(20), updatedAt: at(20), by: 'template' }]

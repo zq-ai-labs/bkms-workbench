@@ -2,7 +2,7 @@ export type Status = 'queued' | 'running' | 'review' | 'needs_info' | 'failed' |
 /** How far a workflow may act without a person: draft only, bounded low-risk sending, or all bounded replies. */
 export type Autonomy = 'draft' | 'low_risk' | 'auto'
 export const AUTONOMY: readonly Autonomy[] = ['draft', 'low_risk', 'auto']
-/** Information sources. Only email has an adapter today; the others are declared so workflows and UI stay source-neutral. */
+/** Information sources. Email and WeChat (read-only) have adapters; the others are declared so workflows and UI stay source-neutral. */
 export type SourceKind = 'email' | 'feishu' | 'wecom' | 'wechat' | 'meeting'
 export const SOURCE_KINDS: readonly SourceKind[] = ['email', 'feishu', 'wecom', 'wechat', 'meeting']
 /** AI triage result of one incoming message. */
@@ -22,7 +22,47 @@ export interface Rule {
   sources?: SourceKind[]
 }
 export interface Cursor { uidValidity: number; lastUid: number }
-export interface Source { account: string; folder: string; uid: number; uidValidity: number }
+/** Where a task came from. Email uses mailbox coordinates; a WeChat segment reuses the same shape (account `wechat`, folder = chat id, uid = last message sequence) so older builds can still read the data. */
+export interface Source { account: string; folder: string; uid: number; uidValidity: number; kind?: 'wechat' }
+/** One normalized WeChat message as returned by the read-only bridge. */
+export interface WechatMessage {
+  seq: number; at: string; sender: string; senderName: string; self: boolean; type: string; text: string
+  quote?: { sender: string; text: string }
+  mentionsMe?: boolean
+}
+/** A WeChat conversation segment handled as one task. `reply` is the AI's suggested reply; nothing is ever sent. */
+export interface WechatSegment {
+  chat: string; chatName: string; group: boolean; messages: WechatMessage[]; fromSeq: number; toSeq: number
+  mentioned?: boolean; reply?: string; replyRevision?: number
+}
+export type WechatChatKind = 'person' | 'group'
+export interface WechatChat { id: string; name: string; kind: WechatChatKind; lastAt?: string }
+/** Which conversations may be read. Allow mode reads only the listed ones; block mode reads everything except them. */
+export interface WechatList { mode: 'allow' | 'block'; list: string[] }
+export interface WechatSettings {
+  enabled: boolean
+  /** Python command, e.g. `py -3` or a full path to python.exe. */
+  python?: string
+  /** Folder of the wechatauto-replica checkout when it is not installed with pip. */
+  library?: string
+  people: WechatList
+  groups: WechatList & { scope: 'mention' | 'all' }
+  /** A segment is handled once the chat has been quiet this long. */
+  quietMinutes?: number
+  /** Display names of listed chats, so the lists stay readable while WeChat is offline. */
+  names?: Record<string, string>
+}
+export interface WechatPending { chatName: string; group: boolean; messages: WechatMessage[]; firstAt: string; lastAt: string }
+export interface WechatState { watermarks: Record<string, number>; pending: Record<string, WechatPending> }
+export interface WechatStatus { ready: boolean; wxid?: string; name?: string; library?: string; error?: string }
+export interface WechatService {
+  status(signal?: AbortSignal): Promise<WechatStatus>
+  chats(signal?: AbortSignal): Promise<WechatChat[]>
+  search(q: string, signal?: AbortSignal): Promise<WechatChat[]>
+  latest(chats: string[], signal?: AbortSignal): Promise<Record<string, number>>
+  poll(watermarks: Record<string, number>, signal?: AbortSignal): Promise<Record<string, WechatMessage[]>>
+  history(chat: string, offset: number, limit: number, signal?: AbortSignal): Promise<{ messages: WechatMessage[]; more: boolean }>
+}
 export interface Triage {
   state: 'pending' | 'done'
   category?: TriageCategory
@@ -47,6 +87,7 @@ export interface Task {
   triage?: Triage
   checks?: Check[]
   autoSend?: AutoSend
+  wechat?: WechatSegment
 }
 export type ActivityKind = 'archive' | 'auto_send_scheduled' | 'auto_sent' | 'auto_send_canceled' | 'auto_send_blocked' | 'report' | 'brief' | 'weekly' | 'topic'
 export interface Activity {
@@ -77,12 +118,14 @@ export interface Settings {
   briefEnabled?: boolean; briefTime?: string
   weeklyEnabled?: boolean; weeklyDay?: number; weeklyTime?: string
   meetingBriefMinutes?: number
+  wechat?: WechatSettings
 }
 export interface State {
   version: 1; revision: number; configRevision: number; settings: Settings; rules: Rule[]; tasks: Task[]
   cursors: Record<string, Cursor>; logs: Log[]
   activity?: Activity[]; topics?: Topic[]; reports?: Report[]; brief?: Brief
   senders?: Record<string, SenderPreference>
+  wechat?: WechatState
 }
 export interface EmailService {
   version: number
@@ -104,7 +147,7 @@ export interface EmailService {
 }
 export interface AgentOutput { summary: string; needsInfo?: string; needsInfoKind?: 'information' | 'attachments'; informationGaps?: string; subject?: string; text?: string; checks?: Check[]; lowRisk?: boolean }
 export interface AgentRunner { available(): boolean; run(task: Task, rule: Rule, signal: AbortSignal): Promise<{ output: AgentOutput; sessionId?: string }> }
-export interface TriageInput { mail: { from: string; subject: string; body: string; hasAttachments: boolean; receivedAt: string }; rules: { id: string; name: string; semantic: string; output: 'reply' | 'report'; hint: string }[]; uiLanguage?: 'zh' | 'en' }
+export interface TriageInput { mail: { from: string; subject: string; body: string; hasAttachments: boolean; receivedAt: string; channel?: 'email' | 'wechat' }; rules: { id: string; name: string; semantic: string; output: 'reply' | 'report'; hint: string }[]; uiLanguage?: 'zh' | 'en' }
 export interface TriageOutput { category: TriageCategory; urgency: 'high' | 'normal' | 'low'; reason: string; nextStep: string; ruleId: string }
 export interface TriageRunner { available(): boolean; run(input: TriageInput, signal: AbortSignal): Promise<TriageOutput> }
 export type WriterKind = 'brief' | 'weekly' | 'topic' | 'trial'

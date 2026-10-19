@@ -2,7 +2,7 @@ import type { SourceKind } from './types.js'
 
 /**
  * Contract for an information source. Email is implemented through the dsh-email
- * `emailWorkbench` service; IM and meeting platforms need an adapter that fulfils
+ * `emailWorkbench` service and WeChat through the read-only bridge in `wechat.ts`; other IM and meeting platforms need an adapter that fulfils
  * the same contract before they can be connected. The workbench never simulates
  * a connection that does not exist.
  */
@@ -16,12 +16,12 @@ export interface SourceAdapter {
 
 export interface SourceStatus { kind: SourceKind; connected: boolean; detail: string }
 
-export function sourceStatuses(email: { ready: boolean; accounts: number; error?: string }): SourceStatus[] {
+export function sourceStatuses(email: { ready: boolean; accounts: number; error?: string }, wechat?: { enabled: boolean; ready: boolean; name?: string; error?: string }): SourceStatus[] {
   return [
     { kind: 'email', connected: email.ready && email.accounts > 0, detail: email.ready ? (email.accounts ? `${email.accounts}` : 'no-account') : 'unavailable' },
     { kind: 'feishu', connected: false, detail: 'adapter-required' },
     { kind: 'wecom', connected: false, detail: 'adapter-required' },
-    { kind: 'wechat', connected: false, detail: 'adapter-required' },
+    { kind: 'wechat', connected: !!wechat?.enabled && wechat.ready, detail: !wechat ? 'adapter-required' : !wechat.enabled ? 'disabled' : wechat.ready ? (wechat.name || 'ready') : 'unavailable' },
     { kind: 'meeting', connected: false, detail: 'adapter-required' },
   ]
 }

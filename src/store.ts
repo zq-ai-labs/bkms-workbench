@@ -39,6 +39,26 @@ function validateState(state: State): void {
   if (state.reports !== undefined && (!Array.isArray(state.reports) || state.reports.some(report => !report || typeof report.id !== 'string' || typeof report.text !== 'string' || !['weekly', 'topic'].includes(report.kind)))) throw new Error('invalid reports')
   if (state.brief !== undefined && (!state.brief || typeof state.brief.date !== 'string' || typeof state.brief.text !== 'string')) throw new Error('invalid brief')
   if (state.senders !== undefined && (!state.senders || typeof state.senders !== 'object' || Array.isArray(state.senders))) throw new Error('invalid sender preferences')
+  if (s.wechat !== undefined) validateWechatSettings(s.wechat)
+  const plain = (value: unknown) => !!value && typeof value === 'object' && !Array.isArray(value)
+  if (state.wechat !== undefined && (!plain(state.wechat) || !plain(state.wechat.watermarks) || !plain(state.wechat.pending) || Object.values(state.wechat.watermarks).some(seq => !Number.isSafeInteger(seq) || seq < 0) || Object.values(state.wechat.pending).some(item => !plain(item) || !Array.isArray(item.messages) || item.messages.length > 100))) throw new Error('invalid wechat state')
+  for (const task of state.tasks) if (task.wechat !== undefined && (!plain(task.wechat) || typeof task.wechat.chat !== 'string' || !Array.isArray(task.wechat.messages) || task.wechat.messages.length > 100 || (task.wechat.reply !== undefined && (typeof task.wechat.reply !== 'string' || task.wechat.reply.length > 16000)))) throw new Error('invalid wechat task')
+}
+const CHAT_ID = /^[\w@.\-]{1,120}$/
+/** Shared by storage and the settings API so a bad list can never be persisted. */
+export function validateWechatSettings(value: any): void {
+  const fail = () => { throw new WorkbenchError('微信设置无效。') }
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !['enabled', 'python', 'library', 'people', 'groups', 'quietMinutes', 'names'].includes(key))) fail()
+  if (typeof value.enabled !== 'boolean') fail()
+  for (const key of ['python', 'library']) if (value[key] !== undefined && (typeof value[key] !== 'string' || value[key].length > 500 || /[\0\r\n]/.test(value[key]))) fail()
+  for (const key of ['people', 'groups']) {
+    const list = value[key]
+    if (!list || typeof list !== 'object' || !['allow', 'block'].includes(list.mode) || !Array.isArray(list.list) || list.list.length > 2000 || list.list.some((id: unknown) => typeof id !== 'string' || !CHAT_ID.test(id))) fail()
+    if (list.list.some((id: string) => (key === 'groups') !== id.endsWith('@chatroom'))) throw new WorkbenchError(key === 'groups' ? '群聊名单里只能放群聊。' : '人员名单里不能放群聊。')
+  }
+  if (!['mention', 'all'].includes(value.groups.scope)) fail()
+  if (value.quietMinutes !== undefined && (!Number.isSafeInteger(value.quietMinutes) || value.quietMinutes < 1 || value.quietMinutes > 60)) fail()
+  if (value.names !== undefined && (!value.names || typeof value.names !== 'object' || Array.isArray(value.names) || Object.keys(value.names).length > 4000 || Object.entries(value.names).some(([id, name]) => !CHAT_ID.test(id) || typeof name !== 'string' || name.length > 200))) fail()
 }
 export const CLOCK = /^([01]\d|2[0-3]):[0-5]\d$/
 

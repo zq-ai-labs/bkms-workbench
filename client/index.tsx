@@ -48,7 +48,7 @@ export function Workbench() {
   const go = useCallback((next: Route) => {
     if (op.current) return;
     const current = routeRef.current;
-    if (current.view === next.view && current.task === next.task && current.rule === next.rule && current.topic === next.topic && current.report === next.report) return;
+    if (current.view === next.view && current.task === next.task && current.rule === next.rule && current.topic === next.topic && current.report === next.report && !!current.chats === !!next.chats) return;
     if (leave.current && !leave.current()) return;
     leave.current = undefined;
     setRoute(next);
@@ -61,7 +61,7 @@ export function Workbench() {
   const connected = data.sources.filter(source => source.connected).length;
   const view = route.view;
   const page = !loaded ? <div className="bkw-pad"><Empty title={error ? t("暂时无法加载工作台") : t("正在加载工作台")} text={error ? t("请检查服务连接后刷新重试。") : t("正在获取你的任务与方案。")}><button type="button" className="bkw-btn" onClick={() => void perform("refresh", refresh)}>{t("重新加载")}</button></Empty></div>
-    : view === "today" ? <TodayView /> : view === "decide" ? <DecideView selected={route.task} /> : view === "done" ? <DoneView /> : view === "items" ? <ItemsView selected={route.task} />
+    : view === "today" ? <TodayView /> : view === "decide" ? <DecideView selected={route.task} /> : view === "done" ? <DoneView /> : view === "items" ? <ItemsView selected={route.task} chats={route.chats} />
     : view === "meetings" ? <MeetingsView /> : view === "topics" ? <TopicsView topicId={route.topic} reportId={route.report} /> : view === "plans" ? <PlansView ruleId={route.rule} />
     : view === "logs" ? <LogsView /> : <div className="bkw-pad"><WorkbenchSettings embedded /></div>;
   return <Context.Provider value={context}>

@@ -11,6 +11,10 @@ export type Draft = {
   sendChecks?: { at: string; outcome: "sent" | "not_sent" }[];
   receipt?: { accepted: string[]; rejected: string[]; response: string; messageId?: string };
 };
+export type WechatMessage = { seq: number; at: string; sender: string; senderName: string; self: boolean; type: string; text: string; quote?: { sender: string; text: string }; mentionsMe?: boolean };
+export type WechatList = { mode: "allow" | "block"; list: string[] };
+export type WechatSettings = { enabled: boolean; python?: string; library?: string; people: WechatList; groups: WechatList & { scope: "mention" | "all" }; quietMinutes?: number; names?: Record<string, string> };
+export type WechatChat = { id: string; name: string; kind: "person" | "group"; lastAt?: string };
 export type Task = {
   id: string; title: string; account: string; status: Status; from: string; replyTo?: string; subject: string; body: string;
   bodyHtml?: string; to?: string; cc?: string; mailDate?: string; mailSize?: number; receivedAt: string; updatedAt: string;
@@ -22,6 +26,8 @@ export type Task = {
   checks?: { item: string; quote?: string }[];
   autoSend?: { at: string; scheduledAt: string; autonomy: Autonomy; canceledAt?: string; reason?: string };
   relatedIds?: string[]; possibleIds?: string[]; topicIds?: string[]; attention?: boolean;
+  source?: { kind?: "wechat"; folder: string };
+  wechat?: { chat: string; chatName: string; group: boolean; messages: WechatMessage[]; fromSeq: number; toSeq: number; mentioned?: boolean; reply?: string; replyRevision?: number };
 };
 export type Rule = {
   id: string; name: string; enabled: boolean; priority: number; account: string; folder: string;
@@ -38,7 +44,8 @@ export type Defaults = { triage: boolean; undoMinutes: number; briefEnabled: boo
 export type Snapshot = {
   revision: number; tasks: Task[]; rules: Rule[]; accounts: { id: string; label: string; inboxFolder?: string }[]; logs: Log[];
   capabilities?: Capabilities; settings: Preferences["settings"] & Partial<Defaults>; defaults: Defaults;
-  health: { email: boolean; agent?: boolean; running?: boolean; lastPoll?: string; error?: string; triage?: boolean; writer?: boolean };
+  health: { email: boolean; agent?: boolean; running?: boolean; lastPoll?: string; error?: string; triage?: boolean; writer?: boolean; wechat?: { ready: boolean; name?: string; library?: string; error?: string } };
+  wechat?: { settings: WechatSettings & { quietMinutes: number }; pending: number; watching: number };
   activity: Activity[]; topics: Topic[]; reports: Report[]; brief?: { date: string; text: string; generatedAt: string; by: string }; today: string;
   sources: { kind: SourceKind; connected: boolean; detail: string }[]; meetings: unknown[];
 };
@@ -93,6 +100,12 @@ export function nextStep(task: Task): string {
     case "ignored": return task.triage?.archived ? t("AI 已归档，可恢复") : t("此任务已忽略");
   }
 }
+/** Where a task came from; WeChat segments carry `source.kind`. */
+export const sourceOf = (task: Pick<Task, "source">): SourceKind => task.source?.kind === "wechat" ? "wechat" : "email";
+/** List title: a WeChat segment shows who said what; an email shows its subject. */
+export const taskTitle = (task: Pick<Task, "source" | "subject" | "title">): string => task.source?.kind === "wechat" ? task.title : task.subject || task.title;
+/** Counterpart line: the WeChat conversation, or the email sender. */
+export const counterpart = (task: Pick<Task, "source" | "from" | "wechat">): string => task.source?.kind === "wechat" ? task.wechat?.chatName || task.from : senderName(task.from);
 export const firstLine = (value: string) => value.split(/\n/).map(line => line.trim()).find(Boolean)?.slice(0, 80) || value.slice(0, 80);
 export const senderName = (from: string) => (from.match(/^\s*"?([^"<]+?)"?\s*</)?.[1] || from.replace(/<.*>/, "") || from).trim() || from;
 export const senderAddress = (from: string) => (from.match(/<([^>]+)>/)?.[1] || from).trim().toLowerCase();
