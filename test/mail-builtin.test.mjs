@@ -122,6 +122,8 @@ test('end to end through the built-in service: baseline, new mail, draft, review
   let info = await api.action({ action: 'mailSettings' })
   assert.equal(info.health.email, false); assert.equal(info.health.error, undefined); assert.equal(info.mail.configured, false)
   const listed = await api.action({ action: 'mailAccounts' })
+  assert.equal(listed.providers[0], 'exmail', 'Tencent Exmail is listed first and preselected')
+  assert.deepEqual(listed.presets.exmail, { imap: { host: 'imap.exmail.qq.com', port: 993, secure: true }, smtp: { host: 'smtp.exmail.qq.com', port: 465, secure: true } })
   assert.ok(listed.providers.includes('qq')); assert.equal(listed.presets.qq.imap.host, 'imap.qq.com'); assert.equal(listed.presets.custom, undefined)
   await assert.rejects(api.action({ action: 'removeMailAccount', id: 'x', revision: 0 }), /确认删除/)
   const saved = await api.action({ action: 'saveMailAccount', account, revision: 0 })

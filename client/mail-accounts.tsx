@@ -19,7 +19,7 @@ const AUTH_HINT: Record<string, string> = {
   gmail: "在 Google 账号中开启两步验证后，创建“应用专用密码”。",
   icloud: "在 Apple 账户的“登录与安全”中生成 App 专用密码。",
 };
-const toDraft = (account?: MailAccountView, provider = "qq"): Draft => ({
+const toDraft = (account?: MailAccountView, provider = "exmail"): Draft => ({
   id: account?.id, provider: account?.provider ?? provider, user: account?.user ?? "", password: "", senderName: account?.senderName ?? "", authUser: account?.authUser ?? "", inboxFolder: account?.inboxFolder ?? "",
   imap: { host: account?.imap?.host ?? "", port: String(account?.imap?.port ?? 993), secure: account?.imap?.secure ?? true },
   smtp: { host: account?.smtp?.host ?? "", port: String(account?.smtp?.port ?? 465), secure: account?.smtp?.secure ?? true },
@@ -91,6 +91,7 @@ function AccountEditor({ draft: initial, data, busy, onClose, onSave }: { draft:
       <Field label={t("邮箱服务商")} hint={t("Outlook / Microsoft 365 需要微软账号授权登录（OAuth2），将在后续版本支持。")}>
         <select value={draft.provider} onChange={event => set({ provider: event.target.value })}>{data.providers.map(name => <option key={name} value={name}>{t(PROVIDER_LABEL[name] ?? name)}</option>)}</select>
       </Field>
+      {preset && <p className="bkw-mail-preset">{t("收信 {0}:{1}{2} · 发信 {3}:{4}{5}", draft.imap.host.trim() || preset.imap.host, draft.imap.host.trim() ? draft.imap.port : preset.imap.port, (draft.imap.host.trim() ? draft.imap.secure : preset.imap.secure) ? " SSL" : "", draft.smtp.host.trim() || preset.smtp.host, draft.smtp.host.trim() ? draft.smtp.port : preset.smtp.port, (draft.smtp.host.trim() ? draft.smtp.secure : preset.smtp.secure) ? " SSL" : "")}</p>}
       <Field label={t("邮箱地址")}><input type="email" required autoComplete="off" value={draft.user} disabled={!!draft.id} placeholder="name@example.com" onChange={event => set({ user: event.target.value })} /></Field>
       <Field label={t("授权码")} hint={AUTH_HINT[draft.provider] ? t(AUTH_HINT[draft.provider]) : t("通常不是邮箱登录密码，而是在邮箱设置中开启 IMAP/SMTP 后生成的专用密码。")}>
         <input type="password" autoComplete="new-password" required={!draft.hasPassword} value={draft.password} placeholder={draft.hasPassword ? t("已保存，留空则不修改") : ""} onChange={event => set({ password: event.target.value })} />

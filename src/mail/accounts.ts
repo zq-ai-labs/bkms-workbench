@@ -44,7 +44,8 @@ export interface MailAccountInput {
 export class MailAccountError extends Error { constructor(message: string, readonly code = 'mail-account-invalid') { super(message) } }
 
 /** Built-in providers offered on the account page; `custom` means the IMAP/SMTP servers are entered by hand. */
-export const MAIL_PROVIDERS = ['qq', 'exmail', '163', '126', 'aliyun', 'gmail', 'icloud', 'sina', 'custom'] as const
+/** Tencent Exmail (企业微信邮箱) first: it is the default for company mailboxes. */
+export const MAIL_PROVIDERS = ['exmail', 'qq', '163', '126', 'aliyun', 'gmail', 'icloud', 'sina', 'custom'] as const
 /** Tencent Exmail (企业微信邮箱) is common for company mailboxes but not an upstream preset. */
 const EXTRA_PRESETS: Record<string, { imap: Endpoint; smtp: Endpoint }> = {
   exmail: { imap: { host: 'imap.exmail.qq.com', port: 993, secure: true }, smtp: { host: 'smtp.exmail.qq.com', port: 465, secure: true } },
