@@ -93,7 +93,7 @@ export function Workbench() {
       {(error || notice || (loaded && (!servicesReady || data.health.error))) && <div className="bkw-feedback">
         {error && <Alert tone="danger" onClose={() => setError("")}>{systemMessage(error)}</Alert>}
         {notice && <Alert tone="success">{systemMessage(notice)}</Alert>}
-        {loaded && !error && (!servicesReady || data.health.error) && <Alert>{(data.health.error && systemMessage(data.health.error)) || (!mailReady ? t("邮件服务尚未就绪，请先在邮件插件中配置邮箱账号。") : !data.health.running ? t("后台任务服务尚未就绪；已有任务和方案仍可查看，请检查实例运行状态。") : t("DSH 执行服务尚未就绪；方案和待办可查看，自动生成将等待服务恢复。"))}</Alert>}
+        {loaded && !error && (!servicesReady || data.health.error) && <Alert>{(data.health.error && systemMessage(data.health.error)) || (!mailReady ? t("还没有添加邮箱账号。请在设置的“信息源”中添加邮箱。") : !data.health.running ? t("后台任务服务尚未就绪；已有任务和方案仍可查看，请检查实例运行状态。") : t("DSH 执行服务尚未就绪；方案和待办可查看，自动生成将等待服务恢复。"))}</Alert>}
       </div>}
       <main className="bkw-content">{page}</main>
     </div>
