@@ -3,7 +3,7 @@ import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import lockfile from 'proper-lockfile'
 import { validateRule } from './rules.js'
-import { AUTONOMY, TRIAGE_CATEGORIES, WorkbenchError, now, type State, type Task } from './types.js'
+import { AUTONOMY, HIDEABLE_VIEWS, TRIAGE_CATEGORIES, WorkbenchError, now, type State, type Task } from './types.js'
 
 function validateState(state: State): void {
   const positive = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 1
@@ -40,6 +40,7 @@ function validateState(state: State): void {
   if (state.brief !== undefined && (!state.brief || typeof state.brief.date !== 'string' || typeof state.brief.text !== 'string')) throw new Error('invalid brief')
   if (state.senders !== undefined && (!state.senders || typeof state.senders !== 'object' || Array.isArray(state.senders))) throw new Error('invalid sender preferences')
   if (s.wechat !== undefined) validateWechatSettings(s.wechat)
+  if (s.hiddenViews !== undefined && (!Array.isArray(s.hiddenViews) || s.hiddenViews.some(view => !HIDEABLE_VIEWS.includes(view)) || new Set(s.hiddenViews).size !== s.hiddenViews.length)) throw new Error('invalid preference')
   if (state.ruleExamples !== undefined && (!state.ruleExamples || typeof state.ruleExamples !== 'object' || Array.isArray(state.ruleExamples) || Object.values(state.ruleExamples).some(list => !Array.isArray(list) || list.length > 50 || list.some(example => !example || typeof example.id !== 'string' || typeof example.match !== 'boolean' || typeof example.text !== 'string' || example.text.length > 1000)))) throw new Error('invalid rule examples')
   for (const task of state.tasks) if (task.match !== undefined && (!task.match || typeof task.match.ruleId !== 'string' || !['applied', 'suggested', 'rejected'].includes(task.match.state) || !['ai', 'literal', 'manual'].includes(task.match.by))) throw new Error('invalid match')
   const plain = (value: unknown) => !!value && typeof value === 'object' && !Array.isArray(value)

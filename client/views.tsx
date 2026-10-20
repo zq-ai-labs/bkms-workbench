@@ -134,7 +134,7 @@ export function DecideView({ selected }: { selected?: string }) {
   return <div className="bkw-decide">
     <section className="bkw-decide-list" aria-label={t("待决策列表")} ref={listRef}>
       <div className="bkw-chips" role="group" aria-label={t("按类型筛选")}>
-        {FILTERS.map(([id, label]) => { const count = tasks.filter(task => inFilter(task, id)).length; return <button type="button" key={id} className={`bkw-chip ${filter === id ? "on" : ""}`} aria-pressed={filter === id} disabled={!count && id !== "all"} onClick={() => setFilter(id)}>{t(label)} <span>{count}</span></button>; })}
+        {FILTERS.map(([id, label]) => { const count = tasks.filter(task => inFilter(task, id)).length; if (!count && id !== "all" && filter !== id) return null; return <button type="button" key={id} className={`bkw-chip ${filter === id ? "on" : ""}`} aria-pressed={filter === id} disabled={!count && id !== "all"} onClick={() => setFilter(id)}>{t(label)} <span>{count}</span></button>; })}
       </div>
       {groups.map(([id, label, items]) => items.length ? <div key={id} className="bkw-group">
         <h4>{label}</h4>

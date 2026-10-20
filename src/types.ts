@@ -132,7 +132,11 @@ export interface Settings {
   weeklyEnabled?: boolean; weeklyDay?: number; weeklyTime?: string
   meetingBriefMinutes?: number
   wechat?: WechatSettings
+  /** Optional pages hidden from the workbench navigation. */
+  hiddenViews?: HideableView[]
 }
+export type HideableView = 'today' | 'meetings' | 'topics'
+export const HIDEABLE_VIEWS: readonly HideableView[] = ['today', 'meetings', 'topics']
 export interface State {
   version: 1; revision: number; configRevision: number; settings: Settings; rules: Rule[]; tasks: Task[]
   cursors: Record<string, Cursor>; logs: Log[]

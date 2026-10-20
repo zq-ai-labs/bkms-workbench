@@ -340,5 +340,6 @@
   "符合字面条件，方案设为“字面命中就处理”。": "Meets the literal conditions; the workflow handles every literal match.",
   "你确认了 AI 的建议。": "You confirmed the AI suggestion.",
   "你手动选择了这个方案。": "You chose this workflow by hand.",
-  "字面条件符合，但需要 AI 判断是否适用；当前没有可用的 AI，不会自动处理。": "Meets the literal conditions, but AI must judge whether it applies; no AI is available, so it would not be handled automatically."
+  "字面条件符合，但需要 AI 判断是否适用；当前没有可用的 AI，不会自动处理。": "Meets the literal conditions, but AI must judge whether it applies; no AI is available, so it would not be handled automatically.",
+  "页签设置无效。": "Invalid tab settings."
 }

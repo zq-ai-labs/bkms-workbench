@@ -179,3 +179,12 @@ test('triage classifies by the new text, reads the quote as context, and knows t
   assert.equal(heuristicTriage({ from: 'b@x', subject: 'RE: 资料', body: thanks }).category, 'request', 'unsplit, the quoted ask looks new')
   assert.equal(heuristicTriage({ from: 'b@x', subject: 'RE: 资料', body: splitQuoted(thanks).latest }).category, 'other')
 })
+
+test('optional pages can be hidden from navigation; only known pages are accepted', async t => {
+  const f = await fixture(t, { verdict: () => ({}) })
+  const revision = (await f.store.read()).configRevision
+  const saved = await f.api.action({ action: 'saveSettings', revision, settings: { hiddenViews: ['today', 'meetings', 'today'] } })
+  assert.deepEqual(saved.hiddenViews, ['today', 'meetings'])
+  for (const bad of [['plans'], 'today', ['decide']]) await assert.rejects(f.api.action({ action: 'saveSettings', revision: (await f.store.read()).configRevision, settings: { hiddenViews: bad } }), /页签设置无效/)
+  assert.deepEqual((await f.api.action({ action: 'preferences' })).settings.hiddenViews, ['today', 'meetings'])
+})

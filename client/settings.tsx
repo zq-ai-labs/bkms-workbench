@@ -10,6 +10,7 @@ import { WechatSettingsCard } from "./wechat";
 type MailInfo = { revision: number; accounts: { id: string; label: string; inboxFolder?: string }[]; health: { email: boolean; agent?: boolean; running?: boolean; lastPoll?: string; error?: string } };
 const DAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 const SOURCE_NAME: Record<string, string> = { feishu: "飞书", wecom: "企业微信", meeting: "会议与日历" };
+const VIEWS: ["today" | "meetings" | "topics", string, string][] = [["today", "今日", "隐藏后打开工作台直接进入“待我决策”。每日简报仍会生成，可在“主题与报告”中查看。"], ["meetings", "会议", "还没有连接日历或会议平台时可以先隐藏。"], ["topics", "主题与报告", "隐藏后不再显示页签；事项上的主题链接仍可打开。"]];
 const SECTIONS = [["sources", "信息源"], ["reports", "简报与提醒"], ["safety", "自主与安全"], ["display", "显示"], ["advanced", "高级与恢复"]];
 
 /** Settings shared by DSH's settings page and the workbench's own settings view. */
@@ -43,6 +44,7 @@ export function WorkbenchSettings({ embedded }: { embedded?: boolean }) {
   // Background processing can also run on WeChat alone.
   const wechatOn = (data.settings as Settings).wechat?.enabled === true;
   const disabled = !loaded || busy;
+  const hidden = data.settings.hiddenViews ?? [];
   const row = (title: string, hint: string, control: React.ReactNode) => <div className="bkw-set-row"><span><strong>{title}</strong><small>{hint}</small></span><span className="bkw-set-control">{control}</span></div>;
   const clock = (value: string, key: "briefTime" | "weeklyTime", label: string, off?: boolean) => <input type="time" aria-label={label} value={value} disabled={disabled || off} onChange={event => { if (/^\d\d:\d\d$/.test(event.target.value)) void save({ [key]: event.target.value }); }} />;
   return <div className={embedded ? "bkw-settings embedded" : "bkw bkw-settings"}>
@@ -69,6 +71,7 @@ export function WorkbenchSettings({ embedded }: { embedded?: boolean }) {
         {row(t("发送结果不确定时"), t("不会自动重发，转为“发送待核实”交你处理。"), <Tag tone="good">{t("始终开启")}</Tag>)}
       </section>
       <section id="bkw-set-display" className="bkw-set-card"><h3>{t("显示")}</h3>
+        {VIEWS.map(([id, label, hint]) => <React.Fragment key={id}>{row(t("显示“{0}”页签", t(label)), t(hint), <Switch label={t("显示“{0}”页签", t(label))} checked={!hidden.includes(id)} disabled={disabled} onChange={value => void save({ hiddenViews: value ? hidden.filter(item => item !== id) : [...hidden, id] })} />)}</React.Fragment>)}
         {row(t("显示工作台入口"), t("在侧栏显示任务工作台。隐藏入口不影响后台处理，可随时在此恢复。"), <Switch label={t("显示工作台入口")} checked={data.settings.showWorkbench !== false} disabled={disabled} onChange={value => void save({ showWorkbench: value })} />)}
       </section>
       <section id="bkw-set-advanced" className="bkw-set-card"><h3>{t("高级与恢复")}</h3>
