@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { Store } from '../lib/store.js'
 import { Engine, autoSendDecision, cleanChecks } from '../lib/engine.js'
 import { WorkbenchApi } from '../lib/api.js'
-import { validateRule, chooseAfterTriage } from '../lib/rules.js'
+import { validateRule, decideAfterTriage } from '../lib/rules.js'
 import { heuristicTriage, parseTriage } from '../lib/triage.js'
 import { relations, topicMatches, briefData, briefTemplate } from '../lib/digest.js'
 import { parseWriter } from '../lib/writer.js'
@@ -48,8 +48,8 @@ test('AI triage archives notifications even when a broad workflow matches litera
   const seen = []
   const triage = { available: () => true, async run(input) {
     seen.push(input)
-    if (/通知|提醒/.test(input.mail.subject)) return { category: 'notification', urgency: 'low', reason: '服务故障恢复通知。', nextStep: '', ruleId: input.rules[0]?.id ?? '' }
-    return { category: 'request', urgency: 'high', reason: '客户询价并要求今天回复。', nextStep: '确认报价并今天回复', ruleId: input.rules[0]?.id ?? '' }
+    if (/通知|提醒/.test(input.mail.subject)) return { category: 'notification', urgency: 'low', reason: '服务故障恢复通知。', nextStep: '', ruleId: input.rules[0]?.id ?? '', confidence: 'high' }
+    return { category: 'request', urgency: 'high', reason: '客户询价并要求今天回复。', nextStep: '确认报价并今天回复', ruleId: input.rules[0]?.id ?? '', confidence: 'high' }
   } }
   const f = await fixture(t, { triage })
   await f.api.action({ action: 'saveRule', revision: 1, rule: quoteRule })
@@ -85,7 +85,7 @@ test('restoring an AI-archived message stops archiving that sender; undo is reco
   assert.equal(second.status, 'unmatched'); assert.equal(second.triage.by, 'preference')
 })
 
-test('without a model, heuristic triage still separates notices; turning triage off restores literal matching', async t => {
+test('without a model, heuristic triage still separates notices but never guesses an AI-mode workflow; literal-mode workflows still apply; triage off restores literal matching', async t => {
   const triage = { available: () => false, async run() { throw new Error('must not run') } }
   const f = await fixture(t, { triage })
   await f.api.action({ action: 'saveRule', revision: 1, rule: quoteRule })
@@ -93,8 +93,17 @@ test('without a model, heuristic triage still separates notices; turning triage 
   await f.deliver('设备询价', 'buyer@example.test', '请问 200 套设备的报价？')
   await f.drain()
   assert.equal((await taskBySubject(f, '2026年9月工资条')).status, 'ignored')
-  assert.equal((await taskBySubject(f, '设备询价')).status, 'review')
-  assert.equal((await taskBySubject(f, '设备询价')).triage.by, 'heuristic')
+  const guessed = await taskBySubject(f, '设备询价')
+  assert.equal(guessed.status, 'unmatched', 'no AI verdict: the AI-mode workflow is not assigned by guesswork')
+  assert.equal(guessed.triage.by, 'heuristic'); assert.equal(guessed.ruleId, undefined); assert.match(guessed.history.at(-1).message, /需要 AI 判断/)
+  assert.equal(guessed.attention, undefined); assert.equal((await f.api.snapshot()).tasks.find(task => task.id === guessed.id).attention, true, 'a request waits for you')
+  // A workflow explicitly set to literal matching keeps working without a model.
+  const literalRule = await f.api.action({ action: 'saveRule', revision: (await f.store.read()).configRevision, rule: { ...quoteRule, name: '简历归档', matchMode: 'literal', match: { ...quoteRule.match, subject: '简历' } } })
+  assert.equal(literalRule.matchMode, 'literal')
+  await f.deliver('前端简历 · 张三', 'cv@example.test', '请查收简历。')
+  await f.drain()
+  const resume = await taskBySubject(f, '前端简历 · 张三')
+  assert.equal(resume.ruleName, '简历归档'); assert.equal(resume.match.by, 'literal'); assert.equal(resume.status, 'review')
   const state = await f.store.read()
   await f.api.action({ action: 'saveSettings', revision: state.configRevision, settings: { triage: false } })
   await f.deliver('系统通知 · 维护窗口', 'noreply@example.test', '今晚维护。')
@@ -117,11 +126,12 @@ test('heuristics and triage parsing are bounded and conservative', () => {
   assert.throws(() => parseTriage({ category: 'spam', urgency: 'normal', reason: '', nextStep: '', ruleId: '' }, new Set()))
   assert.throws(() => parseTriage({ category: 'request', urgency: 'normal', reason: '', nextStep: '', ruleId: '', send: true }, new Set()))
   const broad = validateRule({ ...quoteRule, id: 'broad' }), semantic = validateRule({ ...quoteRule, id: 'semantic', priority: 200, semantic: '客户询价' }), notices = validateRule({ ...quoteRule, id: 'notices', exclude: [] })
-  assert.equal(chooseAfterTriage([semantic, broad], 'request', '', true), undefined, 'AI decision is authoritative')
-  assert.equal(chooseAfterTriage([semantic, broad], 'request', 'semantic', true).id, 'semantic')
-  assert.equal(chooseAfterTriage([semantic, broad], 'request', undefined, false).id, 'broad', 'heuristics prefer workflows without semantic conditions')
-  assert.equal(chooseAfterTriage([broad], 'notification', 'broad', true), undefined)
-  assert.equal(chooseAfterTriage([notices], 'notification', 'notices', true).id, 'notices', 'an explicit empty exclusion accepts notifications')
+  const ai = (ruleId, confidence = 'high') => ({ ruleId, confidence, reason: '' })
+  assert.deepEqual(decideAfterTriage([semantic, broad], 'request', ai('')), {}, 'AI decision is authoritative')
+  assert.equal(decideAfterTriage([semantic, broad], 'request', ai('semantic')).rule.id, 'semantic')
+  assert.deepEqual(decideAfterTriage([semantic, broad], 'request', undefined), { needsAi: 2 }, 'without an AI verdict nothing is assigned by guesswork')
+  assert.equal(decideAfterTriage([broad], 'notification', ai('broad')).rule, undefined)
+  assert.equal(decideAfterTriage([notices], 'notification', ai('notices')).rule.id, 'notices', 'an explicit empty exclusion accepts notifications')
 })
 
 test('workflow fields validate and legacy workflows keep their exact persisted shape', () => {
@@ -136,7 +146,7 @@ test('workflow fields validate and legacy workflows keep their exact persisted s
 })
 
 test('low-risk automatic replies wait for the withdrawal window, then send once through preview', async t => {
-  const triage = { available: () => true, async run(input) { return { category: 'reply_needed', urgency: 'normal', reason: '对方请求确认收到。', nextStep: '', ruleId: input.rules[0]?.id ?? '' } } }
+  const triage = { available: () => true, async run(input) { return { category: 'reply_needed', urgency: 'normal', reason: '对方请求确认收到。', nextStep: '', ruleId: input.rules[0]?.id ?? '', confidence: 'high' } } }
   const f = await fixture(t, { triage, agentOutput: { summary: '简单确认。', subject: 'Re: 资料已发', text: '收到，谢谢！下午看完给你反馈。', lowRisk: true } })
   await f.api.action({ action: 'saveRule', revision: 1, rule: { ...quoteRule, name: '简单确认', autonomy: 'low_risk' } })
   await f.deliver('资料已发', 'zhanglei@example.test', '资料发你邮箱了，收到回个话。')
@@ -154,7 +164,7 @@ test('low-risk automatic replies wait for the withdrawal window, then send once 
 })
 
 test('withdrawing an automatic reply keeps future replies to that contact manual; edits and blocks cancel too', async t => {
-  const triage = { available: () => true, async run(input) { return { category: 'reply_needed', urgency: 'normal', reason: '', nextStep: '', ruleId: input.rules[0]?.id ?? '' } } }
+  const triage = { available: () => true, async run(input) { return { category: 'reply_needed', urgency: 'normal', reason: '', nextStep: '', ruleId: input.rules[0]?.id ?? '', confidence: 'high' } } }
   const f = await fixture(t, { triage, agentOutput: { summary: '确认。', subject: 'Re', text: '收到，谢谢。', lowRisk: true } })
   await f.api.action({ action: 'saveRule', revision: 1, rule: { ...quoteRule, autonomy: 'auto' } })
   await f.deliver('第一封', 'a@example.test', '请确认。')
@@ -190,7 +200,7 @@ test('withdrawing an automatic reply keeps future replies to that contact manual
 })
 
 test('scheduled automatic sends re-check the workflow, go stale, and fall back to review on errors', async t => {
-  const triage = { available: () => true, async run(input) { return { category: 'reply_needed', urgency: 'normal', reason: '', nextStep: '', ruleId: input.rules[0]?.id ?? '' } } }
+  const triage = { available: () => true, async run(input) { return { category: 'reply_needed', urgency: 'normal', reason: '', nextStep: '', ruleId: input.rules[0]?.id ?? '', confidence: 'high' } } }
   const f = await fixture(t, { triage, agentOutput: { summary: '确认。', subject: 'Re', text: '收到，谢谢。', lowRisk: true } })
   await f.api.action({ action: 'saveRule', revision: 1, rule: { ...quoteRule, autonomy: 'auto' } })
   const due = async subject => { const task = await taskBySubject(f, subject); await f.store.mutate(state => { state.tasks.find(item => item.id === task.id).autoSend.at = new Date(Date.now() - 1000).toISOString() }) }
@@ -232,7 +242,7 @@ test('automatic sending is bounded by deterministic guards regardless of the mod
 })
 
 test('checks from the agent are anchored to draft text and summarized as information gaps', async t => {
-  const triage = { available: () => true, async run(input) { return { category: 'request', urgency: 'normal', reason: '', nextStep: '', ruleId: input.rules[0].id } } }
+  const triage = { available: () => true, async run(input) { return { category: 'request', urgency: 'normal', reason: '', nextStep: '', ruleId: input.rules[0].id, confidence: 'high' } } }
   const f = await fixture(t, { triage, agentOutput: { summary: '正式报价。', subject: 'Re: 报价', text: '含税总价 ¥64,000，收到款项后 7 个工作日内发货。', checks: [{ item: '客户未指定到货日', quote: '7 个工作日内发货' }, { item: '收货地址未提供', quote: '不存在的原文' }] } })
   await f.api.action({ action: 'saveRule', revision: 1, rule: quoteRule })
   await f.deliver('报价', 'buyer@example.test', '请报价。')

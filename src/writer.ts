@@ -21,7 +21,7 @@ const specs: Record<WriterKind, { schema: Record<string, unknown>; system: (en: 
   },
   trial: {
     schema: { type: 'object', additionalProperties: false, required: ['matches'], properties: { matches: { type: 'array', maxItems: 30, items: { type: 'object', additionalProperties: false, required: ['id', 'matched', 'reason'], properties: { id: { type: 'string' }, matched: { type: 'boolean' }, reason: { type: 'string', maxLength: 120 } } } } } },
-    system: en => `判断处理方案是否适用于每封邮件。依据方案名称、语义条件(semantic)和处理要求摘要(hint)；exclude 中的类别一律不适用。对每封邮件给出 matched 和一句话理由。只判断，不处理邮件。理由使用${en ? '英文' : '中文'}。`,
+    system: en => `判断处理方案是否适用于每封邮件。依据方案名称、适用说明(semantic)、处理要求摘要(hint)和例子(examples：用户确认过属于 match=true、纠正过不属于 match=false，相似邮件须遵循)；exclude 中的类别一律不适用。拿不准时判为不适用。对每封邮件给出 matched 和一句话理由。只判断，不处理邮件。理由使用${en ? '英文' : '中文'}。`,
     parse: args => {
       keys(args, ['matches'])
       if (!Array.isArray(args.matches) || args.matches.length > 30) throw new WorkbenchError('试运行结果无效。')

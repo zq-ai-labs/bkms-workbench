@@ -530,6 +530,24 @@ body[data-ds-dark-theme] .bkw-check-no { color: #1d1606; }
 
 /* Narrow layouts: panes stack, the page scrolls as a whole */
 
+/* Quoted history in plain-text mail */
+.bkw-quoted { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surf2); }
+.bkw-quoted > summary { padding: 8px 12px; font-size: 12px; color: var(--ink2); cursor: pointer; }
+.bkw-quoted-part { padding: 10px 12px; border-top: 1px solid var(--line2); }
+.bkw-quoted-head { font-size: 12px; color: var(--ink3); margin-bottom: 6px; overflow-wrap: anywhere; }
+.bkw-quoted-part pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 13px; color: var(--ink2); }
+
+/* AI matching */
+.bkw-levels.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.bkw-suggest { border: 1px solid var(--acc); background: var(--accS); }
+.bkw-suggest h3 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--acc); }
+.bkw-match-line { flex-wrap: wrap; }
+.bkw-match-line .bkw-link { margin-left: 8px; }
+.bkw-examples { display: grid; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
+.bkw-example-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 8px 12px; border-top: 1px solid var(--line2); }
+.bkw-example-row:first-child { border-top: 0; }
+.bkw-example-row > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* WeChat — read-only conversations styled like the WeChat client: others left in white, you right in green. */
 .bkw-seg { display: inline-flex; padding: 2px; border-radius: 6px; background: var(--line2); flex: none; }
 .bkw-seg button { height: 28px; padding: 0 14px; border: 0; border-radius: 5px; background: none; color: var(--ink2); font-size: 13px; }
@@ -625,6 +643,7 @@ body[data-ds-dark-theme] .bkw-check-no { color: #1d1606; }
   .bkw-settings-nav { position: static; display: flex; flex-wrap: wrap; }
 }
 @media (max-width: 760px) {
+  .bkw-levels.two { grid-template-columns: minmax(0, 1fr); }
   .bkw-chats { display: block; overflow: auto; }
   .bkw-chat-list { max-height: 260px; border-right: 0; border-bottom: 1px solid var(--line); }
   .bkw-wx-panel { padding: 4px 16px 16px; }

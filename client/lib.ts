@@ -27,14 +27,18 @@ export type Task = {
   autoSend?: { at: string; scheduledAt: string; autonomy: Autonomy; canceledAt?: string; reason?: string };
   relatedIds?: string[]; possibleIds?: string[]; topicIds?: string[]; attention?: boolean;
   source?: { kind?: "wechat"; folder: string };
+  match?: { ruleId: string; ruleName: string; by: "ai" | "literal" | "manual"; state: "applied" | "suggested" | "rejected"; confidence?: Confidence; reason?: string; at: string };
   wechat?: { chat: string; chatName: string; group: boolean; messages: WechatMessage[]; fromSeq: number; toSeq: number; mentioned?: boolean; reply?: string; replyRevision?: number };
 };
 export type Rule = {
   id: string; name: string; enabled: boolean; priority: number; account: string; folder: string;
   match: { from: string; subject: string; hasAttachments: boolean; mode: "all" | "any" };
   instructions: string; tools: string[]; skills?: string[]; output: "reply" | "report"; maxRetries: number;
-  semantic?: string; exclude?: Category[]; autonomy?: Autonomy; sources?: SourceKind[]; revision?: number;
+  semantic?: string; exclude?: Category[]; autonomy?: Autonomy; sources?: SourceKind[]; revision?: number; matchMode?: MatchMode;
 };
+export type MatchMode = "ai" | "literal";
+export type Confidence = "high" | "medium" | "low";
+export type RuleExample = { id: string; match: boolean; text: string; at: string; taskId?: string };
 export type Capabilities = { tools: { name: string; description: string }[]; skills: { id: string; name: string; description: string }[] };
 export type Activity = { id: string; at: string; kind: string; title: string; detail?: string; taskId?: string; ruleName?: string; autonomy?: Autonomy; undoUntil?: string; undoneAt?: string };
 export type Topic = { id: string; name: string; kind: "customer" | "project" | "other"; keywords: string[]; senders: string[]; schedule: "none" | "weekly"; createdAt: string; updatedAt: string; count?: number; open?: number; lastAt?: string; summary?: { text: string; level: "good" | "attention" | "risk"; risks: string[]; todos: string[]; at: string; by: string } };
@@ -46,6 +50,7 @@ export type Snapshot = {
   capabilities?: Capabilities; settings: Preferences["settings"] & Partial<Defaults>; defaults: Defaults;
   health: { email: boolean; agent?: boolean; running?: boolean; lastPoll?: string; error?: string; triage?: boolean; writer?: boolean; wechat?: { ready: boolean; name?: string; library?: string; error?: string } };
   wechat?: { settings: WechatSettings & { quietMinutes: number }; pending: number; watching: number };
+  ruleExamples?: Record<string, RuleExample[]>;
   activity: Activity[]; topics: Topic[]; reports: Report[]; brief?: { date: string; text: string; generatedAt: string; by: string }; today: string;
   sources: { kind: SourceKind; connected: boolean; detail: string }[]; meetings: unknown[];
 };
@@ -79,12 +84,14 @@ export const statusTone = (task: Pick<Task, "status" | "triage" | "draft">): "wa
 };
 export const CATEGORY: Record<Category, string> = { request: "请求", reply_needed: "需回复", fyi: "值得关注", notification: "通知", marketing: "营销", other: "其他" };
 export const SOURCE: Record<SourceKind, string> = { email: "邮件", feishu: "飞书", wecom: "企微", wechat: "微信", meeting: "会议" };
+export const CONFIDENCE: Record<Confidence, string> = { high: "把握高", medium: "把握一般", low: "把握低" };
 export const AUTONOMY_LABEL: Record<Autonomy, string> = { draft: "仅起草", low_risk: "低风险自动", auto: "全自动" };
 
 /** The next step in words: the AI's specific step when known, otherwise the state's generic step. */
 export function nextStep(task: Task): string {
   if (task.autoSend && !task.autoSend.canceledAt && task.status === "review") return t("将于 {0} 自动发送，可撤回", time(task.autoSend.at));
   if (task.status === "needs_info" && task.error) return firstLine(task.error);
+  if (task.status === "unmatched" && task.match?.state === "suggested") return t("确认是否交给「{0}」处理", task.match.ruleName);
   if (task.triage?.nextStep && ["review", "unmatched", "needs_info"].includes(task.status)) return task.triage.nextStep;
   switch (task.status) {
     case "review": return task.checks?.length ? t("核对 {0} 处后发送", task.checks.length) : t("核对处理结果与回复草稿");

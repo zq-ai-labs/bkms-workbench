@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { systemMessage, t } from "./i18n";
 import { useWorkbench } from "./context";
 import { OriginalMailBody } from "./original-mail";
-import { AUTONOMY_LABEL, CATEGORY, api, counterpart, draftValue, downloadOriginal, downloadPreview, errorMessage, fullDate, minutesLeft, nextStep, senderName, sourceOf, statusLabel, taskTitle, time, uploadDraftAttachment, when, type Draft, type EditDraft, type Rule, type SendPlan, type Task } from "./lib";
+import { AUTONOMY_LABEL, CATEGORY, CONFIDENCE, api, counterpart, draftValue, downloadOriginal, downloadPreview, errorMessage, fullDate, minutesLeft, nextStep, senderName, sourceOf, statusLabel, taskTitle, time, uploadDraftAttachment, when, type Draft, type EditDraft, type Rule, type SendPlan, type Task } from "./lib";
 import { Alert, AutoTextarea, Field, Icon, Modal, SourceTag, StatusTag, Tag } from "./ui";
 import { ChatHistory, SegmentConversation } from "./wechat";
 
@@ -74,6 +74,8 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
   }, [dirty, supplement]);
 
   const run = (key: string, work: () => Promise<unknown>) => void perform(key, work);
+  const canReject = !!task.ruleId && !["running", "sending", "sent", "uncertain", "queued"].includes(task.status);
+  const rejectRule = () => run("rejectRule", async () => { await api("rejectRule", { id: task.id, revision: task.revision }); cachedDraft = undefined; await refresh(); notify(t("已记下：这类信息不属于该方案")); });
   const saveReply = () => run("saveReply", async () => { await api("saveReply", { id: task.id, revision: task.revision, replyRevision: task.wechat?.replyRevision, text: reply }); setReplyBase(reply); await refresh(); notify(t("回复已保存")); });
   const copyReply = () => run("copyReply", async () => { await copyText(reply); notify(t("已复制，请到微信中粘贴发送")); });
   const markHandled = () => run("markHandled", async () => { await api("markHandled", { id: task.id, revision: task.revision }); await refresh(); notify(t("已标记为在微信中处理")); onDone?.(); });
@@ -115,6 +117,10 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
       {latestRule?.autonomy && <span>{t("自主级别：{0}", t(AUTONOMY_LABEL[latestRule.autonomy]))}</span>}
     </div>
     {task.triage?.reason && <p className="bkw-ws-reason"><Icon name="sparkle" size={14} />{t("AI 判断：{0}", task.triage.reason)}</p>}
+    {task.match?.state === "applied" && task.ruleId === task.match.ruleId && <p className="bkw-ws-reason bkw-match-line">
+      <Icon name="rules" size={14} /><span>{(task.match.by === "ai" ? t("AI 选择方案（{0}）", t(CONFIDENCE[task.match.confidence ?? "high"])) : task.match.by === "literal" ? t("按字面条件匹配") : t("你选择的方案")) + (task.match.reason ? "：" + systemMessage(task.match.reason) : "")}</span>
+      {canReject && <button type="button" className="bkw-link" disabled={!!busy || dirty} onClick={rejectRule}>{t("不是这个方案")}</button>}
+    </p>}
   </div>;
 
   const result = <>
@@ -149,7 +155,17 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
       <div className="bkw-actions"><button type="button" className="bkw-btn primary" disabled={!!busy || !supplement.trim() || !modelReady} onClick={() => run("supplement", async () => { await api("supplement", { id: task.id, revision: task.revision, text: supplement }); setSupplement(""); await refresh(); notify(t("补充信息已保存，任务继续处理")); })}>{t("提交并继续处理")}</button></div>
     </section>}
 
-    {task.status === "unmatched" && <section className="bkw-block">
+    {task.status === "unmatched" && task.match?.state === "suggested" && <section className="bkw-block bkw-suggest">
+      <h3><Icon name="sparkle" size={15} />{t("AI 建议用「{0}」处理", task.match.ruleName)}<Tag tone={task.match.confidence === "low" ? "muted" : "warn"}>{t(CONFIDENCE[task.match.confidence ?? "medium"])}</Tag></h3>
+      {task.match.reason && <p className="bkw-block-lead">{systemMessage(task.match.reason)}</p>}
+      <p className="bkw-muted">{t("把握不足，没有自动处理。确认或否定都会成为这个方案的例子，AI 之后判断相似信息时参考。")}</p>
+      <div className="bkw-actions">
+        <button type="button" className="bkw-btn primary" disabled={!!busy || !modelReady || !data.rules.some(rule => rule.id === task.match!.ruleId)} onClick={() => run("runRule", async () => { await api("runRule", { id: task.id, ruleId: task.match!.ruleId, revision: task.revision }); await refresh(); notify(t("已按建议的方案加入处理队列")); })}>{t("按这个方案处理")}</button>
+        <button type="button" className="bkw-btn" disabled={!!busy} onClick={() => run("rejectRule", async () => { await api("rejectRule", { id: task.id, revision: task.revision }); await refresh(); notify(t("已记下：这类信息不属于该方案")); })}>{t("不是这个")}</button>
+      </div>
+    </section>}
+    {task.status === "unmatched" && task.match?.state === "rejected" && <Alert>{t("你已判断这条信息不属于「{0}」。可以选择其他方案或忽略。", task.match.ruleName)}</Alert>}
+    {task.status === "unmatched" && task.match?.state !== "suggested" && <section className="bkw-block">
       <h3>{t("为这条信息选择处理方案")}</h3>
       <p className="bkw-block-lead">{task.triage?.nextStep || t("没有自动命中方案，可以指定一个已配置的方案开始处理。")}</p>
       <div className="bkw-inline-form">
@@ -240,11 +256,12 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
         <button type="button" className="bkw-btn" disabled={!!busy} onClick={() => { setResolutionChecked(false); setResolution({ draftRevision: task.draft!.revision, outcome: "sent" }); }}>{t("确认已发送，标记完成")}</button>
       </>}
       {canIgnore && <button type="button" className="bkw-btn ghost" disabled={!!busy || dirty} onClick={() => setConfirmIgnore(true)}>{t("忽略")}</button>}
-      {(canRetry || canLatest) && <div className="bkw-menu-wrap">
+      {(canRetry || canLatest || canReject) && <div className="bkw-menu-wrap">
         <button type="button" className="bkw-btn ghost" aria-haspopup="menu" aria-expanded={menu} disabled={!!busy || dirty || !modelReady} onClick={() => setMenu(!menu)}><Icon name="refresh" size={15} />{t("重新处理")}</button>
         {menu && <div className="bkw-menu" role="menu" onMouseLeave={() => setMenu(false)}>
           {canRetry && <button type="button" role="menuitem" onClick={() => { setMenu(false); run("retry", async () => { await api("retry", { id: task.id, revision: task.revision }); await refresh(); notify(t("已重新加入处理队列")); }); }}><strong>{t("按原方案重试")}</strong><small>{t("使用处理时的方案快照")}</small></button>}
           {canLatest && <button type="button" role="menuitem" onClick={() => { setMenu(false); setRerun({ rule: latestRule!, configRevision: data.revision, text: supplement.trim() }); }}><strong>{t("按最新方案重新处理")}</strong><small>{t("使用方案当前保存的要求和工具")}</small></button>}
+          {canReject && <button type="button" role="menuitem" onClick={() => { setMenu(false); rejectRule(); }}><strong>{t("不属于这个方案")}</strong><small>{t("移出方案并记为反例，之后可另选方案")}</small></button>}
         </div>}
       </div>}
     </div>
