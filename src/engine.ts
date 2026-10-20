@@ -75,7 +75,7 @@ export class Engine {
   }
   private savedLanguage?: 'zh' | 'en'
   constructor(readonly store: Store, private emailSource: () => EmailService | undefined, readonly agent: AgentRunner, readonly capabilities: () => Promise<unknown> = async () => ({ tools: [], skills: [] }), readonly triage?: TriageRunner, readonly writer?: WriterRunner, readonly wechat?: { service(settings: WechatSettings | undefined): WechatService | undefined; clear?(): Promise<void> }) {}
-  email(): EmailService { const email = this.emailSource(); if (!email || email.version !== 1) throw new WorkbenchError('需要启用提供工作台接口的 dsh-email 本地构建。', 'email-unavailable', 503); return email }
+  email(): EmailService { const email = this.emailSource(); if (!email || email.version !== 1) throw new WorkbenchError('请先在工作台设置中添加邮箱账号。', 'email-unavailable', 503); return email }
   health() { return { email: this.emailSource()?.version === 1, agent: this.agent.available(), running: !!this.release && !this.stopping, lastPoll: this.lastPoll, error: this.error, triage: !!this.triage?.available(), writer: !!this.writer?.available(), wechat: this.wechatHealth() } }
   wechatHealth(): { ready: boolean; name?: string; library?: string; error?: string } | undefined {
     if (!this.wechat) return undefined

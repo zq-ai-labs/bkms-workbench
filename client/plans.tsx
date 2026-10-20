@@ -208,11 +208,17 @@ function RuleEditor({ rule }: { rule: Rule }) {
             {optimizeError && <Alert tone="danger">{systemMessage(optimizeError)}</Alert>}
             {optimization && <div className="bkw-suggestion"><strong>{t("优化后的处理要求")}</strong><div className="bkw-prose">{optimization}</div><div className="bkw-actions"><small className="bkw-muted">{t("核对原有条件与限制，采用后仍需保存方案。")}</small><button type="button" className="bkw-btn small" onClick={() => setOptimization(undefined)}>{t("保留原文")}</button><button type="button" className="bkw-btn small primary" onClick={() => patch({ instructions: optimization })}>{t("采用优化")}</button></div></div>}
           </div>
-          <details className="bkw-details"><summary>{t("能力与执行选项")}<small>{[...(value.skills || []), ...value.tools].join("、") || t("邮件正文分析")}</small></summary>
+          <details className="bkw-details"><summary>{t("执行选项")}<small>{t("优先级 {0} · 失败重试 {1} 次", value.priority, value.maxRetries)}</small></summary>
             <div className="bkw-grid2">
               <Field label={t("优先级")} hint={t("数值越高越先匹配")}><input required type="number" min={-10000} max={10000} value={value.priority} onChange={event => patch({ priority: Number(event.target.value) })} /></Field>
               <Field label={t("失败重试次数")}><input type="number" min={0} max={3} value={value.maxRetries} onChange={event => patch({ maxRetries: Number(event.target.value) })} /></Field>
             </div>
+          </details>
+        </div>
+      </div>
+      <div className="bkw-sec"><div><b>{t("技能与工具")}</b><span>{t("AI 处理时可以使用的技能和读取工具")}</span></div>
+        <div className="bkw-stack">
+          <details className="bkw-details bkw-capability-section"><summary><Icon name="rules" size={14} />{t("选择技能与工具")}<small>{(value.skills?.length || value.tools.length) ? t("已选 {0} 个技能、{1} 个工具：{2}", value.skills?.length ?? 0, value.tools.length, [...(value.skills || []), ...value.tools].join("、")) : t("未选择：只根据收到的信息和处理要求处理")}</small></summary>
             <CapabilityPicker capabilities={data.capabilities} value={value} onChange={patch} />
           </details>
         </div>

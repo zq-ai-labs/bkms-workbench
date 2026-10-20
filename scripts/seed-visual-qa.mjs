@@ -4,7 +4,7 @@ import { mkdir, lstat, open, readdir, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { Store, log } from '../lib/store.js'
 import { validateRule } from '../lib/rules.js'
-import { DraftStore } from '../../dsh-email/lib/draft-store.js'
+import { DraftStore } from '../lib/mail/draft-store.js'
 
 const arguments_ = process.argv.slice(2)
 if (arguments_.length !== 2 || arguments_[0] !== '--home' || !isAbsolute(arguments_[1])) {
@@ -41,7 +41,8 @@ try {
 } finally { await marker.close() }
 
 const store = new Store(join(home, 'data', 'bkms-workbench'))
-const drafts = new DraftStore(home)
+// Drafts live with the built-in mail module: <data>/bkms-workbench/mail/drafts.
+const drafts = new DraftStore(join(home, 'data', 'bkms-workbench', 'mail'), 'drafts')
 const rule = validateRule({
   id: randomUUID(), name: '演示 · 客户询价准备', enabled: false, priority: 100,
   account: 'visual-demo', folder: 'INBOX',

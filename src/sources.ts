@@ -1,8 +1,8 @@
 import type { SourceKind } from './types.js'
 
 /**
- * Contract for an information source. Email is implemented through the dsh-email
- * `emailWorkbench` service and WeChat through the read-only bridge in `wechat.ts`; other IM and meeting platforms need an adapter that fulfils
+ * Contract for an information source. Email is implemented by the built-in mail module (`src/mail`, adapted from
+ * dsh-email) and WeChat through the read-only bridge in `wechat.ts`; other IM and meeting platforms need an adapter that fulfils
  * the same contract before they can be connected. The workbench never simulates
  * a connection that does not exist.
  */

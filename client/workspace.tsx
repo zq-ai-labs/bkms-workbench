@@ -156,7 +156,7 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
     {task.ruleUpdated && <Alert>{t("方案已更新，当前结果仍基于原方案。可按最新方案重新处理，以使用更新后的要求和工具。")}</Alert>}
     {task.error && task.status !== "needs_info" && <Alert tone="danger">{systemMessage(task.error)}</Alert>}
     {task.status === "uncertain" && <Alert tone="warn">{t("发送结果尚未确定。请核对邮箱中的已发送邮件，避免重复发送。")}</Alert>}
-    {task.status === "uncertain" && !task.canResolveSend && <Alert>{t("发送结果恢复功能暂不可用，请确认配套邮件插件已更新并重启客户端；草稿无法读取时请先恢复邮件服务。")}</Alert>}
+    {task.status === "uncertain" && !task.canResolveSend && <Alert>{t("发送结果恢复功能暂不可用，请重启客户端；草稿无法读取时请先恢复邮件服务。")}</Alert>}
 
     {checks.length > 0 && task.status === "review" && <section className="bkw-checks" aria-label={t("发送前请核实")}>
       <h3>{pendingChecks ? t("发送前请核实 {0} 处", pendingChecks) : t("待核实事项已全部确认")}{checks.some(check => check.quote) && <small>{t("已在正文中标出")}</small>}</h3>
@@ -407,7 +407,7 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
         {reviewForm.cc && <><dt>{t("抄送")}</dt><dd>{reviewForm.cc}</dd></>}
         <dt>{t("主题")}</dt><dd>{reviewForm.subject}</dd>
       </dl>
-      {preview.matching?.blocked && <Alert tone="danger">{t("有收件人命中禁止发送规则。请返回修改收件人，或在邮件插件中检查收件人策略。")}</Alert>}
+      {preview.matching?.blocked && <Alert tone="danger">{t("有收件人命中禁止发送规则。请返回修改收件人，或在工作台设置的邮箱账号中检查“禁止发送到”。")}</Alert>}
       {!!preview.matching?.rows?.length && <div className="bkw-recipients">{preview.matching.rows.map((row, index) => <div key={index}><span>{row.field === "cc" ? t("抄送") : t("收件人")} · {row.address}</span><Tag tone={row.blocked ? "danger" : row.matched ? "good" : "muted"}>{row.blocked ? t("禁止发送{0}", row.value ? " · " + row.value : "") : row.matched ? t("可信收件人") : t("人工确认")}</Tag></div>)}</div>}
       {preview.bodyHtml ? <iframe className="bkw-mail-preview" title={t("邮件正文预览")} sandbox="" referrerPolicy="no-referrer" srcDoc={preview.bodyHtml} /> : <pre className="bkw-send-body">{reviewForm.text}</pre>}
       {preview.attachments?.length ? <div className="bkw-files">{preview.attachments.map(file => <span key={file.id} className="bkw-file"><Icon name="file" size={14} />{file.filename} · {Math.ceil(file.size / 1024)} KB

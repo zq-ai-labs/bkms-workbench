@@ -166,7 +166,7 @@ function save(blob: Blob, filename: string) {
 }
 export const downloadText = (text: string, filename: string) => save(new Blob([text], { type: "text/markdown;charset=utf-8" }), filename);
 export async function downloadPreview(plan: string, file: { id: string; filename: string }): Promise<void> {
-  const response = await hostFetch(`api/dsh-email/drafts?preview=${encodeURIComponent(plan)}&attachment=${encodeURIComponent(file.id)}`, { credentials: "same-origin" });
+  const response = await hostFetch(`api/bkms-workbench/drafts?preview=${encodeURIComponent(plan)}&attachment=${encodeURIComponent(file.id)}`, { credentials: "same-origin" });
   if (!response.ok) { const result = await response.json().catch(() => ({})); throw new Error(result.error?.message || t("附件预览已失效，请重新审核发送。")); }
   save(await response.blob(), file.filename);
 }
@@ -182,9 +182,9 @@ export async function downloadOriginal(task: Task, index: number, filename: stri
   save(await response.blob(), name);
 }
 export async function uploadDraftAttachment(draft: Draft, file: File): Promise<Draft> {
-  const response = await hostFetch("api/dsh-email/drafts/upload", {
+  const response = await hostFetch("api/bkms-workbench/drafts/upload", {
     method: "POST", credentials: "same-origin",
-    headers: { "Content-Type": "application/octet-stream", "x-dsh-email-draft": "1", "x-dsh-draft-id": draft.id, "x-dsh-draft-revision": String(draft.revision), "x-dsh-draft-filename": encodeURIComponent(file.name) },
+    headers: { "Content-Type": "application/octet-stream", "x-bkms-workbench-draft": "1", "x-dsh-draft-id": draft.id, "x-dsh-draft-revision": String(draft.revision), "x-dsh-draft-filename": encodeURIComponent(file.name) },
     body: file,
   });
   const result = await response.json();
