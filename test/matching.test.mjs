@@ -9,7 +9,7 @@ import { WorkbenchApi } from '../lib/api.js'
 import { validateRule, decideAfterTriage } from '../lib/rules.js'
 import { parseTriage, heuristicTriage } from '../lib/triage.js'
 import { splitQuoted, historyForPrompt } from '../lib/quoted.js'
-import { mailInput, reviewLanguage } from '../lib/agent.js'
+import { mailInput, reviewLanguage, resultSchema } from '../lib/agent.js'
 import { readFileSync } from 'node:fs'
 
 const orderRule = { name: '订单处理', enabled: true, priority: 100, account: '', folder: 'INBOX', match: { from: '', subject: '', hasAttachments: false, mode: 'all' }, instructions: '处理客户下单、改单，生成确认回复。', tools: [], output: 'reply', maxRetries: 0, semantic: '客户正式下单或修改订单' }
@@ -209,5 +209,12 @@ test('review text follows the interface language, which is saved for background 
   assert.match(reviewLanguage('en'), /checks 中的 item/)
   assert.match(reviewLanguage('en'), /subject 和 text 的语言按规则要求决定/)
   assert.match(reviewLanguage('zh'), /一律使用中文/)
+  assert.match(reviewLanguage('en'), /优先于上文规则要求/)
+  const schema = resultSchema('en').properties
+  for (const field of [schema.summary, schema.informationGaps, schema.needsInfo, schema.checks.items.properties.item]) assert.match(field.description, /英文（English）/)
+  assert.equal(schema.text.description, undefined, 'the reply draft keeps its own language')
+  // The language rule closes the preparation prompt, after the workflow text and skills.
+  const agentSource = readFileSync(new URL('../lib/agent.js', import.meta.url), 'utf8')
+  assert.match(agentSource, /skill\.content}`\)\.join\('\\n\\n'\)}\\n\\n\$\{reviewLanguage\(options\?\.language\)}`/)
   assert.match(readFileSync(new URL('../lib/triage.js', import.meta.url), 'utf8'), /reason、nextStep、ruleReason 是给用户看的说明/)
 })
