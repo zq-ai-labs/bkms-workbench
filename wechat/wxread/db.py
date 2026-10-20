@@ -377,6 +377,23 @@ def extract_master_key_from_cfg(pid: int) -> Optional[Tuple[str, int, str]]:
         _k32.CloseHandle(h)
 
 
+
+def _replace_retry(src: str, dst: str, attempts: int = 10) -> bool:
+    """bkms-workbench：Windows 上目标文件正被打开（另一读取进程、杀毒软件或搜索
+    索引在扫描新写入的副本）时，os.replace 报 WinError 5/32（PermissionError）。
+    这类占用通常只持续几百毫秒，短暂重试；共约 3 秒仍失败返回 False，由调用方兜底。"""
+    delay = 0.05
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return True
+        except PermissionError:
+            if attempt == attempts - 1:
+                return False
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
+    return False
+
 def _decrypt_page(enc_key: bytes, page: bytes, pgno: int) -> bytes:
     iv = page[PAGE_SZ - RESERVE_SZ: PAGE_SZ - RESERVE_SZ + 16]
     if pgno == 1:
@@ -1489,7 +1506,8 @@ class WeChatDB:
                             shutil.copyfile(best, merged)
                             got = self._merge_wal(merged, wal_path, key, 0)
                             if self._check_merged(merged):
-                                os.replace(merged, best)
+                                if not _replace_retry(merged, best):
+                                    raise OSError("合并结果被占用，无法替换")
                                 best_applied, ok_wal = got, True
                                 break
                         except Exception as exc:
@@ -1499,7 +1517,18 @@ class WeChatDB:
                         best_applied = -1          # 标记：本轮未合并 WAL
                         wxlog.warning('WAL 合并失败（微信持续写入），改用仅主库快照'
                                       '（可能缺少最近消息）: %s' % rel)
-                os.replace(best, dst)
+                if not _replace_retry(best, dst):
+                    # bkms-workbench：旧副本一直被占用（常见于另一个读取进程正开着它，
+                    # 或杀毒软件扫描）。不报错：把新副本换成独立文件名直接读，不写
+                    # stamp，下次读取时再尝试替换；这些文件按 *.tmp* 规则 10 分钟后清理。
+                    ready = "%s.%d.%x.%d.tmp.ready" % (dst, os.getpid(), threading.get_ident(), int(time.time() * 1000))
+                    if not _replace_retry(best, ready):
+                        ready = best
+                    wxlog.warning('解密副本被其他程序占用，本次直接读取新副本: %s' % rel)
+                    conn = sqlite3.connect(f"file:{ready}?mode=ro", uri=True)
+                    conn.row_factory = sqlite3.Row
+                    conn.text_factory = _sqlite_text_factory
+                    return conn
                 applied = best_applied
                 os.makedirs(os.path.dirname(stamp), exist_ok=True)
                 with open(stamp, "w") as f:
