@@ -971,5 +971,11 @@
   "显示“{0}”页签": "Show the “{0}” tab",
   "隐藏后打开工作台直接进入“待我决策”。每日简报仍会生成，可在“主题与报告”中查看。": "When hidden, the workbench opens on Needs me. The daily brief is still generated and can be read under Topics & reports.",
   "还没有连接日历或会议平台时可以先隐藏。": "Hide it until a calendar or meeting platform is connected.",
-  "隐藏后不再显示页签；事项上的主题链接仍可打开。": "Hides the tab; topic links on items still open it."
+  "隐藏后不再显示页签；事项上的主题链接仍可打开。": "Hides the tab; topic links on items still open it.",
+  "调整原始信息宽度": "Resize the original message pane",
+  "拖动调整宽度，双击恢复默认": "Drag to resize; double-click to reset",
+  "恢复宽度": "Restore width",
+  "展开阅读": "Expand to read",
+  "恢复宽度（Esc）": "Restore width (Esc)",
+  "显示待决策列表": "Show the decision list"
 }
