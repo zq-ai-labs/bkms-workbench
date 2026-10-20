@@ -2,7 +2,7 @@ export type Attention = { id: string; status: string };
 export type Preferences = {
   revision: number;
   stateRevision?: number;
-  settings: { enabled: boolean; pollSeconds: number; showWorkbench?: boolean; notifyNewTodo?: boolean };
+  settings: { enabled: boolean; pollSeconds: number; showWorkbench?: boolean; notifyNewTodo?: boolean; hiddenViews?: ("today" | "meetings" | "topics")[] };
   attention: Attention[];
 };
 

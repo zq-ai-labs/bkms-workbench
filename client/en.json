@@ -695,7 +695,7 @@
   "跟踪某个客户或项目，AI 会汇总所有相关往来。": "Track a customer or project and AI collects every related message.",
   "审核": "Review",
   "答复": "Reply",
-  "补充": "Supplement",
+  "补充": "Info",
   "异常": "Issues",
   "今天要处理": "Today",
   "更早": "Earlier",
@@ -967,5 +967,15 @@
   "你已判断这条信息不属于「{0}」。可以选择其他方案或忽略。": "You marked this as not belonging to “{0}”. Choose another workflow or ignore it.",
   "不属于这个方案": "Not this workflow",
   "移出方案并记为反例，之后可另选方案": "Remove it from the workflow as a counter-example, then choose another",
-  "引用的历史往来（{0} 段）": "Quoted earlier messages ({0})"
+  "引用的历史往来（{0} 段）": "Quoted earlier messages ({0})",
+  "显示“{0}”页签": "Show the “{0}” tab",
+  "隐藏后打开工作台直接进入“待我决策”。每日简报仍会生成，可在“主题与报告”中查看。": "When hidden, the workbench opens on Needs me. The daily brief is still generated and can be read under Topics & reports.",
+  "还没有连接日历或会议平台时可以先隐藏。": "Hide it until a calendar or meeting platform is connected.",
+  "隐藏后不再显示页签；事项上的主题链接仍可打开。": "Hides the tab; topic links on items still open it.",
+  "调整原始信息宽度": "Resize the original message pane",
+  "拖动调整宽度，双击恢复默认": "Drag to resize; double-click to reset",
+  "恢复宽度": "Restore width",
+  "展开阅读": "Expand to read",
+  "恢复宽度（Esc）": "Restore width (Esc)",
+  "显示待决策列表": "Show the decision list"
 }

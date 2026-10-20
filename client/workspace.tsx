@@ -6,6 +6,7 @@ import { OriginalMailBody } from "./original-mail";
 import { AUTONOMY_LABEL, CATEGORY, CONFIDENCE, api, counterpart, draftValue, downloadOriginal, downloadPreview, errorMessage, fullDate, minutesLeft, nextStep, senderName, sourceOf, statusLabel, taskTitle, time, uploadDraftAttachment, when, type Draft, type EditDraft, type Rule, type SendPlan, type Task } from "./lib";
 import { Alert, AutoTextarea, Field, Icon, Modal, SourceTag, StatusTag, Tag } from "./ui";
 import { ChatHistory, SegmentConversation } from "./wechat";
+import { MIN_RESULT, MIN_SOURCE, setSourceExpanded, setSourceRatio, sourceColumn, useSourceLayout } from "./layout";
 
 /** Unsaved edits survive switching views and remounts, keyed by task. */
 let cachedDraft: { id: string; revision: number; draftRevision: number; form: EditDraft; original: string } | undefined;
@@ -29,6 +30,28 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
   const [menu, setMenu] = useState(false);
   const [sourceTab, setSourceTab] = useState<"mail" | "related" | "history">("mail");
   const [mobilePane, setMobilePane] = useState<"result" | "source">("result");
+  const layout = useSourceLayout();
+  const wsRef = useRef<HTMLDivElement>(null);
+  const [dragging, setDragging] = useState(false);
+  useEffect(() => {
+    if (!layout.expanded) return;
+    const key = (event: KeyboardEvent) => { if (event.key === "Escape" && !document.querySelector(".bkw-modal-overlay")) setSourceExpanded(false); };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [layout.expanded]);
+  /** Share of the workspace for the source pane at a pointer position, kept within both panes' minimum widths. */
+  const ratioAt = (clientX: number) => {
+    const rect = wsRef.current!.getBoundingClientRect();
+    const width = Math.min(Math.max(rect.right - clientX, MIN_SOURCE), Math.max(MIN_SOURCE, rect.width - MIN_RESULT));
+    return width / rect.width;
+  };
+  const startDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !wsRef.current) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSourceExpanded(false); setDragging(true);
+  };
+  const currentRatio = () => { const rect = wsRef.current?.getBoundingClientRect(); const pane = wsRef.current?.querySelector(".bkw-ws-source")?.getBoundingClientRect(); return rect && pane ? pane.width / rect.width : 0.4; };
   const [activeCheck, setActiveCheck] = useState<number>();
   const [, setTick] = useState(0);
   const ackKey = `${task.id}:${task.draft?.revision ?? 0}`;
@@ -279,7 +302,9 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
     </div>
   </div>;
 
-  return <div className={`bkw-ws show-${mobilePane}`}>
+  return <div ref={wsRef} className={`bkw-ws show-${mobilePane} ${layout.expanded ? "expanded" : ""}`} style={{ ["--bkw-src" as string]: sourceColumn(layout) }}>
+    {/* A transparent layer keeps the drag alive while the pointer crosses the mail frame. */}
+    {dragging && <div className="bkw-drag-layer" aria-hidden="true" />}
     <div className="bkw-ws-switch" role="tablist" aria-label={t("任务详情内容")}>
       <button type="button" role="tab" aria-selected={mobilePane === "result"} onClick={() => setMobilePane("result")}>{t("AI 处理结果")}</button>
       <button type="button" role="tab" aria-selected={mobilePane === "source"} onClick={() => setMobilePane("source")}>{t("原始信息")}</button>
@@ -289,8 +314,22 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
       {footer}
     </section>
     <aside className="bkw-ws-source" aria-label={t("原始信息")}>
+      <div role="separator" aria-orientation="vertical" aria-label={t("调整原始信息宽度")} title={t("拖动调整宽度，双击恢复默认")} tabIndex={0} className={`bkw-resizer ${dragging ? "on" : ""}`}
+        aria-valuemin={20} aria-valuemax={80} aria-valuenow={Math.round((layout.ratio ?? 0.4) * 100)}
+        onPointerDown={startDrag}
+        onPointerMove={event => { if (dragging) setSourceRatio(ratioAt(event.clientX)); }}
+        onPointerUp={event => { if (dragging) { event.currentTarget.releasePointerCapture(event.pointerId); setDragging(false); } }}
+        onPointerCancel={() => setDragging(false)}
+        onDoubleClick={() => { setSourceExpanded(false); setSourceRatio(undefined); }}
+        onKeyDown={event => {
+          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+          event.preventDefault(); setSourceExpanded(false);
+          const rect = wsRef.current!.getBoundingClientRect(), step = 24 / rect.width, base = layout.ratio ?? currentRatio();
+          setSourceRatio(Math.min(Math.max(base + (event.key === "ArrowLeft" ? step : -step), MIN_SOURCE / rect.width), Math.max(MIN_SOURCE, rect.width - MIN_RESULT) / rect.width));
+        }} />
       <div className="bkw-subtabs" role="tablist">
         {([["mail", wechat ? t("聊天记录") : t("原邮件")], ["related", related.length ? t("相关往来 {0}", related.length) : t("相关往来")], ["history", t("记录")]] as const).map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={sourceTab === id} onClick={() => setSourceTab(id)}>{label}</button>)}
+      <button type="button" className="bkw-icon-btn bkw-expand" aria-pressed={layout.expanded} aria-label={layout.expanded ? t("恢复宽度") : t("展开阅读")} title={layout.expanded ? t("恢复宽度（Esc）") : t("展开阅读")} onClick={() => setSourceExpanded(!layout.expanded)}><Icon name={layout.expanded ? "collapse" : "expand"} size={15} /></button>
       </div>
       <div className="bkw-ws-source-body">
         {sourceTab === "mail" && wechat && task.wechat && <ChatHistory chat={task.wechat.chat} group={task.wechat.group} current={task.id} />}

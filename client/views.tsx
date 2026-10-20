@@ -6,6 +6,7 @@ import { AUTONOMY_LABEL, CATEGORY, LABELS, api, counterpart, dayLabel, longDate,
 import { Empty, Icon, PageHeader, Section, SourceTag, StatusTag, Tag } from "./ui";
 import { ChatsView } from "./wechat";
 import { TaskWorkspace } from "./workspace";
+import { setSourceExpanded, useSourceLayout } from "./layout";
 
 const DAY = 864e5;
 const greeting = () => { const hour = new Date().getHours(); return hour < 11 ? t("早上好") : hour < 14 ? t("中午好") : hour < 18 ? t("下午好") : t("晚上好"); };
@@ -111,6 +112,7 @@ export function DecideView({ selected }: { selected?: string }) {
   const { data, go } = useWorkbench();
   const [filter, setFilter] = useState<Filter>("all");
   const listRef = useRef<HTMLDivElement>(null);
+  const layout = useSourceLayout();
   const tasks = useMemo(() => data.tasks.filter(task => task.attention).sort((a, b) => urgencyRank(a) - urgencyRank(b) || b.receivedAt.localeCompare(a.receivedAt)), [data.tasks]);
   const shown = tasks.filter(task => inFilter(task, filter));
   const groups: [string, string, Task[]][] = [["today", t("今天要处理"), shown.filter(task => groupOf(task) === "today")], ["issue", t("异常"), shown.filter(task => groupOf(task) === "issue")], ["later", t("更早"), shown.filter(task => groupOf(task) === "later")]];
@@ -131,10 +133,11 @@ export function DecideView({ selected }: { selected?: string }) {
   if (!tasks.length) return <div className="bkw-pad"><Empty icon="done" title={t("暂时没有需要处理的事")} text={data.rules.length ? t("后台会按方案处理新信息，需要你决策时会出现在这里。") : t("创建一个处理方案，自动整理邮件并准备回复草稿。")}>
     {!data.rules.length && <button type="button" className="bkw-btn primary" onClick={() => go({ view: "plans", rule: "new" })}>{t("创建第一个方案")}</button>}
   </Empty></div>;
-  return <div className="bkw-decide">
-    <section className="bkw-decide-list" aria-label={t("待决策列表")} ref={listRef}>
+  return <div className={`bkw-decide ${layout.expanded ? "wide" : ""}`}>
+    {layout.expanded && <button type="button" className="bkw-decide-rail" onClick={() => setSourceExpanded(false)} aria-label={t("显示待决策列表")} title={t("显示待决策列表")}><Icon name="inbox" size={16} /><span>{shown.length}</span></button>}
+    <section className="bkw-decide-list" aria-label={t("待决策列表")} ref={listRef} hidden={layout.expanded}>
       <div className="bkw-chips" role="group" aria-label={t("按类型筛选")}>
-        {FILTERS.map(([id, label]) => { const count = tasks.filter(task => inFilter(task, id)).length; return <button type="button" key={id} className={`bkw-chip ${filter === id ? "on" : ""}`} aria-pressed={filter === id} disabled={!count && id !== "all"} onClick={() => setFilter(id)}>{t(label)} <span>{count}</span></button>; })}
+        {FILTERS.map(([id, label]) => { const count = tasks.filter(task => inFilter(task, id)).length; if (!count && id !== "all" && filter !== id) return null; return <button type="button" key={id} className={`bkw-chip ${filter === id ? "on" : ""}`} aria-pressed={filter === id} disabled={!count && id !== "all"} onClick={() => setFilter(id)}>{t(label)} <span>{count}</span></button>; })}
       </div>
       {groups.map(([id, label, items]) => items.length ? <div key={id} className="bkw-group">
         <h4>{label}</h4>

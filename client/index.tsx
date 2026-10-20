@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { connectLocale, systemMessage, t, useWorkbenchLocale, type LocaleService } from "./i18n";
 import { Context, type Route, type View, type WorkbenchContext } from "./context";
 import { EMPTY, api, errorMessage, time, type Snapshot } from "./lib";
-import { dismissReminder, preferences, refreshPreferences, resetPreferences, subscribePreferences, useReminder } from "./store";
+import { dismissReminder, preferences, refreshPreferences, resetPreferences, subscribePreferences, usePreferences, useReminder } from "./store";
 import { Alert, Empty, Icon } from "./ui";
 import { DecideView, DoneView, ItemsView, LogsView, MeetingsView, TodayView } from "./views";
 import { TopicsView } from "./topics";
@@ -59,7 +59,11 @@ export function Workbench() {
   const mailReady = data.health.email && data.accounts.length > 0;
   const servicesReady = mailReady && data.health.agent && data.health.running;
   const connected = data.sources.filter(source => source.connected).length;
-  const view = route.view;
+  // Preferences update immediately when settings are saved; the snapshot follows on its next refresh.
+  const shared = usePreferences();
+  const hidden = new Set<string>((shared.stateRevision !== undefined && shared.revision >= data.revision ? shared.settings.hiddenViews : data.settings.hiddenViews) ?? []);
+  // Hidden pages leave the tab bar; they stay reachable from links inside the workbench.
+  const view = route.view === "today" && hidden.has("today") && loaded ? "decide" : route.view;
   const page = !loaded ? <div className="bkw-pad"><Empty title={error ? t("暂时无法加载工作台") : t("正在加载工作台")} text={error ? t("请检查服务连接后刷新重试。") : t("正在获取你的任务与方案。")}><button type="button" className="bkw-btn" onClick={() => void perform("refresh", refresh)}>{t("重新加载")}</button></Empty></div>
     : view === "today" ? <TodayView /> : view === "decide" ? <DecideView selected={route.task} /> : view === "done" ? <DoneView /> : view === "items" ? <ItemsView selected={route.task} chats={route.chats} />
     : view === "meetings" ? <MeetingsView /> : view === "topics" ? <TopicsView topicId={route.topic} reportId={route.report} /> : view === "plans" ? <PlansView ruleId={route.rule} />
@@ -81,7 +85,7 @@ export function Workbench() {
           </div>
         </div>
         <nav className="bkw-tabs" aria-label={t("工作台导航")}>
-          {TABS.map(([id, label, icon]) => <button type="button" key={id} className={view === id ? "on" : ""} aria-current={view === id ? "page" : undefined} onClick={() => go({ view: id })}>
+          {TABS.filter(([id]) => !hidden.has(id) || view === id).map(([id, label, icon]) => <button type="button" key={id} className={view === id ? "on" : ""} aria-current={view === id ? "page" : undefined} onClick={() => go({ view: id })}>
             <Icon name={icon} size={15} />{t(label)}{id === "decide" && decisions > 0 && <span className="bkw-count strong">{decisions}</span>}{id === "done" && recent > 0 && <span className="bkw-count">{recent}</span>}
           </button>)}
         </nav>

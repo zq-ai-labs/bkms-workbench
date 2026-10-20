@@ -205,7 +205,9 @@ body[data-ds-dark-theme] .bkw, body[data-ds-dark-theme] .bkw-settings, body[data
 /* Decide: list | AI result | source */
 .bkw-decide { display: grid; grid-template-columns: minmax(260px, 320px) minmax(0, 1fr); height: 100%; min-height: 0; }
 .bkw-decide-list { display: flex; flex-direction: column; gap: 2px; min-height: 0; overflow: auto; padding: 12px 10px; border-right: 1px solid var(--line); background: var(--bg); }
-.bkw-decide-list .bkw-chips { padding: 0 4px 6px; }
+/* Filters share one row equally; empty ones are not shown. */
+.bkw-decide-list .bkw-chips { position: sticky; top: -12px; z-index: 1; margin-top: -12px; padding-top: 12px !important; background: var(--bg); flex: none; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 4px; padding: 0 4px 6px; }
+.bkw-decide-list .bkw-chip { min-width: 0; justify-content: center; gap: 3px; padding: 0 4px; font-size: 12px; white-space: nowrap; overflow: hidden; }
 .bkw-group h4 { padding: 12px 10px 6px; font-size: 12px; font-weight: 500; color: var(--ink3); }
 .bkw-li { display: grid; gap: 4px; width: 100%; padding: 10px 12px; border: 1px solid transparent; border-radius: 8px; background: none; text-align: left; }
 .bkw-li:hover { background: var(--surf); }
@@ -218,7 +220,7 @@ body[data-ds-dark-theme] .bkw, body[data-ds-dark-theme] .bkw-settings, body[data
 .bkw-keys { margin-top: auto; padding: 14px 10px 4px; font-size: 12px; color: var(--ink3); }
 kbd { font: 11px var(--mono); padding: 0 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--surf); margin-right: 2px; }
 
-.bkw-ws { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); min-height: 0; height: 100%; }
+.bkw-ws { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) var(--bkw-src, clamp(360px, 40%, 760px)); min-height: 0; height: 100%; }
 .bkw-ws-switch { display: none; }
 .bkw-ws-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--surf); }
 .bkw-ws-scroll { flex: 1; min-height: 0; overflow: auto; }
@@ -229,7 +231,20 @@ kbd { font: 11px var(--mono); padding: 0 5px; border: 1px solid var(--line); bor
 .bkw-ws-reason svg { flex: none; margin-top: 3px; color: var(--acc); }
 .bkw-ws-body { display: grid; gap: 16px; padding: 16px 28px 28px; max-width: 920px; }
 .bkw-ws-foot { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 10px 28px; border-top: 1px solid var(--line); background: var(--surf); }
-.bkw-ws-source { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--line); background: var(--surf2); }
+.bkw-ws-source { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--line); background: var(--surf2); }
+/* Drag handle on the source pane's left edge: a wide hit area with a thin line that lights up. */
+.bkw-resizer { position: absolute; top: 0; bottom: 0; left: -5px; width: 10px; z-index: 3; cursor: col-resize; touch-action: none; }
+.bkw-resizer::after { content: ""; position: absolute; top: 0; bottom: 0; left: 4px; width: 2px; background: transparent; transition: background .15s; }
+.bkw-resizer:hover::after, .bkw-resizer.on::after, .bkw-resizer:focus-visible::after { background: var(--acc); }
+.bkw-resizer:focus-visible { outline: none; }
+.bkw-drag-layer { position: fixed; inset: 0; z-index: 2; cursor: col-resize; }
+.bkw-ws-source .bkw-subtabs { align-items: center; }
+.bkw-ws-source .bkw-subtabs .bkw-expand { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; margin-left: auto; border: 0; border-radius: 6px; color: var(--ink2); }
+.bkw-ws-source .bkw-subtabs .bkw-expand:hover, .bkw-ws-source .bkw-subtabs .bkw-expand[aria-pressed=true] { background: var(--accS); color: var(--acc); }
+.bkw-decide-list[hidden] { display: none; }
+.bkw-decide.wide { grid-template-columns: 44px minmax(0, 1fr); }
+.bkw-decide-rail { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 0; border: 0; border-right: 1px solid var(--line); background: var(--bg); color: var(--ink2); font-size: 12px; cursor: pointer; }
+.bkw-decide-rail:hover { color: var(--acc); background: var(--accS); }
 .bkw-subtabs { flex: none; display: flex; gap: 20px; padding: 0 18px; border-bottom: 1px solid var(--line); }
 .bkw-subtabs button { height: 40px; padding: 0; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--ink3); font-size: 13px; }
 .bkw-subtabs button[aria-selected=true] { color: var(--acc); border-bottom-color: var(--acc); font-weight: 500; }
@@ -541,8 +556,8 @@ body[data-ds-dark-theme] .bkw-check-no { color: #1d1606; }
 .bkw-levels.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .bkw-suggest { border: 1px solid var(--acc); background: var(--accS); }
 .bkw-suggest h3 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--acc); }
-.bkw-match-line { flex-wrap: wrap; }
-.bkw-match-line .bkw-link { margin-left: 8px; }
+.bkw-match-line > span { flex: 1 1 auto; min-width: 0; }
+.bkw-match-line .bkw-link { flex: none; margin-left: 8px; white-space: nowrap; }
 .bkw-examples { display: grid; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
 .bkw-example-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 8px 12px; border-top: 1px solid var(--line2); }
 .bkw-example-row:first-child { border-top: 0; }
@@ -626,10 +641,12 @@ body[data-ds-dark-theme] .bkw-check-no { color: #1d1606; }
 .bkw-pick > span:last-child { display: grid; min-width: 0; }
 .bkw-pick small { font-size: 12px; color: var(--ink3); }
 @media (max-width: 1180px) {
-  .bkw-ws { grid-template-columns: minmax(0, 1fr) minmax(260px, 320px); }
   .bkw-decide { grid-template-columns: minmax(240px, 280px) minmax(0, 1fr); }
 }
 @media (max-width: 1000px) {
+  .bkw-resizer, .bkw-ws-source .bkw-subtabs .bkw-expand, .bkw-decide-rail { display: none; }
+  .bkw-decide.wide { grid-template-columns: minmax(240px, 280px) minmax(0, 1fr); }
+  .bkw-decide.wide .bkw-decide-list[hidden] { display: flex; }
   .bkw-chats { grid-template-columns: minmax(200px, 240px) minmax(0, 1fr); }
   .bkw-chat-side { display: none; }
   .bkw-ws { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
