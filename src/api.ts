@@ -103,7 +103,11 @@ export class WorkbenchApi {
   private async dispatch(body: any, signal: AbortSignal): Promise<unknown> {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new WorkbenchError('请求格式无效。')
     const uiLanguage = language(body.uiLanguage)
-    if (uiLanguage) this.engine.language = uiLanguage
+    if (uiLanguage) {
+      this.engine.language = uiLanguage
+      // Saved from the page's routine reads only, so other requests (e.g. drafting a workflow) stay free of side effects.
+      if (body.action === 'snapshot' || body.action === 'preferences') await this.engine.setLanguage(uiLanguage).catch(() => undefined)
+    }
     if (body.action === 'snapshot') return this.buildSnapshot()
     if (body.action === 'preferences') {
       const state = await this.engine.store.read()

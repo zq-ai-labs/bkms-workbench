@@ -64,8 +64,16 @@ export class Engine {
   /** Last-message time per conversation at the last successful poll; unchanged conversations are not queried. */
   private wechatSeen = new Map<string, string>()
   private wechatSweepAt = 0
-  /** Language of the most recent client request; used for scheduled generation. */
+  /** Interface language: AI-written review text follows it. Saved so background processing after a restart still knows it. */
   language: 'zh' | 'en' = 'zh'
+  async setLanguage(language: 'zh' | 'en'): Promise<void> {
+    this.language = language
+    if (this.savedLanguage === language) return
+    const state = await this.store.read()
+    if (state.uiLanguage !== language) await this.store.mutate(next => { next.uiLanguage = language })
+    this.savedLanguage = language
+  }
+  private savedLanguage?: 'zh' | 'en'
   constructor(readonly store: Store, private emailSource: () => EmailService | undefined, readonly agent: AgentRunner, readonly capabilities: () => Promise<unknown> = async () => ({ tools: [], skills: [] }), readonly triage?: TriageRunner, readonly writer?: WriterRunner, readonly wechat?: { service(settings: WechatSettings | undefined): WechatService | undefined; clear?(): Promise<void> }) {}
   email(): EmailService { const email = this.emailSource(); if (!email || email.version !== 1) throw new WorkbenchError('需要启用提供工作台接口的 dsh-email 本地构建。', 'email-unavailable', 503); return email }
   health() { return { email: this.emailSource()?.version === 1, agent: this.agent.available(), running: !!this.release && !this.stopping, lastPoll: this.lastPoll, error: this.error, triage: !!this.triage?.available(), writer: !!this.writer?.available(), wechat: this.wechatHealth() } }
@@ -77,6 +85,7 @@ export class Engine {
   async start(): Promise<void> {
     this.release = await this.store.ownWorker(error => { this.error = this.safe(error); void this.stop() }, true)
     try { await this.store.mutate(state => {
+      if (state.uiLanguage) { this.language = state.uiLanguage; this.savedLanguage = state.uiLanguage }
       for (const task of state.tasks) {
         if (task.status === 'running') { task.status = 'queued'; touch(task, '服务重启，恢复未完成的准备任务。') }
         if (task.status === 'sending') { task.status = 'uncertain'; task.error = '服务在发送期间重启，请核对发送记录。'; touch(task, task.error) }
@@ -317,7 +326,7 @@ export class Engine {
     const workspace = join(this.store.root, 'tasks', task.id)
     await mkdir(workspace, { recursive: true, mode: 0o700 })
     task.workspace = workspace
-    const result = await this.agent.run(task, task.rule!, signal)
+    const result = await this.agent.run(task, task.rule!, signal, { language: this.language })
     signal.throwIfAborted()
     const reply = task.rule!.output === 'reply' && !result.output.needsInfo
     if (reply && !result.output.text?.trim()) throw new WorkbenchError('DSH 未生成建议回复。')
@@ -420,7 +429,7 @@ export class Engine {
         }
       }
       await this.store.mutate(state => { const item = findTask(state, task!.id); Object.assign(item, originalMailFields(read), { body: task!.body, mailLoaded: true, attachments: task!.attachments, workspace, messageId: task!.messageId, references: task!.references, replyTo: task!.replyTo }); touch(item, '原邮件与资料已读取。') })
-      const result = await this.agent.run(task, task.rule, signal)
+      const result = await this.agent.run(task, task.rule, signal, { language: this.language })
       signal.throwIfAborted()
       let draftId = task.draftId, draftRevision: number | undefined
       if (task.rule.output === 'reply' && !result.output.needsInfo) {
