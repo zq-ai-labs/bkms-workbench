@@ -4,7 +4,7 @@
 
 | 文件 | 来源 | 修改 |
 | --- | --- | --- |
-| `db.py` | `wechatauto/db.py` | 日志改用标准 `logging`（不再替换 `sys.stdout`）；AES 解密改调 `_crypto.py`；zstd 依次尝试 `zstandard`、Python 3.14 的 `compression.zstd`、`_zstd.py`；诊断提示文字。读取逻辑未改。 |
+| `db.py` | `wechatauto/db.py` | 日志改用标准 `logging`（不再替换 `sys.stdout`）；AES 解密改调 `_crypto.py`；zstd 依次尝试 `zstandard`、Python 3.14 的 `compression.zstd`、`_zstd.py`；诊断提示文字；解密副本替换遇到 Windows 文件占用（WinError 5/32）时短暂重试，仍被占用就直接读新副本、下次再替换（`_replace_retry`，在 `_open_unlocked` 中标注 `bkms-workbench`）。其余读取逻辑未改。 |
 | `_crypto.py` | 新增 | AES-256-CBC：优先 `cryptography`，否则用 Windows 自带的 CNG（bcrypt.dll）；首次使用前做 NIST 已知答案自检。 |
 | `_zstd.py` | 新增 | 纯 Python 的 Zstandard 解压（RFC 8878），只用于兜底。 |
 
