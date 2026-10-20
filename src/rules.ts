@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { AUTONOMY, DEFAULT_EXCLUDE, SOURCE_KINDS, TRIAGE_CATEGORIES, WorkbenchError, type Rule, type TriageCategory } from './types.js'
+import { AUTONOMY, DEFAULT_EXCLUDE, SOURCE_KINDS, TRIAGE_CATEGORIES, WorkbenchError, type Confidence, type Rule, type TriageCategory } from './types.js'
 import { isPreparationTool } from './agent.js'
 const string = (v: unknown, max: number): string => { if (typeof v !== 'string' || v.length > max || v.includes('\0')) throw new WorkbenchError('规则字段格式或长度无效。'); return v.trim() }
 export function validateRule(input: any): Rule {
@@ -36,6 +36,10 @@ export function validateRule(input: any): Rule {
     const sources = [...new Set(input.sources)] as Rule['sources']
     if (!(sources!.length === 1 && sources![0] === 'email')) rule.sources = sources
   }
+  if (input.matchMode !== undefined) {
+    if (!['ai', 'literal'].includes(input.matchMode)) throw new WorkbenchError('匹配方式无效。')
+    if (input.matchMode === 'literal') rule.matchMode = 'literal'
+  }
   return rule
 }
 export const ruleExcludes = (rule: Rule): readonly TriageCategory[] => rule.exclude ?? DEFAULT_EXCLUDE
@@ -52,16 +56,33 @@ export function matches(rule: Rule, mail: { account: string; folder?: string; fr
   return !tests.length || (rule.match.mode === 'any' ? tests.some(Boolean) : tests.every(Boolean))
 }
 const byPriority = (rules: Rule[]) => [...rules].sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
+/** With AI triage switched off, routing is purely literal for every workflow (your explicit choice in settings). */
 export const chooseRule = (rules: Rule[], mail: Parameters<typeof matches>[1]): Rule | undefined => byPriority(rules).find(rule => matches(rule, mail))
 /** All enabled workflows whose literal conditions accept the mail, highest priority first. */
 export const candidateRules = (rules: Rule[], mail: Parameters<typeof matches>[1]): Rule[] => byPriority(rules).filter(rule => matches(rule, mail))
+export const ruleMode = (rule: Rule) => rule.matchMode ?? 'ai'
+/** Workflows that take every literal match without AI, highest priority first. */
+export const literalRules = (candidates: Rule[]): Rule[] => candidates.filter(rule => ruleMode(rule) === 'literal')
+export type MatchDecision = { rule?: Rule; by?: 'ai' | 'literal'; suggestion?: { rule: Rule; confidence: Confidence; reason: string }; needsAi?: number }
 /**
- * Pick the workflow after triage. An AI decision is authoritative among the literal
- * candidates; a heuristic decision only falls back to literal priority. Either way a
- * workflow never receives a category it excludes.
+ * Decide the workflow after triage. Workflows never receive a category they exclude.
+ * - AI available: its pick is applied only with high confidence (or when the pick is a literal-mode workflow);
+ *   otherwise a literal-mode candidate applies, and an uncertain AI pick becomes a suggestion for you to confirm.
+ * - Triage on but no AI decision (no model or the call failed): only literal-mode workflows apply; AI-mode
+ *   workflows are never assigned by guesswork. (Triage switched off uses `chooseRule`: literal for all.)
  */
-export function chooseAfterTriage(candidates: Rule[], category: TriageCategory, aiRuleId: string | undefined, decidedByAi: boolean): Rule | undefined {
+export function decideAfterTriage(candidates: Rule[], category: TriageCategory, ai?: { ruleId: string; confidence?: Confidence; reason?: string }): MatchDecision {
   const allowed = candidates.filter(rule => !ruleExcludes(rule).includes(category))
-  if (decidedByAi) return allowed.find(rule => rule.id === aiRuleId)
-  return allowed.find(rule => !rule.semantic) ?? allowed[0]
+  const literal = literalRules(allowed)[0]
+  if (ai) {
+    const picked = allowed.find(rule => rule.id === ai.ruleId)
+    const confidence = ai.confidence ?? 'medium'
+    if (picked && (confidence === 'high' || ruleMode(picked) === 'literal')) return { rule: picked, by: 'ai' }
+    if (literal) return { rule: literal, by: 'literal' }
+    if (picked) return { suggestion: { rule: picked, confidence, reason: ai.reason || '' } }
+    return {}
+  }
+  if (literal) return { rule: literal, by: 'literal' }
+  const needsAi = allowed.filter(rule => ruleMode(rule) === 'ai').length
+  return needsAi ? { needsAi } : {}
 }

@@ -3,13 +3,14 @@ import { mkdir } from 'node:fs/promises'
 import { open, stat, unlink } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import { join, basename } from 'node:path'
-import { candidateRules, chooseAfterTriage, chooseRule } from './rules.js'
+import { candidateRules, chooseRule, decideAfterTriage } from './rules.js'
+import { historyForPrompt, splitQuoted } from './quoted.js'
 import { originalMailFields } from './original-mail.js'
 import { Store, findTask, log, touch } from './store.js'
 import { heuristicTriage } from './triage.js'
 import { activityEntry, briefData, briefTemplate, localDate, localMinutes, parseClock, senderKey, startOfWeek, topicData, topicMatches, topicTemplate, weeklyData, weeklyTemplate } from './digest.js'
 import { appendPending, chatAllowed, chatKind, segmentDue, segmentTitle, segmentVerdict, transcript, wechatSettingsOf } from './wechat.js'
-import { WorkbenchError, now, type AgentOutput, type AgentRunner, type Check, type EmailService, type Rule, type Settings, type State, type Task, type TopicSummary, type TriageRunner, type WechatChat, type WechatPending, type WechatService, type WechatSettings, type WechatStatus, type WriterRunner } from './types.js'
+import { WorkbenchError, now, type AgentOutput, type AgentRunner, type Check, type EmailService, type Rule, type Settings, type State, type Task, type TopicSummary, type TriageRunner, type Confidence, type WechatChat, type WechatPending, type WechatService, type WechatSettings, type WechatStatus, type WriterRunner } from './types.js'
 
 const address = (entries: any[]): string => (entries || []).map(e => e.address || '').filter(Boolean).join(', ')
 const readableFrom = (entries: any[]): string => (entries || []).map(e => e.name ? `${e.name} <${e.address || ''}>` : e.address || '').filter(Boolean).join(', ')
@@ -22,6 +23,8 @@ export const settingsOf = (settings: Settings) => ({
 })
 const EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g
 const STALE_AUTO_SEND = 60 * 60000
+/** Most recent learned examples per workflow given to AI. */
+const EXAMPLES_IN_PROMPT = 8
 /** Deterministic bounds for an automatic reply. The model's own judgement is necessary but never sufficient. */
 export function autoSendDecision(rule: Rule, task: Task, output: AgentOutput, checks: Check[], prefs: State['senders']): { ok: true } | { ok: false; reason: string } {
   const autonomy = rule.autonomy ?? 'draft'
@@ -336,15 +339,24 @@ export class Engine {
     const state = await this.store.read()
     const meta = { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.hasAttachments === true || task.attachments.length > 0, kind: wechat ? 'wechat' as const : 'email' as const }
     const candidates = candidateRules(state.rules, meta)
-    const mail = { from: task.from, subject: task.subject, body: task.body.slice(0, 6000), hasAttachments: meta.hasAttachments, receivedAt: task.receivedAt, channel: meta.kind }
-    let result: { category: any; urgency: any; reason: string; nextStep: string; ruleId?: string }, by: 'ai' | 'heuristic' = 'heuristic'
+    // Replies carry the earlier exchange below the new text: classify by what was written now, read the rest as context.
+    const split = wechat ? { latest: task.body, history: [] } : splitQuoted(task.body)
+    const quotedHistory = historyForPrompt(split.history, 2500)
+    const mail = { from: task.from, subject: task.subject, body: split.latest.slice(0, 5000), ...(quotedHistory ? { quotedHistory } : {}), hasAttachments: meta.hasAttachments, receivedAt: task.receivedAt, channel: meta.kind }
+    // The workflow that handled the previous message of the same thread, when it is still a candidate.
+    const refs = new Set((task.references || '').split(/\s+/).map(ref => ref.replace(/[<>]/g, '')).filter(Boolean))
+    const previous = state.tasks.filter(item => item.id !== task.id && item.ruleId && item.messageId && refs.has(item.messageId.replace(/[<>]/g, ''))).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))[0]
+    const previousRule = previous && candidates.find(rule => rule.id === previous.ruleId)
+    const thread = previousRule ? { previousRule: { id: previousRule.id, name: previousRule.name } } : undefined
+    let result: { category: any; urgency: any; reason: string; nextStep: string; ruleId?: string; confidence?: Confidence; ruleReason?: string }, by: 'ai' | 'heuristic' = 'heuristic'
     if (this.triage?.available()) {
-      try { result = await this.triage.run({ mail, rules: candidates.map(rule => ({ id: rule.id, name: rule.name, semantic: rule.semantic || '', output: rule.output, hint: rule.instructions.slice(0, 400) })), uiLanguage: this.language }, AbortSignal.any([signal, AbortSignal.timeout(90000)])); by = 'ai' }
+      try { result = await this.triage.run({ mail, ...(thread ? { thread } : {}), rules: candidates.map(rule => ({ id: rule.id, name: rule.name, semantic: rule.semantic || '', output: rule.output, hint: rule.instructions.slice(0, 400), examples: (state.ruleExamples?.[rule.id] ?? []).slice(-EXAMPLES_IN_PROMPT).map(({ match, text }) => ({ match, text })) })), uiLanguage: this.language }, AbortSignal.any([signal, AbortSignal.timeout(90000)])); by = 'ai' }
       catch (error) { if (signal.aborted) throw error; result = heuristicTriage(mail); await this.store.mutate(doc => log(doc, `AI 分拣失败，已改用规则判断：${this.safe(error)}`, task.id, 'error')) }
     } else result = heuristicTriage(mail)
     signal.throwIfAborted()
     const sender = senderKey(task), keep = state.senders?.[sender]?.neverArchive === true
-    const rule = chooseAfterTriage(candidates, result.category, result.ruleId, by === 'ai')
+    const decision = decideAfterTriage(candidates, result.category, by === 'ai' ? { ruleId: result.ruleId || '', confidence: result.confidence, reason: result.ruleReason } : undefined)
+    const rule = decision.rule
     await this.store.mutate(doc => {
       const item = findTask(doc, task.id)
       if (item.status !== 'running') return
@@ -353,16 +365,24 @@ export class Engine {
       item.attempts = 0
       if (result.reason) touch(item, `AI 分拣：${result.reason}`)
       // WeChat is read-only: it is never archived silently, so nothing from a person disappears from view.
+      delete item.match
       if (rule) {
         item.rule = structuredClone(rule); item.ruleId = rule.id; item.ruleName = rule.name; item.status = 'queued'
+        item.match = { ruleId: rule.id, ruleName: rule.name, by: decision.by!, state: 'applied', ...(decision.by === 'ai' ? { confidence: result.confidence ?? 'high', reason: result.ruleReason || undefined } : { reason: '符合字面条件，方案设为“字面命中就处理”。' }), at: now() }
         touch(item, `命中方案「${rule.name}」，等待处理。`)
+      } else if (decision.suggestion) {
+        // Uncertain: offer the workflow instead of running it.
+        const { rule: suggested, confidence, reason } = decision.suggestion
+        item.status = 'unmatched'
+        item.match = { ruleId: suggested.id, ruleName: suggested.name, by: 'ai', state: 'suggested', confidence, reason: reason || undefined, at: now() }
+        touch(item, `AI 建议用方案「${suggested.name}」处理，但把握不足，等待你确认。`)
       } else if (!keep && !wechat && (result.category === 'notification' || result.category === 'marketing')) {
         item.status = 'ignored'; item.triage.archived = true
         touch(item, '已归档，可随时恢复。')
         doc.activity = [...(doc.activity || []), activityEntry({ kind: 'archive', title: item.subject || item.title, detail: result.reason, taskId: item.id, source: 'email' }, randomUUID())]
       } else {
         item.status = 'unmatched'
-        touch(item, result.category === 'fyi' ? '值得关注，无需处理方案；已列入今日简报。' : '没有合适的处理方案，可手动选择方案或忽略。')
+        touch(item, result.category === 'fyi' ? '值得关注，无需处理方案；已列入今日简报。' : decision.needsAi ? '有方案需要 AI 判断是否适用，但当前没有可用的 AI 判断，等待你选择。' : '没有合适的处理方案，可手动选择方案或忽略。')
       }
       log(doc, '信息已完成分拣。', item.id)
     })
