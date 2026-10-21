@@ -22,14 +22,15 @@
     "lib",
     "wechat/bridge.py",
     "wechat/wxread",
+    "src/mail/LICENSE",
+    "src/mail/NOTICE.md",
     "cordis.patch.yml",
     "README.md",
-    "docs",
-    "patches"
+    "docs"
   ],
   "scripts": {
     "build": "tsc && tsc -p tsconfig.client.json && node scripts/build-client.mjs",
-    "test": "pnpm run build && node --test test/*.test.mjs",
+    "test": "pnpm run build && node --test test/*.test.mjs test/mail/*.test.mjs",
     "check": "tsc --noEmit && tsc -p tsconfig.client.json",
     "pack:plugin": "pnpm run build && pnpm pack --pack-destination dist"
   },
@@ -50,14 +51,18 @@
     }
   },
   "dependencies": {
-    "proper-lockfile": "4.1.2"
+    "imapflow": "2.2.1",
+    "mailparser": "3.9.33",
+    "nodemailer": "10.0.13",
+    "proper-lockfile": "4.1.2",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/proper-lockfile": "4.1.4",
-    "typescript": "^5.9.3",
+    "@types/react": "~18.3.1",
     "esbuild": "^0.25.0",
     "react": "18.2.0",
-    "@types/react": "~18.3.1"
+    "typescript": "^5.9.3"
   }
 }

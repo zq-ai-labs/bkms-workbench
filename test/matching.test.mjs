@@ -9,14 +9,15 @@ import { WorkbenchApi } from '../lib/api.js'
 import { validateRule, decideAfterTriage } from '../lib/rules.js'
 import { parseTriage, heuristicTriage } from '../lib/triage.js'
 import { splitQuoted, historyForPrompt } from '../lib/quoted.js'
-import { mailInput } from '../lib/agent.js'
+import { mailInput, reviewLanguage, resultSchema } from '../lib/agent.js'
+import { readFileSync } from 'node:fs'
 
 const orderRule = { name: '订单处理', enabled: true, priority: 100, account: '', folder: 'INBOX', match: { from: '', subject: '', hasAttachments: false, mode: 'all' }, instructions: '处理客户下单、改单，生成确认回复。', tools: [], output: 'reply', maxRetries: 0, semantic: '客户正式下单或修改订单' }
 
 /** Mail fixture with a scriptable triage: `verdict(input)` returns the AI result. */
 async function fixture(t, { verdict, available = true } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'bkms-matching-'))
-  const store = new Store(root), drafts = new Map(), mails = new Map(), seen = []
+  const store = new Store(root), drafts = new Map(), mails = new Map(), seen = [], ran = []
   let inbox = [], uid = 10
   const email = {
     version: 1, accounts: () => [{ id: 'sales', address: 'sales@example.test', inboxFolder: 'INBOX' }],
@@ -28,7 +29,7 @@ async function fixture(t, { verdict, available = true } = {}) {
     },
   }
   const triage = { available: () => available, async run(input) { seen.push(structuredClone(input)); if (verdict === 'fail') throw new Error('model offline'); return { category: 'request', urgency: 'normal', reason: '客户来信。', nextStep: '', ruleId: '', ...verdict(input) } } }
-  const agent = { available: () => true, async run() { return { output: { summary: '已整理。', subject: 'Re', text: '您好，已收到。' }, sessionId: 's' } } }
+  const agent = { available: () => true, async run(task, rule, signal, options) { ran.push(options); return { output: { summary: '已整理。', subject: 'Re', text: '您好，已收到。' }, sessionId: 's' } } }
   const engine = new Engine(store, () => email, agent, undefined, triage), api = new WorkbenchApi(engine)
   await engine.start(); await engine.poll()
   t.after(async () => { await engine.stop(); await rm(root, { recursive: true, force: true }) })
@@ -36,7 +37,7 @@ async function fixture(t, { verdict, available = true } = {}) {
   const drain = async () => { for (let i = 0; i < 20 && (await store.read()).tasks.some(task => task.status === 'queued'); i++) await engine.processNext() }
   const task = async subject => (await api.snapshot()).tasks.find(item => item.subject === subject)
   const save = async rule => api.action({ action: 'saveRule', revision: (await store.read()).configRevision, rule })
-  return { store, engine, api, deliver, drain, task, save, seen }
+  return { store, engine, api, deliver, drain, task, save, seen, ran }
 }
 
 test('decision table: confident AI applies, uncertain AI suggests, literal mode needs no AI, no verdict never guesses', () => {
@@ -187,4 +188,33 @@ test('optional pages can be hidden from navigation; only known pages are accepte
   assert.deepEqual(saved.hiddenViews, ['today', 'meetings'])
   for (const bad of [['plans'], 'today', ['decide']]) await assert.rejects(f.api.action({ action: 'saveSettings', revision: (await f.store.read()).configRevision, settings: { hiddenViews: bad } }), /页签设置无效/)
   assert.deepEqual((await f.api.action({ action: 'preferences' })).settings.hiddenViews, ['today', 'meetings'])
+})
+
+test('review text follows the interface language, which is saved for background processing', async t => {
+  const { store, engine, api, deliver, drain, save, seen, ran } = await fixture(t, { verdict: input => ({ ruleId: input.rules[0]?.id ?? '', confidence: 'high' }) })
+  await save(orderRule)
+  await api.action({ action: 'snapshot', uiLanguage: 'en' })
+  assert.equal((await store.read()).uiLanguage, 'en', 'the language is saved')
+  await deliver('PO 88', 'Please book order PO-88 for 500 units.')
+  await drain()
+  assert.equal(seen.at(-1).uiLanguage, 'en')
+  assert.equal(ran.at(-1).language, 'en', 'the agent is told to write review text in English')
+  // A restarted engine picks the saved language up before any client request arrives.
+  await engine.stop()
+  const again = new Engine(store, () => undefined, { available: () => false, async run() { throw new Error('unused') } })
+  await again.start(); t.after(() => again.stop())
+  assert.equal(again.language, 'en')
+  // Prompts: the agent keeps the reply language to the workflow; triage explanations follow the interface.
+  assert.match(reviewLanguage('en'), /English/)
+  assert.match(reviewLanguage('en'), /checks 中的 item/)
+  assert.match(reviewLanguage('en'), /subject 和 text 的语言按规则要求决定/)
+  assert.match(reviewLanguage('zh'), /一律使用中文/)
+  assert.match(reviewLanguage('en'), /优先于上文规则要求/)
+  const schema = resultSchema('en').properties
+  for (const field of [schema.summary, schema.informationGaps, schema.needsInfo, schema.checks.items.properties.item]) assert.match(field.description, /英文（English）/)
+  assert.equal(schema.text.description, undefined, 'the reply draft keeps its own language')
+  // The language rule closes the preparation prompt, after the workflow text and skills.
+  const agentSource = readFileSync(new URL('../lib/agent.js', import.meta.url), 'utf8')
+  assert.match(agentSource, /skill\.content}`\)\.join\('\\n\\n'\)}\\n\\n\$\{reviewLanguage\(options\?\.language\)}`/)
+  assert.match(readFileSync(new URL('../lib/triage.js', import.meta.url), 'utf8'), /reason、nextStep、ruleReason 是给用户看的说明/)
 })

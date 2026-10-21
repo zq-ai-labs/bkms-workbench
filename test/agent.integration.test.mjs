@@ -93,6 +93,13 @@ test('real DSH isolated agent: scoped result, restricted tools, terminal errors 
   assert.match(JSON.stringify(observed.messages), /邮件写作规范/)
   assert.match(JSON.stringify(observed.messages), /未提供时不编造署名/)
   assert.equal(JSON.stringify(observed.messages).includes('UNSELECTED_SKILL_BODY'), false)
+  // Review text follows the interface language: the rule comes last (after the workflow and skills) and is repeated on the submit fields.
+  await runner.run(task, { ...rule, instructions: rule.instructions + '\nsummary 统一用中文。' }, new AbortController().signal, { language: 'en' })
+  const englishPrompt = JSON.stringify(observed.messages)
+  assert.ok(englishPrompt.lastIndexOf('输出语言｜最终要求') > englishPrompt.lastIndexOf('summary 统一用中文'), 'the language rule follows the workflow text')
+  assert.ok(englishPrompt.lastIndexOf('输出语言｜最终要求') > englishPrompt.lastIndexOf('SELECTED_SKILL_BODY'))
+  const submit = JSON.stringify(observed.tools.find(tool => tool.name === RESULT_TOOL))
+  assert.match(submit, /使用英文（English）书写/)
   assert.equal(ctx.agents.list().length, 0)
   assert.equal(accidentalSend, 0)
   const capabilities = await getCapabilities(ctx)

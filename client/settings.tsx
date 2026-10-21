@@ -6,8 +6,9 @@ import { FolderPicker } from "./plans";
 import { applySaved, refreshPreferences, settingsOf, usePreferences, type Settings } from "./store";
 import { Alert, Field, Modal, Switch, Tag } from "./ui";
 import { WechatSettingsCard } from "./wechat";
+import { MailAccountsCard } from "./mail-accounts";
 
-type MailInfo = { revision: number; accounts: { id: string; label: string; inboxFolder?: string }[]; health: { email: boolean; agent?: boolean; running?: boolean; lastPoll?: string; error?: string } };
+type MailInfo = { revision: number; accounts: { id: string; label: string; inboxFolder?: string }[]; health: { email: boolean; agent?: boolean; running?: boolean; lastPoll?: string; error?: string }; mail?: { configured: boolean } };
 const DAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 const SOURCE_NAME: Record<string, string> = { feishu: "飞书", wecom: "企业微信", meeting: "会议与日历" };
 const VIEWS: ["today" | "meetings" | "topics", string, string][] = [["today", "今日", "隐藏后打开工作台直接进入“待我决策”。每日简报仍会生成，可在“主题与报告”中查看。"], ["meetings", "会议", "还没有连接日历或会议平台时可以先隐藏。"], ["topics", "主题与报告", "隐藏后不再显示页签；事项上的主题链接仍可打开。"]];
@@ -21,11 +22,11 @@ export function WorkbenchSettings({ embedded }: { embedded?: boolean }) {
   const [mail, setMail] = useState<MailInfo>();
   const [interval, setIntervalValue] = useState(String(data.settings.pollSeconds));
   const [reset, setReset] = useState<{ account: string; folder: string; confirmed: boolean; revision: number }>();
-  const operation = useRef(false);
+  const operation = useRef(false), mailController = useRef<AbortController>();
+  const refreshMail = () => { const signal = mailController.current?.signal; void api<MailInfo>("mailSettings", {}, signal).then(setMail).catch(failure => { if (!signal?.aborted) setError(errorMessage(failure)); }); };
   useEffect(() => {
-    const controller = new AbortController();
+    const controller = new AbortController(); mailController.current = controller;
     refreshPreferences(controller.signal).then(() => setLoaded(true)).catch(failure => { if (!controller.signal.aborted) setError(errorMessage(failure)); });
-    const refreshMail = () => void api<MailInfo>("mailSettings", {}, controller.signal).then(setMail).catch(failure => { if (!controller.signal.aborted) setError(errorMessage(failure)); });
     refreshMail();
     const timer = setInterval(refreshMail, 10000);
     return () => { controller.abort(); clearInterval(timer); };
@@ -53,7 +54,8 @@ export function WorkbenchSettings({ embedded }: { embedded?: boolean }) {
     <div className="bkw-settings-body">
       {error && <Alert tone="danger" onClose={() => setError("")}>{systemMessage(error)}</Alert>}
       <section id="bkw-set-sources" className="bkw-set-card"><h3>{t("信息源")}</h3>
-        <div className="bkw-set-row"><span className="bkw-source-icon">{t("邮")}</span><span><strong>{t("邮箱")}</strong><small>{!mail ? t("正在加载…") : accounts.length ? t("{0} · 每 {1} 秒检查 · 最近检测 {2}", accounts.map(account => account.label).join("、"), data.settings.pollSeconds, mail.health.lastPoll ? dateTime(mail.health.lastPoll) : t("尚未检测")) : t("请先在邮件插件中配置邮箱账号。")}</small></span><Tag tone={ready ? "good" : mail?.health.email ? "warn" : "muted"}>{ready ? t("正常") : mail?.health.email ? t("等待服务") : t("未连接")}</Tag></div>
+        <MailAccountsCard disabled={!loaded} onChanged={refreshMail} tone={ready ? "good" : mail?.health.email ? "warn" : "muted"} label={ready ? t("正常") : mail?.health.email ? t("等待服务") : accounts.length ? t("未连接") : t("未添加")}
+          status={!mail ? t("正在加载…") : accounts.length ? t("{0} · 每 {1} 秒检查 · 最近检测 {2}", accounts.map(account => account.label).join("、"), data.settings.pollSeconds, mail.health.lastPoll ? dateTime(mail.health.lastPoll) : t("尚未检测")) : t("添加邮箱账号后，工作台自动接收新邮件、生成回复草稿。")} />
         <WechatSettingsCard value={(data.settings as Settings).wechat} disabled={disabled} save={(wechat, message) => save({ wechat }, message)} />
         {(["feishu", "wecom", "meeting"] as SourceKind[]).map(kind => <div key={kind} className="bkw-set-row"><span className="bkw-source-icon">{t(SOURCE[kind]).slice(0, 1)}</span><span><strong>{t(SOURCE_NAME[kind])}</strong><small>{t("需要安装对应的接入适配器后才能连接。工作台不会模拟未接入的来源。")}</small></span><Tag>{t("待接入")}</Tag></div>)}
         {mail?.health.error && <Alert tone="danger">{systemMessage(mail.health.error)}</Alert>}

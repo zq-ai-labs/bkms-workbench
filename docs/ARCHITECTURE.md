@@ -2,7 +2,12 @@
 
 ## 插件职责
 
-`dsh-email` 保持独立，提供 `ctx.emailWorkbench` v1 服务，复用账号、连接池、草稿、收件人策略和 SMTP 回执。`bkms-workbench` 消费服务，拥有规则、持久化任务、队列及前端。无核心源码修改；无重复邮箱凭据。
+邮件收发内置在 `bkms-workbench` 的 `src/mail/`（移植自 dsh-email，来源见 `src/mail/NOTICE.md`）：邮箱账号、IMAP/SMTP 连接池、草稿、收件人规则和 SMTP 回执都由工作台管理，不再需要单独安装 dsh-email，也不在对话中注册邮件工具。无核心源码修改。
+
+- **账号**：`<数据目录>/bkms-workbench/mail/accounts.json`（权限 0600），与发给页面的工作台状态分开；页面只看到“是否已设置授权码”。认证方式字段预留 OAuth2，目前只接受授权码。
+- **草稿**：`<数据目录>/bkms-workbench/mail/drafts/`，附件上传和预览下载走 `/api/bkms-workbench/drafts`。
+- **对其他插件**：`ctx.workbenchMail`（v1）只提供账号列表、搜索和读信；不提供发送，所有对外邮件都经工作台审核发送。
+- **与 dsh-email 并存**：仍安装 dsh-email 时工作台照常使用内置连接，并在设置中提示卸载，避免两套连接和对话里的邮件工具。
 
 ## 主要模块
 
@@ -10,6 +15,10 @@
 | --- | --- |
 | src/index.ts | Cordis 服务生命周期、依赖注入、鉴权 Connection 路由 |
 | src/store.ts | 格式校验、文件锁、原子存储、worker 所有权 |
+| src/mail/service.ts | 内置邮件服务：连接池生命周期、引擎使用的 `EmailService`、连接测试、对其他插件的只读接口 |
+| src/mail/accounts.ts | 邮箱账号存储与校验、服务商预设、收件人规则 |
+| src/mail/drafts.ts、draft-store.ts | 草稿保存、预览、发送锁与回执（移植） |
+| src/mail/mail-client.ts 等 | IMAP/SMTP、解析、HTML 排版、收件人规则（原样移植） |
 | src/rules.ts | 规则输入校验、条件匹配、优先级 |
 | src/engine.ts | 增量收件、去重、排队、重试、生成草稿 |
 | src/agent.ts | 隔离 DSH Agent、技能加载、精确工具授权、文件路径约束、结构化结果 |

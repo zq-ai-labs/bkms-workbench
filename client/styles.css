@@ -688,3 +688,21 @@ body[data-ds-dark-theme] .bkw-check-no { color: #1d1606; }
 
 /* Page content fills the window and stays centred on very wide screens, aligned with the full-width header. */
 .bkw-pad, .bkw-today, .bkw-split, .bkw-topic, .bkw-report-editor, .bkw-plan-form { box-sizing: border-box; width: 100%; max-width: 1920px; margin-inline: auto; }
+/* Built-in mailbox accounts */
+.bkw-mail-accounts { display: grid; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
+.bkw-mail-account { display: flex; align-items: center; gap: 8px; padding: 10px 14px; }
+.bkw-mail-account + .bkw-mail-account { border-top: 1px solid var(--line2); }
+.bkw-mail-account > span { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.bkw-mail-account strong { display: flex; align-items: center; gap: 8px; font-weight: 500; overflow-wrap: anywhere; }
+.bkw-mail-account small { font-size: 12px; color: var(--ink3); }
+.bkw-mail-form { display: grid; gap: 14px; }
+.bkw-mail-form textarea { resize: vertical; }
+.bkw-mail-server { display: grid; grid-template-columns: minmax(0, 1fr) 90px auto; align-items: end; gap: 10px; }
+.bkw-mail-server label { display: grid; gap: 4px; font-size: 12px; color: var(--ink2); }
+.bkw-mail-server .bkw-checkbox { display: flex; height: 34px; }
+.bkw-mail-tests { display: grid; gap: 6px; }
+.bkw-mail-test { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; color: var(--ink2); overflow-wrap: anywhere; }
+.bkw-mail-form .bkw-dialog-actions { align-items: center; }
+.bkw-mail-form .bkw-spacer { flex: 1; }
+@media (max-width: 560px) { .bkw-mail-server { grid-template-columns: minmax(0, 1fr) 80px; } .bkw-mail-account { flex-wrap: wrap; } }
+.bkw-mail-preset { margin: -8px 0 0; font-size: 12px; color: var(--ink3); overflow-wrap: anywhere; }

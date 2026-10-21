@@ -95,3 +95,81 @@ class ZstdTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# 真实的 rel 来自 os.path.relpath，Windows 上是反斜杠
+REL = os.path.join("contact", "contact.db")
+
+
+class LockedCopyTest(unittest.TestCase):
+    """Windows 上解密副本被占用（另一读取进程、杀毒扫描）时，读取不应报错。"""
+
+    def reader(self, tmp, plain):
+        import shutil
+        r = db.WeChatDB.__new__(db.WeChatDB)
+        r._keys = {REL: b"k" * 32}
+        r.workdir = tmp
+        src = os.path.join(tmp, "src-contact.db")
+        shutil.copyfile(plain, src)
+        r._db_path = lambda rel: src
+        r._decrypt_file = lambda s, d, k: shutil.copyfile(plain, d)
+        return r, src
+
+    def plain_db(self, tmp, value):
+        path = os.path.join(tmp, "plain-%s.db" % value)
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE t(x TEXT)")
+        conn.execute("INSERT INTO t VALUES (?)", (value,))
+        conn.commit(); conn.close()
+        return path
+
+    def test_locked_copy_is_read_from_a_fresh_file_and_replaced_later(self):
+        real = os.replace
+        locked = {"on": True, "calls": 0}
+
+        def replace(src, dst):
+            if locked["on"] and dst.endswith("contact__contact.db"):
+                locked["calls"] += 1
+                raise PermissionError(5, "拒绝访问")
+            return real(src, dst)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            r, src = self.reader(tmp, self.plain_db(tmp, "新"))
+            dst = os.path.join(tmp, "contact__contact.db")
+            db.os.replace, db.time.sleep = replace, (lambda s: None)
+            try:
+                conn = r._open(REL)
+                self.assertEqual(conn.execute("SELECT x FROM t").fetchone()[0], "新")
+                conn.close()
+                self.assertGreater(locked["calls"], 1, "retries before giving up")
+                self.assertFalse(os.path.exists(dst))
+                self.assertFalse(os.path.exists(dst + ".stamp"), "no stamp, so the next read retries the replace")
+                # The lock is gone: the next read installs the copy normally.
+                locked["on"] = False
+                conn = r._open(REL)
+                self.assertEqual(conn.execute("SELECT x FROM t").fetchone()[0], "新")
+                conn.close()
+                self.assertTrue(os.path.exists(dst) and os.path.exists(dst + ".stamp"))
+            finally:
+                db.os.replace = real
+                import time as _time
+                db.time.sleep = _time.sleep
+
+    def test_short_lock_is_retried(self):
+        real, calls = os.replace, {"n": 0}
+
+        def replace(src, dst):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise PermissionError(32, "另一个程序正在使用此文件")
+            return real(src, dst)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = os.path.join(tmp, "a"), os.path.join(tmp, "b")
+            open(a, "w").close()
+            db.os.replace = replace
+            try:
+                self.assertTrue(db._replace_retry(a, b))
+            finally:
+                db.os.replace = real
+            self.assertTrue(os.path.exists(b))

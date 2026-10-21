@@ -123,7 +123,7 @@
 | 组件 | 实际来源与状态 |
 | --- | --- |
 | bkms-workbench | 0.1.1，独立私有源码仓库 `https://github.com/zq-ai-labs/bkms-workbench`，版本以实际检出的 Git commit 为准 |
-| dsh-email | 0.16.2，基于 `43dc6367de1ee17408769ba44a7ec4bd7199df79`；工作台接口及配套改动保存为 `patches/dsh-email-workbench.patch`，恢复见 `docs/RESTORE.md` |
+| 邮件模块 | 内置于 `src/mail/`，移植自 dsh-email 0.16.2（`43dc6367de1ee17408769ba44a7ec4bd7199df79`）及原工作台补丁；来源与修改见 `src/mail/NOTICE.md`。早期版本使用的独立 dsh-email 插件与补丁已不再需要 |
 | 主 DSH | 0.2.0-rc.2，`b2d152caa7a14b75d56771f2cdd130d5505bbe69`；核心已有用户品牌改动，本次未修改 |
 | BKMS DSH | 0.1.6-alpha.2，`6079a921d0d4d66169102ec2b0903439d23e2a22`，额外验证 Agent 接口兼容 |
 | 构建工具 | Node 22.23.1、pnpm 11.7.0；DSH Profile 安装器自行使用内置 pnpm 12.3.4 |
@@ -229,3 +229,10 @@ pnpm run build（服务端/客户端类型检查与前端打包）通过，git d
 指定 DSH_SOURCE_ROOT 后 pnpm test：38/38 通过，含真实 DSH 替身集成、过期配置拒绝、轻量设置返回及并发检测/重建基线；pnpm run build 与 git diff --check 通过。合成浏览器 check-mail-settings.cjs 通过：旧入口移除、恢复默认折叠、未确认禁用、选择账号及文件夹后显式确认重建、中英文、深浅色、1500/1000/800/520/390px 无横向溢出，无页面异常。截图 mail-settings-light.png、mail-settings-390-dark-en.png 位于工作区 runtime/dev/bkms-workbench/validation/。
 
 未操作真实邮件、任务或方案，未调用真实模型或发送邮件。此次仅修改源码并构建，未更新 XBuddy 已安装 tgz，未提交或推送。
+
+## 内置邮件模块（替代 dsh-email 插件）
+
+- 移植的上游测试放在 `test/mail/`（14 个文件，去掉对话工具、发信审批和设置页相关用例），全部通过；与上游在同一提交下运行结果一致。
+- `test/mail-builtin.test.mjs`：账号校验与存储（授权码不发给页面、文件权限 0600、留空不修改、修订号冲突）、服务商预设（含腾讯企业邮箱）、收件人规则转换、账号变更重建连接而规则变更不重连、对其他插件的接口没有发送、连接测试分别报告收信和发信且不泄露授权码，以及“基线 → 新邮件 → 草稿 → 预览 → 确认发送”经内置服务的完整流程（替身连接池）。
+- 设置页“邮箱”卡片和账号编辑器在中英文、浅色/深色下做过截图检查。
+- 未验证：真实邮箱的 IMAP/SMTP 登录与发送（需用户在本机用测试邮箱验证）；真实 DSH 中 `ctx.provide('workbenchMail')` 的注入与 dsh-email 并存提示。

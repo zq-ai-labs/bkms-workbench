@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import type { MailService } from './mail/service.js'
+import { MAIL_PROVIDERS, MailAccountError, presetOf } from './mail/accounts.js'
 import { readFile } from 'node:fs/promises'
 import { Engine, settingsOf } from './engine.js'
 import { originalMailFields } from './original-mail.js'
@@ -38,7 +40,7 @@ export class WorkbenchApi {
   private drains = new Set<() => void>()
   private generating = false
   private controller = new AbortController()
-  constructor(readonly engine: Engine, private ruleAssistant?: RuleAssistant, private instructionOptimizer?: InstructionOptimizer) {}
+  constructor(readonly engine: Engine, private ruleAssistant?: RuleAssistant, private instructionOptimizer?: InstructionOptimizer, private mail?: MailService) {}
   /** Stop admitting new requests, then wait for accepted actions and receipts. */
   async close(): Promise<void> {
     this.accepting = false
@@ -99,11 +101,34 @@ export class WorkbenchApi {
       ruleExamples: state.ruleExamples ?? {},
     }
   }
+  /** Built-in mailbox accounts: list, save, remove, set default, test a login. Passwords never leave the server. */
+  private async mailAccounts(body: any, signal: AbortSignal): Promise<unknown> {
+    const mail = this.mail!
+    const list = async () => ({ ...(await mail.views()), providers: MAIL_PROVIDERS, presets: Object.fromEntries(MAIL_PROVIDERS.map(name => [name, presetOf(name)]).filter(([, preset]) => preset)), externalPlugin: mail.externalPlugin })
+    if (body.action === 'mailAccounts') return list()
+    const revision = body.revision
+    if (!Number.isSafeInteger(revision) && body.action !== 'testMailAccount') throw new WorkbenchError('请刷新后重试。')
+    try {
+      if (body.action === 'testMailAccount') return await mail.test(body.account, AbortSignal.any([signal, AbortSignal.timeout(60000)]))
+      if (body.action === 'saveMailAccount') await mail.saveAccount(body.account, revision)
+      else if (body.action === 'removeMailAccount') { if (body.confirmed !== true || typeof body.id !== 'string') throw new WorkbenchError('请确认删除该邮箱账号。'); await mail.removeAccount(body.id, revision) }
+      else if (body.action === 'defaultMailAccount') { if (typeof body.id !== 'string') throw new WorkbenchError('账号无效。'); await mail.setDefault(body.id, revision) }
+      else throw new WorkbenchError('不支持的操作。')
+    } catch (error) {
+      if (error instanceof MailAccountError) throw new WorkbenchError(error.message, error.code, error.code === 'mail-account-conflict' ? 409 : 400)
+      throw error
+    }
+    return list()
+  }
   action(body: any, signal: AbortSignal = new AbortController().signal): Promise<unknown> { return this.tracked(() => this.dispatch(body, signal)) }
   private async dispatch(body: any, signal: AbortSignal): Promise<unknown> {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new WorkbenchError('请求格式无效。')
     const uiLanguage = language(body.uiLanguage)
-    if (uiLanguage) this.engine.language = uiLanguage
+    if (uiLanguage) {
+      this.engine.language = uiLanguage
+      // Saved from the page's routine reads only, so other requests (e.g. drafting a workflow) stay free of side effects.
+      if (body.action === 'snapshot' || body.action === 'preferences') await this.engine.setLanguage(uiLanguage).catch(() => undefined)
+    }
     if (body.action === 'snapshot') return this.buildSnapshot()
     if (body.action === 'preferences') {
       const state = await this.engine.store.read()
@@ -114,9 +139,17 @@ export class WorkbenchApi {
       const state = await this.engine.store.read()
       const health = this.engine.health()
       let accounts: { id: string; label: string; inboxFolder: string }[] = []
-      try { accounts = (await this.engine.email().accounts()).map(account => ({ id: account.id, label: account.address || account.id, inboxFolder: account.inboxFolder || 'INBOX' })) }
-      catch (error) { health.error = this.engine.safe(error) }
-      return { revision: state.configRevision, accounts, health }
+      const mail = this.mail?.status()
+      if (mail?.error) health.error = mail.error
+      else if (!this.mail || mail?.configured) {
+        try { accounts = (await this.engine.email().accounts()).map(account => ({ id: account.id, label: account.address || account.id, inboxFolder: account.inboxFolder || 'INBOX' })) }
+        catch (error) { health.error = this.engine.safe(error) }
+      }
+      return { revision: state.configRevision, accounts, health, mail: { builtIn: !!this.mail, configured: mail?.configured ?? accounts.length > 0, externalPlugin: this.mail?.externalPlugin === true } }
+    }
+    if (typeof body.action === 'string' && body.action.endsWith('MailAccount') || body.action === 'mailAccounts') {
+      if (!this.mail) throw new WorkbenchError('当前版本没有内置邮箱。')
+      return this.mailAccounts(body, signal)
     }
     if (body.action === 'folders') {
       const email = this.engine.email(), accounts = await email.accounts()
