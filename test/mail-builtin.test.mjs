@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, stat, readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, stat, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
@@ -112,6 +112,45 @@ test('connection test reports IMAP and SMTP separately and hides the authorizati
   assert.equal((await mail.views()).revision, 0, 'testing never saves')
 })
 
+test('connection test does not wait on a silent SMTP server once the IMAP login is refused', async t => {
+  const { mail } = await setup(t)
+  // Accepts the connection and never answers, like a server holding a rejected login.
+  const sockets = [], silent = createServer(socket => sockets.push(socket))
+  await new Promise(resolve => silent.listen(0, '127.0.0.1', resolve))
+  t.after(() => { for (const socket of sockets) socket.destroy(); silent.close() })
+  const started = Date.now()
+  const result = await mail.test({ provider: 'custom', user: 'a@example.test', password: 'synthetic-auth-code', imap: { host: '127.0.0.1', port: 993 }, smtp: { host: '127.0.0.1', port: silent.address().port, secure: false } })
+  assert.ok(Date.now() - started < 5000, 'answers without waiting for SMTP')
+  assert.equal(result.imap.ok, false); assert.equal(result.smtp.ok, false)
+  assert.match(result.smtp.error, /未继续测试发信/)
+})
+
+test('drafts of the old dsh-email plugin are imported once, without taking over its files', async t => {
+  const { root, mail } = await setup(t)
+  const legacy = join(root, 'dsh-email', 'drafts-v1.json'), id = '1826a76e-5eec-4c46-a4b2-dba12464f008', at = new Date().toISOString()
+  const draft = { id, revision: 2, account: 'old', to: 'buyer@example.test', cc: '', subject: '报价', text: '您好', attachments: [{ id: '2f396b3e-15b3-422c-9d91-49939d5d9b5f', path: join(root, 'dsh-email', 'draft-uploads', id, 'a.pdf'), filename: 'a.pdf', owned: true }], state: 'sent', createdAt: at, updatedAt: at }
+  assert.equal(await mail.importLegacyDrafts(legacy), 0, 'no old file: nothing to do')
+  await mkdir(join(root, 'dsh-email'), { recursive: true })
+  await writeFile(legacy, '{ not json')
+  assert.equal(await mail.importLegacyDrafts(legacy), 0, 'an unreadable old file is ignored')
+  await writeFile(legacy, JSON.stringify({ version: 1, drafts: [draft] }))
+  assert.equal(await mail.importLegacyDrafts(legacy), 1)
+  const [imported] = await mail.drafts.store.list()
+  assert.equal(imported.state, 'sent'); assert.equal(imported.attachments[0].owned, false, 'the old plugin keeps its files')
+  await writeFile(legacy, JSON.stringify({ version: 1, drafts: [draft, { ...draft, id: '3f396b3e-15b3-422c-9d91-49939d5d9b5f' }] }))
+  assert.equal(await mail.importLegacyDrafts(legacy), 0, 'only once: the built-in store is never overwritten')
+  assert.equal((await mail.drafts.store.list()).length, 1)
+})
+
+test('a broken old draft file never blocks the built-in draft store', async t => {
+  const { root, mail } = await setup(t)
+  const legacy = join(root, 'dsh-email', 'drafts-v1.json')
+  await mkdir(join(root, 'dsh-email'), { recursive: true })
+  await writeFile(legacy, JSON.stringify({ version: 1, drafts: [{ id: 'not-a-uuid' }] }))
+  assert.equal(await mail.importLegacyDrafts(legacy), 0)
+  assert.deepEqual(await mail.drafts.store.list(), [])
+})
+
 test('end to end through the built-in service: baseline, new mail, draft, reviewed send', async t => {
   const { root, mail, pool } = await setup(t)
   const store = new Store(join(root, 'data'))
@@ -144,4 +183,12 @@ test('end to end through the built-in service: baseline, new mail, draft, review
   assert.equal(pool.state.sends.length, 1)
   assert.deepEqual(pool.state.sends[0][7], { inReplyTo: 'm11@example.test', references: 'm11@example.test' })
   assert.equal((await api.snapshot()).tasks[0].status, 'sent')
+  // A finished task whose draft is gone (e.g. kept by the old dsh-email plugin) is history: no workbench-wide warning.
+  await store.mutate(doc => { doc.tasks[0].draftId = '00000000-0000-4000-8000-000000000000' })
+  let snapshot = await api.snapshot()
+  assert.equal(snapshot.health.error, undefined); assert.equal(snapshot.tasks[0].draft, undefined)
+  // A task still waiting for review does need its draft, so that is still reported.
+  await store.mutate(doc => { doc.tasks[0].status = 'review' })
+  snapshot = await api.snapshot()
+  assert.match(snapshot.health.error, /草稿无法读取/)
 })

@@ -14,11 +14,11 @@ import { renderEmailHtml } from '../../lib/mail/email-format.js'
 
 const config = { provider: 'qq', user: 'user@example.test', password: 'test-secret' }
 function mailbox(uids = [1, 3, 5]) {
-  const calls = [], client = { mailbox: { uidValidity: 42 }, async search(query) { calls.push(query); return uids } }
+  const calls = [], opens = [], client = { mailbox: { uidValidity: 42 }, async mailboxOpen(folder, options) { opens.push([folder, options]) }, async search(query) { calls.push(query); return uids } }
   const pool = new EmailPool(resolveEmailSettings(config))
   pool.withImap = async (_account, _folder, run) => run(client)
   pool.fetchListed = async (_client, batch) => batch.map(uid => ({ uid, seen: true }))
-  return { pool, calls, client }
+  return { pool, calls, opens, client }
 }
 
 test('incremental polling seeds history then includes already-read new mail in ascending bounded batches', async () => {
@@ -32,6 +32,8 @@ test('incremental polling seeds history then includes already-read new mail in a
   assert.deepEqual(x.calls[1], { uid: '2:*' })
   const pending = await x.pool.scanChanges('default', 'INBOX', { uidValidity: 42, lastUid: 1 }, 1)
   assert.equal(pending.hasMore, true); assert.equal(pending.cursor.lastUid, 3)
+  // bkms-workbench: every scan re-selects the folder, so a pooled connection still sees new mail.
+  assert.deepEqual(x.opens, [['INBOX', { readOnly: true }], ['INBOX', { readOnly: true }], ['INBOX', { readOnly: true }]])
 })
 
 test('UIDVALIDITY change fails before fetching and never silently advances a persisted cursor', async () => {

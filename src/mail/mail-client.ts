@@ -886,6 +886,10 @@ export class EmailPool {
     const name = this.resolveName(accountName), folderName = folder || this.account(name).inboxFolder
     if (cursor && (!Number.isSafeInteger(cursor.uidValidity) || cursor.uidValidity < 1 || !Number.isSafeInteger(cursor.lastUid) || cursor.lastUid < 0)) throw new MailError('邮件增量游标无效')
     return this.withImap(name, folderName, async client => {
+      // bkms-workbench: a pooled connection keeps the folder selected between polls, and some servers (Tencent
+      // Exmail among them) never report new mail on it, so UID SEARCH keeps missing it. Re-select for a fresh view.
+      await client.mailboxOpen(folderName, { readOnly: true })
+      signal?.throwIfAborted()
       const uidValidity = this.uidValidityOf(client)
       if (!uidValidity) throw new MailError('邮箱服务器未返回 UIDVALIDITY，不能安全执行增量收件')
       if (cursor && cursor.uidValidity !== uidValidity) {
