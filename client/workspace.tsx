@@ -332,7 +332,7 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
       <button type="button" className="bkw-icon-btn bkw-expand" aria-pressed={layout.expanded} aria-label={layout.expanded ? t("恢复宽度") : t("展开阅读")} title={layout.expanded ? t("恢复宽度（Esc）") : t("展开阅读")} onClick={() => setSourceExpanded(!layout.expanded)}><Icon name={layout.expanded ? "collapse" : "expand"} size={15} /></button>
       </div>
       <div className="bkw-ws-source-body">
-        {sourceTab === "mail" && wechat && task.wechat && <ChatHistory chat={task.wechat.chat} group={task.wechat.group} current={task.id} />}
+        {sourceTab === "mail" && wechat && task.wechat && <ChatHistory key={task.wechat.chat} chat={task.wechat.chat} group={task.wechat.group} current={task.id} />}
         {sourceTab === "mail" && !wechat && <>
           <div className="bkw-mail-head">
             <strong>{task.subject || t("无主题邮件")}</strong>

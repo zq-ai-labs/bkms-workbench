@@ -19,6 +19,23 @@ export function chatAllowed(settings: WechatSettings | undefined, id: string): b
 }
 const initial = (name: string) => [...(name || "?").replace(/[\s·@]/g, "")][0] || "?";
 
+// The last answers seen in this page load. Views show them at once and refresh quietly, so switching views does not start from a blank list.
+let chatCache: WechatChat[] | undefined;
+const historyCache = new Map<string, { messages: WechatMessage[]; more: boolean }>();
+const remember = (chat: string, value: { messages: WechatMessage[]; more: boolean }) => { historyCache.delete(chat); historyCache.set(chat, value); if (historyCache.size > 30) historyCache.delete(historyCache.keys().next().value!); };
+
+/** The WeChat session list: cached copy first, then the latest; an error shows only while there is nothing to show. */
+function useWechatChats(enabled: boolean, refreshKey?: unknown): { chats?: WechatChat[]; error: string } {
+  const [chats, setChats] = useState(chatCache), [error, setError] = useState("");
+  useEffect(() => {
+    if (!enabled) { chatCache = undefined; historyCache.clear(); return; }
+    const controller = new AbortController();
+    api<WechatChat[]>("wechatChats", {}, controller.signal).then(list => { chatCache = list; setChats(list); setError(""); }).catch(failure => { if (!controller.signal.aborted) setError(errorMessage(failure)); });
+    return () => controller.abort();
+  }, [enabled, refreshKey]);
+  return { chats, error: chats ? "" : error };
+}
+
 /** A WeChat-style transcript: others on the left, you on the right in green. */
 export function Bubbles({ messages, group, highlight, after }: { messages: WechatMessage[]; group: boolean; highlight?: (message: WechatMessage) => boolean; after?: (message: WechatMessage) => React.ReactNode }) {
   let last = 0;
@@ -56,18 +73,18 @@ export function SegmentConversation({ task }: { task: Task }) {
 /** Full chat history of an allowed conversation, read page by page, with the tasks found in it marked inline. */
 export function ChatHistory({ chat, group, current }: { chat: string; group: boolean; current?: string }) {
   const { data, go } = useWorkbench();
-  const [pages, setPages] = useState(1), [state, setState] = useState<{ messages: WechatMessage[]; more: boolean }>(), [error, setError] = useState(""), [loading, setLoading] = useState(false);
+  const [pages, setPages] = useState(1), [state, setState] = useState(() => historyCache.get(chat)), [error, setError] = useState(""), [loading, setLoading] = useState(false);
   const tasks = useMemo(() => data.tasks.filter(task => task.wechat?.chat === chat), [data.tasks, chat]);
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true); setError("");
     api<{ messages: WechatMessage[]; more: boolean }>("wechatHistory", { chat, offset: 0, limit: 50 * pages }, controller.signal)
-      .then(setState).catch(failure => { if (!controller.signal.aborted) setError(errorMessage(failure)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+      .then(value => { if (pages === 1) remember(chat, value); setState(value); setError(""); }).catch(failure => { if (!controller.signal.aborted) setError(errorMessage(failure)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [chat, pages, data.tasks.length]);
-  if (error) return <Alert tone="danger">{systemMessage(error)}</Alert>;
-  if (!state) return <p className="bkw-muted">{t("正在读取聊天记录…")}</p>;
+  if (!state) return error ? <Alert tone="danger">{systemMessage(error)}</Alert> : <p className="bkw-muted">{t("正在读取聊天记录…")}</p>;
   return <div className="bkw-history">
+    {error && <Alert tone="warn">{systemMessage(error)}</Alert>}
     {state.more && <button type="button" className="bkw-btn small ghost bkw-history-more" disabled={loading} onClick={() => setPages(pages + 1)}>{loading ? t("读取中…") : t("加载更早的消息")}</button>}
     {!state.messages.length && <p className="bkw-muted">{t("这个会话还没有消息。")}</p>}
     <Bubbles messages={state.messages} group={group}
@@ -84,13 +101,8 @@ export function ChatHistory({ chat, group, current }: { chat: string; group: boo
 export function ChatsView() {
   const { data, go, perform, refresh, notify } = useWorkbench();
   const settings = data.wechat?.settings;
-  const [chats, setChats] = useState<WechatChat[]>(), [error, setError] = useState(""), [selected, setSelected] = useState<string>(), [search, setSearch] = useState("");
-  useEffect(() => {
-    if (!settings?.enabled) return;
-    const controller = new AbortController();
-    api<WechatChat[]>("wechatChats", {}, controller.signal).then(setChats).catch(failure => { if (!controller.signal.aborted) setError(errorMessage(failure)); });
-    return () => controller.abort();
-  }, [settings?.enabled, data.revision]);
+  const { chats, error } = useWechatChats(!!settings?.enabled, data.revision);
+  const [selected, setSelected] = useState<string>(), [search, setSearch] = useState("");
   if (!settings?.enabled) return <div className="bkw-pad"><Empty icon="chat" title={t("微信读取未开启")} text={t("在设置中开启微信读取，并选择要处理的联系人和群聊。工作台只读，不会代你发送。")}><button type="button" className="bkw-btn primary" onClick={() => go({ view: "settings" })}>{t("前往设置")}</button></Empty></div>;
   const visible = (chats || []).filter(chat => chatAllowed(settings, chat.id));
   // Listed chats that are not among recent sessions still appear.
@@ -197,8 +209,8 @@ export function WechatSettingsCard({ value, disabled, save }: { value?: WechatSe
 }
 
 function ChatPicker({ kind, existing, onClose, onAdd }: { kind: ListKey; existing: string[]; onClose: () => void; onAdd: (chats: WechatChat[]) => void }) {
-  const [chats, setChats] = useState<WechatChat[]>(), [error, setError] = useState(""), [query, setQuery] = useState(""), [found, setFound] = useState<WechatChat[]>([]), [chosen, setChosen] = useState<WechatChat[]>([]);
-  useEffect(() => { const controller = new AbortController(); api<WechatChat[]>("wechatChats", {}, controller.signal).then(setChats).catch(failure => { if (!controller.signal.aborted) setError(errorMessage(failure)); }); return () => controller.abort(); }, []);
+  const { chats, error: listError } = useWechatChats(true);
+  const [error, setError] = useState(""), [query, setQuery] = useState(""), [found, setFound] = useState<WechatChat[]>([]), [chosen, setChosen] = useState<WechatChat[]>([]);
   const want = kind === "groups" ? "group" : "person";
   const q = query.trim().toLowerCase();
   const pool = [...(chats || []), ...found].filter((chat, index, all) => chat.kind === want && !existing.includes(chat.id) && all.findIndex(item => item.id === chat.id) === index && (!q || chat.name.toLowerCase().includes(q) || chat.id.toLowerCase().includes(q))).slice(0, 200);
@@ -208,9 +220,9 @@ function ChatPicker({ kind, existing, onClose, onAdd }: { kind: ListKey; existin
       <input autoFocus aria-label={t("搜索名称或备注")} placeholder={t("搜索名称或备注，回车查找更多")} value={query} onChange={event => setQuery(event.target.value)} />
       <button type="submit" className="bkw-btn small" disabled={!q}>{t("查找")}</button>
     </form>
-    {error && <Alert tone="danger">{systemMessage(error)}</Alert>}
+    {(error || listError) && <Alert tone="danger">{systemMessage(error || listError)}</Alert>}
     <div className="bkw-pick-list">
-      {!chats && !error && <p className="bkw-muted">{t("正在读取会话…")}</p>}
+      {!chats && !listError && <p className="bkw-muted">{t("正在读取会话…")}</p>}
       {chats && !pool.length && <p className="bkw-muted">{t("没有找到，可输入名称后回车查找。")}</p>}
       {pool.map(chat => <label key={chat.id} className="bkw-pick"><input type="checkbox" checked={chosen.some(item => item.id === chat.id)} onChange={() => toggle(chat)} /><span className="bkw-avatar small" style={{ background: avatarColor(chat.id) }} aria-hidden="true">{chat.kind === "group" ? t("群") : initial(chat.name)}</span><span><strong>{chat.name}</strong><small>{chat.lastAt ? t("最近消息 {0}", fullDate(chat.lastAt)) : chat.id}</small></span></label>)}
     </div>
