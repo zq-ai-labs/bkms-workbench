@@ -97,13 +97,17 @@ if __name__ == "__main__":
     unittest.main()
 
 
+# 真实的 rel 来自 os.path.relpath，Windows 上是反斜杠
+REL = os.path.join("contact", "contact.db")
+
+
 class LockedCopyTest(unittest.TestCase):
     """Windows 上解密副本被占用（另一读取进程、杀毒扫描）时，读取不应报错。"""
 
     def reader(self, tmp, plain):
         import shutil
         r = db.WeChatDB.__new__(db.WeChatDB)
-        r._keys = {"contact/contact.db": b"k" * 32}
+        r._keys = {REL: b"k" * 32}
         r.workdir = tmp
         src = os.path.join(tmp, "src-contact.db")
         shutil.copyfile(plain, src)
@@ -134,7 +138,7 @@ class LockedCopyTest(unittest.TestCase):
             dst = os.path.join(tmp, "contact__contact.db")
             db.os.replace, db.time.sleep = replace, (lambda s: None)
             try:
-                conn = r._open("contact/contact.db")
+                conn = r._open(REL)
                 self.assertEqual(conn.execute("SELECT x FROM t").fetchone()[0], "新")
                 conn.close()
                 self.assertGreater(locked["calls"], 1, "retries before giving up")
@@ -142,7 +146,7 @@ class LockedCopyTest(unittest.TestCase):
                 self.assertFalse(os.path.exists(dst + ".stamp"), "no stamp, so the next read retries the replace")
                 # The lock is gone: the next read installs the copy normally.
                 locked["on"] = False
-                conn = r._open("contact/contact.db")
+                conn = r._open(REL)
                 self.assertEqual(conn.execute("SELECT x FROM t").fetchone()[0], "新")
                 conn.close()
                 self.assertTrue(os.path.exists(dst) and os.path.exists(dst + ".stamp"))
