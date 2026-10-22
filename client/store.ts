@@ -3,7 +3,7 @@ import { api, type WechatSettings } from "./lib";
 import { TodoTracker, type Preferences } from "./preferences";
 
 /** Lightweight preferences shared by the sidebar entry, reminders and both settings surfaces. */
-export type Settings = Preferences["settings"] & { triage?: boolean; undoMinutes?: number; briefEnabled?: boolean; briefTime?: string; weeklyEnabled?: boolean; weeklyDay?: number; weeklyTime?: string; meetingBriefMinutes?: number; wechat?: WechatSettings };
+export type Settings = Preferences["settings"] & { profile?: import("./variables").Profile; triage?: boolean; undoMinutes?: number; briefEnabled?: boolean; briefTime?: string; weeklyEnabled?: boolean; weeklyDay?: number; weeklyTime?: string; meetingBriefMinutes?: number; wechat?: WechatSettings };
 const initial = (): Preferences => ({ revision: 1, settings: { enabled: false, pollSeconds: 60, showWorkbench: true, notifyNewTodo: false }, attention: [] });
 export let preferences: Preferences = initial();
 export let reminder = { count: 0, sequence: 0 };

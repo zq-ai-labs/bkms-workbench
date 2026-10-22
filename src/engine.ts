@@ -5,13 +5,14 @@ import { createReadStream } from 'node:fs'
 import { join, basename } from 'node:path'
 import { candidateRules, chooseRule, decideAfterTriage } from './rules.js'
 import { classifierFor, decideCategory, triageClassifier } from './classify.js'
+import { runtimeContext, variableValues } from './context-vars.js'
 import { historyForPrompt, splitQuoted } from './quoted.js'
 import { originalMailFields } from './original-mail.js'
 import { Store, findTask, log, touch } from './store.js'
 import { heuristicTriage } from './triage.js'
 import { activityEntry, briefData, briefTemplate, localDate, localMinutes, parseClock, senderKey, startOfWeek, topicData, topicMatches, topicTemplate, weeklyData, weeklyTemplate } from './digest.js'
 import { appendPending, chatAllowed, chatKind, segmentDue, segmentTitle, segmentVerdict, transcript, wechatSettingsOf } from './wechat.js'
-import { WorkbenchError, now, type AgentOutput, type AgentRunner, type Check, type EmailService, type Rule, type Settings, type State, type Task, type TopicSummary, type TriageRunner, type Confidence, type BusinessVerdict, type WechatChat, type WechatPending, type WechatService, type WechatSettings, type WechatStatus, type WriterRunner } from './types.js'
+import { WorkbenchError, now, type AgentOutput, type AgentRunner, type Check, type EmailService, type Rule, type Settings, type State, type Task, type TopicSummary, type TriageRunner, type Confidence, type BusinessVerdict, type RuntimeContext, type Profile, type WechatChat, type WechatPending, type WechatService, type WechatSettings, type WechatStatus, type WriterRunner } from './types.js'
 
 const address = (entries: any[]): string => (entries || []).map(e => e.address || '').filter(Boolean).join(', ')
 const readableFrom = (entries: any[]): string => (entries || []).map(e => e.name ? `${e.name} <${e.address || ''}>` : e.address || '').filter(Boolean).join(', ')
@@ -120,6 +121,11 @@ export class Engine {
   safe(error: unknown): string {
     const value = error instanceof Error ? error.message : '处理失败，请查看任务记录。'
     return value.replace(/(?:Bearer\s+)[^\s]+/gi, 'Bearer [隐藏]').replace(/((?:password|token|api.?key|authorization)\s*[=:]\s*)[^\s,;]+/gi, '$1[隐藏]').slice(0, 1200)
+  }
+  /** Trusted runtime context for one task: your profile and the current time, for `{{variables}}` and the prompt. */
+  private runtime(task: Task, profile: Profile | undefined): RuntimeContext {
+    const values = variableValues(profile, task.source.kind === 'wechat' ? '' : task.account, new Date(), this.language)
+    return { values, text: runtimeContext(values, profile) }
   }
   /** Where the original mail is now: after a dispatch it lives in the target folder. */
   location(task: Task): { account: string; folder: string; uid: number; uidValidity?: number } {
@@ -346,7 +352,7 @@ export class Engine {
     const workspace = join(this.store.root, 'tasks', task.id)
     await mkdir(workspace, { recursive: true, mode: 0o700 })
     task.workspace = workspace
-    const result = await this.agent.run(task, task.rule!, signal, { language: this.language })
+    const result = await this.agent.run(task, task.rule!, signal, { language: this.language, context: this.runtime(task, (await this.store.read()).settings.profile) })
     signal.throwIfAborted()
     const reply = task.rule!.output === 'reply' && !result.output.needsInfo
     if (reply && !result.output.text?.trim()) throw new WorkbenchError('DSH 未生成建议回复。')
@@ -403,9 +409,11 @@ export class Engine {
     const thread = previousRule ? { previousRule: { id: previousRule.id, name: previousRule.name } } : undefined
     // A classification scheme on this folder: the same model call also picks one business category.
     const classifier = wechat ? undefined : classifierFor(state, task.account, task.source.folder)
+    const profile = state.settings.profile, values = variableValues(profile, wechat ? '' : task.account, new Date(), this.language)
+    const context = { now: values.now, timezone: values.timezone, ...(profile?.department ? { department: profile.department } : {}), ...(profile?.role ? { role: profile.role } : {}) }
     let result: { category: any; urgency: any; reason: string; nextStep: string; ruleId?: string; confidence?: Confidence; ruleReason?: string; business?: BusinessVerdict }, by: 'ai' | 'heuristic' = 'heuristic'
     if (this.triage?.available()) {
-      try { result = await this.triage.run({ mail, ...(thread ? { thread } : {}), ...(classifier ? { classifier: triageClassifier(classifier, state.categoryExamples) } : {}), rules: candidates.map(rule => ({ id: rule.id, name: rule.name, semantic: rule.semantic || '', output: rule.output, hint: rule.instructions.slice(0, 400), examples: (state.ruleExamples?.[rule.id] ?? []).slice(-EXAMPLES_IN_PROMPT).map(({ match, text }) => ({ match, text })) })), uiLanguage: this.language }, AbortSignal.any([signal, AbortSignal.timeout(90000)])); by = 'ai' }
+      try { result = await this.triage.run({ mail, ...(thread ? { thread } : {}), ...(classifier ? { classifier: triageClassifier(classifier, state.categoryExamples) } : {}), context, rules: candidates.map(rule => ({ id: rule.id, name: rule.name, semantic: rule.semantic || '', output: rule.output, hint: rule.instructions.slice(0, 400), examples: (state.ruleExamples?.[rule.id] ?? []).slice(-EXAMPLES_IN_PROMPT).map(({ match, text }) => ({ match, text })) })), uiLanguage: this.language }, AbortSignal.any([signal, AbortSignal.timeout(90000)])); by = 'ai' }
       catch (error) { if (signal.aborted) throw error; result = heuristicTriage(mail); await this.store.mutate(doc => log(doc, `AI 分拣失败，已改用规则判断：${this.safe(error)}`, task.id, 'error')) }
     } else result = heuristicTriage(mail)
     signal.throwIfAborted()
@@ -504,7 +512,7 @@ export class Engine {
         }
       }
       await this.store.mutate(state => { const item = findTask(state, task!.id); Object.assign(item, originalMailFields(read), { body: task!.body, mailLoaded: true, attachments: task!.attachments, workspace, messageId: task!.messageId, references: task!.references, replyTo: task!.replyTo }); touch(item, '原邮件与资料已读取。') })
-      const result = await this.agent.run(task, task.rule, signal, { language: this.language })
+      const result = await this.agent.run(task, task.rule, signal, { language: this.language, context: this.runtime(task, (await this.store.read()).settings.profile) })
       signal.throwIfAborted()
       let draftId = task.draftId, draftRevision: number | undefined
       if (task.rule.output === 'reply' && !result.output.needsInfo) {

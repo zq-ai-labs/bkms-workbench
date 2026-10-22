@@ -209,6 +209,11 @@ body[data-ds-dark-theme] .bkw, body[data-ds-dark-theme] .bkw-settings, body[data
 .bkw-decide-list .bkw-chips { position: sticky; top: -12px; z-index: 1; margin-top: -12px; padding-top: 12px !important; background: var(--bg); flex: none; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 4px; padding: 0 4px 6px; }
 .bkw-decide-list .bkw-chip { min-width: 0; justify-content: center; gap: 3px; padding: 0 4px; font-size: 12px; white-space: nowrap; overflow: hidden; }
 .bkw-group h4 { padding: 12px 10px 6px; font-size: 12px; font-weight: 500; color: var(--ink3); }
+.bkw-var-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
+.bkw-var { padding: 1px 7px; border: 1px solid var(--line); border-radius: 4px; background: var(--surf2); color: var(--ink2); font: 12px/1.6 var(--mono); }
+.bkw-var:hover { border-color: var(--accH); color: var(--acc); }
+.bkw-var-preview { white-space: pre-wrap; padding: 8px 10px; border-radius: 6px; background: var(--surf2); }
+.bkw-profile { display: grid; gap: 12px; padding: 4px 0; }
 .bkw-li-pick { display: flex; align-items: flex-start; gap: 6px; }
 .bkw-li-pick > input { flex: none; margin-top: 14px; }
 .bkw-li-pick > .bkw-li { flex: 1; min-width: 0; }

@@ -1,10 +1,11 @@
 import * as React from "react";
 import { useEffect, useRef, useState } from "react";
-import { systemMessage, t } from "./i18n";
+import { language, systemMessage, t } from "./i18n";
 import { useWorkbench } from "./context";
 import { AUTONOMY_LABEL, CATEGORY, SOURCE, api, errorMessage, when, type Autonomy, type Capabilities, type Category, type MatchMode, type Rule, type SourceKind } from "./lib";
 import { Alert, AutoTextarea, Empty, Field, Icon, Switch, Tag } from "./ui";
 import { ClassifierEditor, blankClassifier } from "./classifiers";
+import { VariableBar, previewVariables, unknownVariables, type Profile } from "./variables";
 
 const DEFAULT_EXCLUDE: Category[] = ["notification", "marketing"];
 const CATEGORY_HINT: Record<Category, string> = { request: "对方需要你做事，例如询价、申请、安排", reply_needed: "需要回复，但不涉及业务请求", fyi: "值得知道，无需行动；进入每日简报", notification: "系统通知、提醒、账单、验证码；自动归档", marketing: "营销推广、订阅资讯；自动归档", other: "无法归类，交你判断" };
@@ -114,6 +115,12 @@ function RuleEditor({ rule }: { rule: Rule }) {
   /** Configuration revision this editor started from; a concurrent change is reported instead of overwritten. */
   const [base, setBase] = useState(data.revision);
   const formRef = useRef<HTMLFormElement>(null);
+  // Where the cursor was in the instructions, so a variable is inserted there.
+  const caret = useRef<number | undefined>(undefined);
+  const [showPreview, setShowPreview] = useState(false);
+  const profile = (data.settings as { profile?: Profile }).profile;
+  const unknown = unknownVariables(value.instructions);
+  const insertVariable = (reference: string) => { const at = caret.current ?? value.instructions.length; patch({ instructions: value.instructions.slice(0, at) + reference + value.instructions.slice(at) }); caret.current = at + reference.length; };
   const dirty = JSON.stringify(value) !== saved || !!description.trim();
   const working = !!busy || generating || optimizing || trialing;
   const aiReady = !!data.health.agent;
@@ -237,7 +244,12 @@ function RuleEditor({ rule }: { rule: Rule }) {
             <Alert>{t("分派只移动邮件，不生成或发送回复。同一个公共邮箱的收件箱只应由一台工作台负责分派，其他人的工作台只读取自己的文件夹，否则同一封信会被处理两次。")}</Alert>
           </> : <div className="bkw-field">
             <span className="bkw-field-row"><span>{t("处理要求")}</span><button type="button" className="bkw-btn small" disabled={!aiReady || value.instructions.trim().length < 5} onClick={() => void optimize()}><Icon name="sparkle" size={13} />{optimizing ? t("正在优化…") : t("AI 优化")}</button></span>
-            <AutoTextarea aria-label={t("处理要求")} required minLength={5} maxLength={16000} className="bkw-instructions" value={value.instructions} onChange={event => patch({ instructions: event.target.value })} placeholder={t("说明收到信息后需要做什么，以及缺少信息时如何处理。可写明语言、语气与署名。")} />
+            <VariableBar onInsert={insertVariable} />
+            <AutoTextarea aria-label={t("处理要求")} required minLength={5} maxLength={16000} className="bkw-instructions" value={value.instructions} onSelect={event => { caret.current = event.currentTarget.selectionStart; }} onChange={event => { caret.current = event.target.selectionStart; patch({ instructions: event.target.value }); }} placeholder={t("说明收到信息后需要做什么，以及缺少信息时如何处理。可写明语言、语气与署名。")} />
+            {!!unknown.length && <Alert tone="danger">{t("不认识的变量：{0}。保存前请改成编辑框上方列出的变量。", unknown.map(name => `{{${name}}}`).join("、"))}</Alert>}
+            {/\{\{/.test(value.instructions) && <details className="bkw-details" open={showPreview} onToggle={event => setShowPreview((event.target as HTMLDetailsElement).open)}><summary>{t("发给 AI 前的样子")}<small>{t("按你的资料和现在的时间填入")}</small></summary>
+              <div className="bkw-prose bkw-var-preview">{previewVariables(value.instructions, profile, data.accounts.find(account => account.id === value.account)?.label ?? value.account, language() === "en")}</div>
+            </details>}
             {optimizeError && <Alert tone="danger">{systemMessage(optimizeError)}</Alert>}
             {optimization && <div className="bkw-suggestion"><strong>{t("优化后的处理要求")}</strong><div className="bkw-prose">{optimization}</div><div className="bkw-actions"><small className="bkw-muted">{t("核对原有条件与限制，采用后仍需保存方案。")}</small><button type="button" className="bkw-btn small" onClick={() => setOptimization(undefined)}>{t("保留原文")}</button><button type="button" className="bkw-btn small primary" onClick={() => patch({ instructions: optimization })}>{t("采用优化")}</button></div></div>}</div>}
           <details className="bkw-details"><summary>{t("执行选项")}<small>{t("优先级 {0} · 失败重试 {1} 次", value.priority, value.maxRetries)}</small></summary>

@@ -158,6 +158,8 @@ export interface Report {
 export interface Brief { date: string; text: string; generatedAt: string; by: 'ai' | 'template' }
 export interface SenderPreference { neverArchive?: boolean; neverAutoSend?: boolean }
 export interface Log { id: string; at: string; level: 'info' | 'error'; message: string; taskId?: string }
+/** Your profile (Settings › My profile). Shown to the AI as trusted context; never passwords or keys. */
+export interface Profile { name?: string; department?: string; role?: string; title?: string; phone?: string; company?: string; signature?: string; timezone?: string }
 export interface Settings {
   enabled: boolean; pollSeconds: number; showWorkbench?: boolean; notifyNewTodo?: boolean
   /** AI triage before workflow matching. Defaults on. */
@@ -168,6 +170,8 @@ export interface Settings {
   weeklyEnabled?: boolean; weeklyDay?: number; weeklyTime?: string
   meetingBriefMinutes?: number
   wechat?: WechatSettings
+  /** Who uses this workbench, for `{{user.*}}` variables and the AI's runtime context. No secrets. */
+  profile?: Profile
   /** Optional pages hidden from the workbench navigation. */
   hiddenViews?: HideableView[]
 }
@@ -221,8 +225,10 @@ export interface EmailService {
 export interface MailWindow { uidValidity: number; count: number; firstUid?: number; lastUid?: number; answered: number[] }
 export interface RangeMessage { uid: number; from: string; subject: string; date: string; hasAttachments: boolean; excerpt: string }
 export interface AgentOutput { summary: string; needsInfo?: string; needsInfoKind?: 'information' | 'attachments'; informationGaps?: string; subject?: string; text?: string; checks?: Check[]; lowRisk?: boolean }
-export interface AgentRunner { available(): boolean; run(task: Task, rule: Rule, signal: AbortSignal, options?: { language?: 'zh' | 'en' }): Promise<{ output: AgentOutput; sessionId?: string }> }
-export interface TriageInput { mail: { from: string; subject: string; body: string; quotedHistory?: string; hasAttachments: boolean; receivedAt: string; channel?: 'email' | 'wechat' }; thread?: { previousRule?: { id: string; name: string } }; classifier?: TriageClassifier; rules: { id: string; name: string; semantic: string; output: RuleOutput; hint: string; examples?: { match: boolean; text: string }[] }[]; uiLanguage?: 'zh' | 'en' }
+/** Trusted runtime context for the AI: variable values for the instructions and a short description of who and when. */
+export interface RuntimeContext { values: Record<string, string>; text: string }
+export interface AgentRunner { available(): boolean; run(task: Task, rule: Rule, signal: AbortSignal, options?: { language?: 'zh' | 'en'; context?: RuntimeContext }): Promise<{ output: AgentOutput; sessionId?: string }> }
+export interface TriageInput { mail: { from: string; subject: string; body: string; quotedHistory?: string; hasAttachments: boolean; receivedAt: string; channel?: 'email' | 'wechat' }; thread?: { previousRule?: { id: string; name: string } }; classifier?: TriageClassifier; context?: { now: string; timezone: string; department?: string; role?: string }; rules: { id: string; name: string; semantic: string; output: RuleOutput; hint: string; examples?: { match: boolean; text: string }[] }[]; uiLanguage?: 'zh' | 'en' }
 export interface TriageOutput { category: TriageCategory; urgency: 'high' | 'normal' | 'low'; reason: string; nextStep: string; ruleId: string; confidence?: Confidence; ruleReason?: string; business?: BusinessVerdict }
 /** What the triage model sees of a classification scheme. */
 export interface TriageClassifier { guidance: string; categories: { id: string; name: string; include: string; exclude: string; fallback: boolean; examples: { match: boolean; text: string }[] }[] }

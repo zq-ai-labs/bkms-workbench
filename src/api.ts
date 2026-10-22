@@ -9,6 +9,7 @@ import { CLOCK, findTask, log, touch, validateWechatSettings } from './store.js'
 import { chatAllowed, wechatSettingsOf } from './wechat.js'
 import { activityEntry, exampleText, localDate, needsAttention, relations, senderKey, topicMatches, trialData } from './digest.js'
 import { sourceStatuses } from './sources.js'
+import { checkVariables, validateProfile } from './context-vars.js'
 import { classifierFor, learnCategory, overlapping, triageClassifier, validateClassifier } from './classify.js'
 import { WorkbenchError, now, type RuleExample, type Task, type State, type RuleAssistant, type InstructionOptimizer, type Topic } from './types.js'
 
@@ -259,8 +260,9 @@ export class WorkbenchApi {
     }
     if (body.action === 'saveSettings') {
       const settings = body.settings
-      if (!settings || typeof settings !== 'object' || Array.isArray(settings) || !Object.keys(settings).length || Object.keys(settings).some(key => !['enabled', 'pollSeconds', 'showWorkbench', 'notifyNewTodo', 'triage', 'undoMinutes', 'briefEnabled', 'briefTime', 'weeklyEnabled', 'weeklyDay', 'weeklyTime', 'meetingBriefMinutes', 'wechat', 'hiddenViews'].includes(key))) throw new WorkbenchError('工作台设置无效。')
+      if (!settings || typeof settings !== 'object' || Array.isArray(settings) || !Object.keys(settings).length || Object.keys(settings).some(key => !['enabled', 'pollSeconds', 'showWorkbench', 'notifyNewTodo', 'triage', 'undoMinutes', 'briefEnabled', 'briefTime', 'weeklyEnabled', 'weeklyDay', 'weeklyTime', 'meetingBriefMinutes', 'wechat', 'hiddenViews', 'profile'].includes(key))) throw new WorkbenchError('工作台设置无效。')
       if ('hiddenViews' in settings) { settings.hiddenViews = list(settings.hiddenViews, 3, 20, '页签设置无效。'); if (settings.hiddenViews.some((view: string) => !['today', 'meetings', 'topics'].includes(view))) throw new WorkbenchError('页签设置无效。') }
+      if ('profile' in settings) settings.profile = validateProfile(settings.profile)
       if ('wechat' in settings) { validateWechatSettings(settings.wechat); for (const key of ['people', 'groups'] as const) settings.wechat[key].list = [...new Set(settings.wechat[key].list)] }
       for (const key of ['enabled', 'showWorkbench', 'notifyNewTodo', 'triage', 'briefEnabled', 'weeklyEnabled']) if (key in settings && typeof settings[key] !== 'boolean') throw new WorkbenchError('工作台开关应为布尔值。')
       if ('pollSeconds' in settings && (!Number.isSafeInteger(settings.pollSeconds) || settings.pollSeconds < 30 || settings.pollSeconds > 3600)) throw new WorkbenchError('检查间隔应为 30–3600 秒。')
@@ -278,6 +280,8 @@ export class WorkbenchApi {
     }
     if (body.action === 'saveRule') {
       const rule = validateRule(body.rule)
+      // Variables are checked on save only: reading older data never fails on a stray "{{".
+      checkVariables(rule.instructions, '处理要求')
       return this.engine.store.mutate(state => { configCheck(state, body.revision); const index = state.rules.findIndex(r => r.id === rule.id); if (index < 0) state.rules.push(rule); else state.rules[index] = rule; state.configRevision++; log(state, `已保存规则「${rule.name}」。`); return { ...rule, revision: state.configRevision } })
     }
     if (body.action === 'saveClassifier') {

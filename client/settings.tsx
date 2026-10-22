@@ -6,13 +6,14 @@ import { FolderPicker, localInput } from "./plans";
 import { applySaved, refreshPreferences, settingsOf, usePreferences, type Settings } from "./store";
 import { Alert, Field, Modal, Switch, Tag } from "./ui";
 import { WechatSettingsCard } from "./wechat";
+import { ProfileCard } from "./variables";
 import { MailAccountsCard } from "./mail-accounts";
 
 type MailInfo = { revision: number; accounts: { id: string; label: string; inboxFolder?: string }[]; health: { email: boolean; agent?: boolean; running?: boolean; lastPoll?: string; error?: string }; mail?: { configured: boolean } };
 const DAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 const SOURCE_NAME: Record<string, string> = { feishu: "飞书", wecom: "企业微信", meeting: "会议与日历" };
 const VIEWS: ["today" | "meetings" | "topics", string, string][] = [["today", "今日", "隐藏后打开工作台直接进入“待我决策”。每日简报仍会生成，可在“主题与报告”中查看。"], ["meetings", "会议", "还没有连接日历或会议平台时可以先隐藏。"], ["topics", "主题与报告", "隐藏后不再显示页签；事项上的主题链接仍可打开。"]];
-const SECTIONS = [["sources", "信息源"], ["reports", "简报与提醒"], ["safety", "自主与安全"], ["display", "显示"], ["advanced", "高级与恢复"]];
+const SECTIONS = [["sources", "信息源"], ["profile", "我的资料"], ["reports", "简报与提醒"], ["safety", "自主与安全"], ["display", "显示"], ["advanced", "高级与恢复"]];
 
 /** Settings shared by DSH's settings page and the workbench's own settings view. */
 export function WorkbenchSettings({ embedded }: { embedded?: boolean }) {
@@ -71,6 +72,9 @@ export function WorkbenchSettings({ embedded }: { embedded?: boolean }) {
         <WechatSettingsCard value={(data.settings as Settings).wechat} disabled={disabled} save={(wechat, message) => save({ wechat }, message)} />
         {(["feishu", "wecom", "meeting"] as SourceKind[]).map(kind => <div key={kind} className="bkw-set-row"><span className="bkw-source-icon">{t(SOURCE[kind]).slice(0, 1)}</span><span><strong>{t(SOURCE_NAME[kind])}</strong><small>{t("需要安装对应的接入适配器后才能连接。工作台不会模拟未接入的来源。")}</small></span><Tag>{t("待接入")}</Tag></div>)}
         {mail?.health.error && <Alert tone="danger">{systemMessage(mail.health.error)}</Alert>}
+      </section>
+      <section id="bkw-set-profile" className="bkw-set-card"><h3>{t("我的资料")}</h3>
+        <ProfileCard value={(data.settings as Settings).profile} disabled={disabled} save={profile => void save({ profile }, t("我的资料已保存"))} />
       </section>
       <section id="bkw-set-reports" className="bkw-set-card"><h3>{t("简报与提醒")}</h3>
         {row(t("每日简报"), t("每天生成一次，打开工作台默认显示。需要开启后台自动处理。"), <>{clock(s.briefTime, "briefTime", t("每日简报时间"), !s.briefEnabled)}<Switch label={t("每日简报")} checked={s.briefEnabled} disabled={disabled} onChange={value => void save({ briefEnabled: value })} /></>)}

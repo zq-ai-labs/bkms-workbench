@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import lockfile from 'proper-lockfile'
 import { validateRule } from './rules.js'
 import { validateClassifier } from './classify.js'
+import { validateProfile } from './context-vars.js'
 import { AUTONOMY, HIDEABLE_VIEWS, TRIAGE_CATEGORIES, WorkbenchError, now, type State, type Task } from './types.js'
 
 function validateState(state: State): void {
@@ -41,6 +42,7 @@ function validateState(state: State): void {
   if (state.brief !== undefined && (!state.brief || typeof state.brief.date !== 'string' || typeof state.brief.text !== 'string')) throw new Error('invalid brief')
   if (state.senders !== undefined && (!state.senders || typeof state.senders !== 'object' || Array.isArray(state.senders))) throw new Error('invalid sender preferences')
   if (s.wechat !== undefined) validateWechatSettings(s.wechat)
+  if (s.profile !== undefined) validateProfile(s.profile)
   if (s.hiddenViews !== undefined && (!Array.isArray(s.hiddenViews) || s.hiddenViews.some(view => !HIDEABLE_VIEWS.includes(view)) || new Set(s.hiddenViews).size !== s.hiddenViews.length)) throw new Error('invalid preference')
   if (state.uiLanguage !== undefined && state.uiLanguage !== 'zh' && state.uiLanguage !== 'en') throw new Error('invalid language')
   if (state.backfills !== undefined && (!state.backfills || typeof state.backfills !== 'object' || Array.isArray(state.backfills) || Object.values(state.backfills).some(item => !item || !positive(item.uidValidity) || !Number.isSafeInteger(item.untilUid) || item.untilUid < 0 || !Array.isArray(item.skip) || item.skip.length > 1000 || item.skip.some(uid => !Number.isSafeInteger(uid)) || typeof item.since !== 'string'))) throw new Error('invalid backfill')
