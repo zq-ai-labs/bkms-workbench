@@ -365,15 +365,18 @@ export class WorkbenchApi {
       const window = await email.window(body.account, body.folder, since, AbortSignal.any([signal, AbortSignal.timeout(60000)]))
       if (window.count > BACKFILL_LIMIT) throw new WorkbenchError(`这段时间有 ${window.count} 封邮件，一次最多处理 ${BACKFILL_LIMIT} 封；请把开始时间往后调。`)
       const includeAnswered = body.includeAnswered === true
+      // Nothing since then: a real baseline from now. Reusing an old cursor (or 0 when there is none) would bring
+      // back the whole folder as new mail, unmarked and uncapped.
+      const fresh = !window.count || !window.firstUid ? await email.scan({ account: body.account, folder: body.folder }, signal) : undefined
       return this.engine.store.mutate(state => {
         configCheck(state, body.revision)
-        if (!window.count || !window.firstUid) {
-          // Nothing since then: same as a baseline from now.
-          state.cursors[key] = { uidValidity: window.uidValidity, lastUid: window.lastUid ?? state.cursors[key]?.lastUid ?? 0 }
+        if (fresh) {
+          state.cursors[key] = fresh.cursor
+          if (state.backfills) { delete state.backfills[key]; if (!Object.keys(state.backfills).length) delete state.backfills }
           log(state, `${body.account} / ${body.folder} 自 ${body.since} 以来没有邮件，已从现在开始处理。`)
           return state.cursors[key]
         }
-        state.cursors[key] = { uidValidity: window.uidValidity, lastUid: window.firstUid - 1 }
+        state.cursors[key] = { uidValidity: window.uidValidity, lastUid: window.firstUid! - 1 }
         state.backfills = { ...(state.backfills ?? {}), [key]: { uidValidity: window.uidValidity, untilUid: window.lastUid!, skip: includeAnswered ? [] : window.answered, since: since.toISOString(), at: now() } }
         log(state, `${body.account} / ${body.folder} 将从 ${body.since} 开始补处理 ${window.count} 封邮件${includeAnswered || !window.answered.length ? '' : `（跳过 ${window.answered.length} 封已回复）`}；不会自动发送。`)
         return state.cursors[key]

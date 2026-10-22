@@ -159,3 +159,22 @@ test('a wrong dispatch is corrected by choosing another team: the mail moves on 
   await f.api.action({ action: 'runRule', id: task.id, revision: task.revision, ruleId: south.id }); await f.drain()
   assert.equal(f.moves.length, 2)
 })
+
+test('a start time with no mail since then is a baseline from now, never a replay of the whole folder', async t => {
+  const f = await fixture(t)
+  // A folder the workbench has never read: no cursor yet, only old mail.
+  f.folders.Archive = []
+  for (let uid = 1; uid <= 50; uid++) f.folders.Archive.push(f.mail(uid, `旧邮件 ${uid}`))
+  const since = new Date(Date.now() - 3600000).toISOString(), key = '["shared@corp.example","Archive"]'
+  // A range still pending from an earlier choice is dropped too.
+  await f.store.mutate(state => { state.backfills = { [key]: { uidValidity: 7, untilUid: 30, skip: [], since, at: since } } })
+  const cursor = await f.api.action({ action: 'resetBaseline', account: 'shared@corp.example', folder: 'Archive', since, revision: (await f.store.read()).configRevision, confirmed: true })
+  assert.deepEqual(cursor, { uidValidity: 9, lastUid: 50 })
+  assert.equal((await f.store.read()).backfills, undefined)
+  await f.save({ ...base, name: '归档回复', folder: 'Archive', output: 'reply', instructions: '生成回复。', matchMode: 'literal', autonomy: 'auto' })
+  await f.engine.poll()
+  assert.equal((await f.store.read()).tasks.length, 0, 'old mail stays out')
+  f.folders.Archive.push(f.mail(51, '新邮件'))
+  await f.engine.poll()
+  assert.deepEqual((await f.store.read()).tasks.map(task => task.subject), ['新邮件'])
+})
