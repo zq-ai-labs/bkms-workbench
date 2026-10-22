@@ -123,10 +123,14 @@ export class WorkbenchApi {
       sources: sourceStatuses({ ready: health.email, accounts: accounts.length, error: providerError }, this.engine.channels.list().map(channel => ({ channel, settings: config.settings.channels?.[channel.kind] }))), meetings: [],
       // What each installed channel shows on the page, and channels that need an upgrade before they can be used.
       channels: Object.fromEntries(await Promise.all(this.engine.channels.list().map(async channel => [channel.kind, channel.snapshot?.(config.settings.channels?.[channel.kind], await repo.channelState(channel.kind)) ?? {}]))),
-      rejectedChannels: this.engine.channels.rejected(),
+      channelInfo: this.channelInfo(config.settings), rejectedChannels: this.engine.channels.rejected(),
       ruleExamples,
       classifiers: config.classifiers, categoryExamples,
     }
+  }
+  /** Installed channels for the page: their names, how replies work and whether each is on. */
+  private channelInfo(settings: { channels?: Record<string, unknown> }) {
+    return this.engine.channels.list().map(channel => ({ kind: channel.kind, label: channel.label, reply: channel.capabilities.reply, enabled: channel.settings.enabled(settings.channels?.[channel.kind]) }))
   }
   /**
    * Trial run over mail received in a chosen time range, read straight from the mailbox (history before the baseline
@@ -220,7 +224,7 @@ export class WorkbenchApi {
     if (body.action === 'preferences') {
       const repo = this.engine.repo, config = await repo.config()
       // Global navigation and reminders do not need mailbox access or draft bodies.
-      return { revision: config.revision, stateRevision: await repo.changeSeq(), settings: config.settings, attention: await repo.attention() }
+      return { revision: config.revision, stateRevision: await repo.changeSeq(), settings: config.settings, attention: await repo.attention(), channelInfo: this.channelInfo(config.settings), rejectedChannels: this.engine.channels.rejected() }
     }
     if (body.action === 'mailSettings') {
       const config = await this.engine.repo.config()

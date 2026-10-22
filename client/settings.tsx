@@ -1,11 +1,11 @@
 import * as React from "react";
 import { useEffect, useRef, useState } from "react";
 import { systemMessage, t, useWorkbenchLocale } from "./i18n";
-import { SOURCE, api, dateTime, errorMessage, type SourceKind } from "./lib";
+import { SOURCE, api, dateTime, errorMessage, uiLanguage } from "./lib";
 import { FolderPicker, localInput } from "./plans";
 import { applySaved, refreshPreferences, settingsOf, usePreferences, type Settings } from "./store";
 import { Alert, Field, Modal, Switch, Tag } from "./ui";
-import { WechatSettingsCard } from "./wechat";
+import { ChannelPart } from "./slots";
 import { ProfileCard } from "./variables";
 import { MailAccountsCard } from "./mail-accounts";
 
@@ -55,8 +55,9 @@ export function WorkbenchSettings({ embedded }: { embedded?: boolean }) {
   }
   const accounts = mail?.accounts || [];
   const ready = !!(mail?.health.email && accounts.length && mail.health.agent && mail.health.running);
-  // Background processing can also run on WeChat alone.
-  const wechatOn = (data.settings as Settings).wechat?.enabled === true;
+  // Background processing can also run on an installed channel alone.
+  const channelOn = (data.channelInfo ?? []).some(item => item.enabled);
+  const label = (value: { zh: string; en: string }) => value[uiLanguage()] || value.zh;
   const disabled = !loaded || busy;
   const hidden = data.settings.hiddenViews ?? [];
   const row = (title: string, hint: string, control: React.ReactNode) => <div className="bkw-set-row"><span><strong>{title}</strong><small>{hint}</small></span><span className="bkw-set-control">{control}</span></div>;
@@ -69,8 +70,10 @@ export function WorkbenchSettings({ embedded }: { embedded?: boolean }) {
       <section id="bkw-set-sources" className="bkw-set-card"><h3>{t("信息源")}</h3>
         <MailAccountsCard disabled={!loaded} onChanged={refreshMail} tone={ready ? "good" : mail?.health.email ? "warn" : "muted"} label={ready ? t("正常") : mail?.health.email ? t("等待服务") : accounts.length ? t("未连接") : t("未添加")}
           status={!mail ? t("正在加载…") : accounts.length ? t("{0} · 每 {1} 秒检查 · 最近检测 {2}", accounts.map(account => account.label).join("、"), data.settings.pollSeconds, mail.health.lastPoll ? dateTime(mail.health.lastPoll) : t("尚未检测")) : t("添加邮箱账号后，工作台自动接收新邮件、生成回复草稿。")} />
-        <WechatSettingsCard value={(data.settings as Settings).wechat} disabled={disabled} save={(wechat, message) => save({ wechat }, message)} />
-        {(["feishu", "wecom", "meeting"] as SourceKind[]).map(kind => <div key={kind} className="bkw-set-row"><span className="bkw-source-icon">{t(SOURCE[kind]).slice(0, 1)}</span><span><strong>{t(SOURCE_NAME[kind])}</strong><small>{t("需要安装对应的接入适配器后才能连接。工作台不会模拟未接入的来源。")}</small></span><Tag>{t("待接入")}</Tag></div>)}
+        {(data.channelInfo ?? []).map(item => <ChannelPart key={item.kind} part="settings" kind={item.kind} props={{ value: (data.settings as Settings).channels?.[item.kind], disabled, save: (value, message) => save({ channels: { [item.kind]: value } }, message) }}
+          fallback={<div className="bkw-set-row"><span className="bkw-source-icon">{label(item.label).slice(0, 1)}</span><span><strong>{label(item.label)}</strong><small>{t("这个渠道没有提供设置界面。")}</small></span><Tag tone={item.enabled ? "good" : "muted"}>{item.enabled ? t("已开启") : t("未开启")}</Tag></div>} />)}
+        {(data.rejectedChannels ?? []).map(item => <div key={item.kind} className="bkw-set-row"><span className="bkw-source-icon">{label(item.label).slice(0, 1)}</span><span><strong>{label(item.label)}</strong><small>{item.upgrade === "channel" ? t("这个渠道插件的版本过旧，请升级渠道插件后使用。") : t("这个渠道插件需要更新版本的工作台，请升级工作台后使用。")}</small></span><Tag tone="warn">{t("需要升级")}</Tag></div>)}
+        {["feishu", "wecom", "meeting"].map(kind => <div key={kind} className="bkw-set-row"><span className="bkw-source-icon">{t(SOURCE[kind]).slice(0, 1)}</span><span><strong>{t(SOURCE_NAME[kind])}</strong><small>{t("需要安装对应的接入适配器后才能连接。工作台不会模拟未接入的来源。")}</small></span><Tag>{t("待接入")}</Tag></div>)}
         {mail?.health.error && <Alert tone="danger">{systemMessage(mail.health.error)}</Alert>}
       </section>
       <section id="bkw-set-profile" className="bkw-set-card"><h3>{t("我的资料")}</h3>
@@ -83,7 +86,7 @@ export function WorkbenchSettings({ embedded }: { embedded?: boolean }) {
         {row(t("会前简报"), t("连接日历后，在会议开始前生成。"), <><select aria-label={t("会前简报提前时间")} value={s.meetingBriefMinutes} disabled={disabled} onChange={event => void save({ meetingBriefMinutes: Number(event.target.value) })}>{[15, 30, 60, 120].map(value => <option key={value} value={value}>{t("提前 {0} 分钟", value)}</option>)}</select></>)}
       </section>
       <section id="bkw-set-safety" className="bkw-set-card"><h3>{t("自主与安全")}</h3>
-        {row(t("后台自动处理"), t("暂停后不检测新信息、不分拣、不执行；已在运行的任务会完成。"), <Switch label={t("后台自动处理")} checked={data.settings.enabled} disabled={disabled || (!data.settings.enabled && !ready && !(wechatOn && mail?.health.agent && mail.health.running))} onChange={value => void save({ enabled: value }, value ? t("已开启后台自动处理") : t("已暂停后台自动处理"))} />)}
+        {row(t("后台自动处理"), t("暂停后不检测新信息、不分拣、不执行；已在运行的任务会完成。"), <Switch label={t("后台自动处理")} checked={data.settings.enabled} disabled={disabled || (!data.settings.enabled && !ready && !(channelOn && mail?.health.agent && mail.health.running))} onChange={value => void save({ enabled: value }, value ? t("已开启后台自动处理") : t("已暂停后台自动处理"))} />)}
         {row(t("AI 分拣"), t("新信息先由 AI 判断类别和适用方案，通知与营销邮件自动归档，可随时恢复。关闭后按字面条件匹配全部方案。"), <Switch label={t("AI 分拣")} checked={s.triage} disabled={disabled} onChange={value => void save({ triage: value })} />)}
         {row(t("撤回窗口"), t("按方案自动发送的回复先等待这段时间，期间可撤回。"), <select aria-label={t("撤回窗口")} value={s.undoMinutes} disabled={disabled} onChange={event => void save({ undoMinutes: Number(event.target.value) })}>{[5, 15, 30, 60, 120].map(value => <option key={value} value={value}>{t("{0} 分钟", value)}</option>)}</select>)}
         {row(t("发送结果不确定时"), t("不会自动重发，转为“发送待核实”交你处理。"), <Tag tone="good">{t("始终开启")}</Tag>)}

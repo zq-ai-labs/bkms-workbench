@@ -28,7 +28,7 @@
 | `src/mail/` | 内置邮件模块（移植自 dsh-email，见 `src/mail/NOTICE.md`）：`accounts.ts` 账号、`service.ts` 服务与连接池、`drafts.ts` 草稿 |
 | `src/channels/` | 渠道接口 `types.ts`（`CHANNEL_API_VERSION`）与注册表 `registry.ts`；核心只通过它们使用邮件以外的渠道 |
 | `src/channels/wechat/` `wechat/` | 微信只读渠道：`channel.ts` 渠道实现、`reader.ts` 名单/分段与桥接进程 + Python 桥 `wechat/bridge.py` + 内置读取组件 `wechat/wxread/`（移植自 wechatauto-replica） |
-| `client/` | React 页面：`index.tsx` 外壳、`views.tsx` 各视图、`workspace.tsx` 三栏审核、`plans.tsx` 处理方案、`settings.tsx` 设置、`mail-accounts.tsx` 邮箱账号、`classifiers.tsx` `classification.tsx` 业务分类、`variables.tsx` 我的资料与变量 |
+| `client/` | React 页面：`index.tsx` 外壳、`slots.tsx` 渠道插槽（`channels/wechat/` 为微信的插槽组件）、`views.tsx` 各视图、`workspace.tsx` 三栏审核、`plans.tsx` 处理方案、`settings.tsx` 设置、`mail-accounts.tsx` 邮箱账号、`classifiers.tsx` `classification.tsx` 业务分类、`variables.tsx` 我的资料与变量 |
 | `client/en.json` `client/system-en.json` | 界面英文；后端消息英文 |
 | `test/` | Node 测试；`test/mail/` 为移植的上游邮件测试 |
 

@@ -1,5 +1,11 @@
 # 本地验证记录
 
+## 核心与渠道改造 · 阶段 2/3：渠道接口与前端插槽（2026-10-22）
+
+- `pnpm test`：227 通过，0 失败，7 跳过。微信用例改为经渠道注册表；`test/core-boundary.test.mjs` 中核心后端只剩已知来源列表等少量引用，核心前端只剩 `lib.ts` 的来源名称表与 `index.tsx` 临时的静态注册（阶段 4 去掉）。`test/i18n.test.mjs` 改为递归检查 `client/`，包括 `client/channels/`。
+- 本机装有 Python 时，桥接相关用例也跑过：真实 Python 桥进程 + 夹具数据库的端到端用例通过（修正了 Windows 上删除仍打开的数据库导致的清理失败）。“本机没有微信”这一用例在装了微信的机器上会失败，属测试对环境的假设，与本次改动无关。
+- 真实 DSH（隔离 `DSH_HOME`、合成数据、后台关闭；微信读取通过包装脚本只连 `--fixture` 夹具，不读真实微信）：微信事项的“@我”标签、群聊名、正文对话、右侧聊天记录与事项标记、“按会话”视图、工作台内设置与 DSH 设置页中的微信卡片均由插槽渲染；在卡片中改“合并连续消息”后数据库中的 `channels.wechat` 已更新。中文浅色、英文深色、375px 窄屏检查无错误。
+
 ## 核心与渠道改造 · 阶段 1：SQLite 存储（2026-10-22）
 
 按 `docs/DESIGN-CORE-CHANNELS.md` §7 阶段 1：工作台数据从整份 `workbench-v1.json` 改为 SQLite 库 `workbench.sqlite`，经公共基础包 [`zq-sqlite`](https://github.com/zq-ai-labs/zq-sqlite) v0.1.0（Node 自带 `node:sqlite` + Kysely）。引擎与接口里 79 处整文档读写全部改为仓储调用；不兼容旧数据文件（D4）。

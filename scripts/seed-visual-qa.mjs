@@ -114,7 +114,8 @@ const wechatTask = {
   ruleId: rule.id, ruleName: rule.name, rule: structuredClone(rule),
   triage: { state: 'done', category: 'request', urgency: 'high', reason: '群里 @你，问能否加急发货，需中午前确认。', nextStep: '决定是否走加急并答复王工', by: 'ai', at: at(23) },
   checks: [{ item: '库存与出库时间需要核实。', quote: '今天下午可以出库' }],
-  wechat: { chat: 'demo@chatroom', chatName: '[演示] 交付协调群', group: true, mentioned: true, messages: wechatMessages, fromSeq: 1001, toSeq: 1003, reply: '@王工 走加急吧，今天下午可以出库，麻烦安排零担，周五前送到。', replyRevision: 1 },
+  channelData: { chat: 'demo@chatroom', chatName: '[演示] 交付协调群', group: true, mentioned: true, messages: wechatMessages, fromSeq: 1001, toSeq: 1003 },
+  reply: { text: '@王工 走加急吧，今天下午可以出库，麻烦安排零担，周五前送到。', revision: 1 },
 }
 const activity = (minutes, kind, item, extra = {}) => ({ id: randomUUID(), at: at(minutes), kind, title: item.subject, taskId: item.id, ruleName: item.ruleName, source: 'email', ...extra })
 const today = new Date(), day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
