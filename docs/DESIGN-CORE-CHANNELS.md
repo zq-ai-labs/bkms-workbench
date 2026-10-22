@@ -1,17 +1,31 @@
-# 设计：核心与渠道拆分、本地/Web 共用存储接口
+# 设计：核心与渠道拆分、存储接口与数据库解耦
 
-> 状态：设计稿，尚未实现。对照代码：`main` @ `d53151b`。本文只写设计，不含代码改动。
+> 状态：设计稿，尚未实现；2026-10-22 已与用户确认 §0.1 的决策。对照代码：`main` @ `d53151b`。本文只写设计，不含代码改动；用户确认之前不进入开发。
 > 行号均指该提交；后续代码变化后以函数名为准。
 
 ## 0. 结论摘要
 
-1. **先在单插件内抽出“渠道接口”（Channel），邮件、微信都实现为渠道**。核心（入库、队列、分拣、方案匹配、Agent 准备、审核、自动发送、简报/主题）只认渠道接口。只装邮件渠道就是一个完整的产品；之后微信再拆成独立 DSH 插件 `bkms-workbench-wechat`，以可选渠道挂上来。
+### 0.1 已定决策（2026-10-22）
+
+| # | 决策 | 说明 | 详见 |
+| --- | --- | --- | --- |
+| D1 | **本地数据库用 SQLite** | 性能优先：SQLite 在进程内直接调用 C 库，比 PGlite（PostgreSQL 编译成 WASM、单连接）更快、启动更快、内存更少，也更成熟。兼容由仓储接口 + Kysely + 契约测试保证，以后服务器版换 PostgreSQL 或 MySQL 只是新增一个实现。PGlite 不采用 | §5.7、§5.8 |
+| D2 | **驱动优先 `better-sqlite3`，退路 `node:sqlite`** | `better-sqlite3` 最常用、最快，但是原生模块，需先确认 DSH 能加载；不行则用 Node 自带的 `node:sqlite`（不用打包，但仍标为实验性） | §5.7、§5.8 |
+| D3 | **Web 版暂缓，后续再考虑** | §6 与第 6 阶段全部暂缓。只保留每张表的 `user_id` 列（本地固定为 `'local'`，几乎没有成本），以后做 Web 版不用改表 | §6、§7 |
+| D4 | **JSON 存储只作过渡，以及导入/导出格式** | 先把 65 处调用换成仓储接口、底层暂用现有 JSON 文件，单独验证“只换接口、行为不变”；随后换成 SQLite。数据库版稳定后删除 JSON 实现，不提供“切回 JSON”的开关。`workbench-v1.json` 只用于首次导入和“导出为 v1 文件”（降级、备份） | §5.2、§5.9 |
+| D5 | **每个渠道一个小插件，邮件例外、内置** | 微信、以后的飞书/企微各是一个渠道插件，挂到工作台核心上，装上即多一个来源，卸载不影响核心。邮件内置在工作台里（主产品；发送、审核、自动发送与核心联系最紧；刚把 dsh-email 合进来，不再拆出），代码上同样按渠道接口实现 | §3、§4 |
+| D6 | **渠道数据存在工作台的数据库里** | 按渠道区分，渠道插件不自建数据库；卸载渠道插件不丢数据 | §3、§5.5 |
+| D7 | **拆插件前先在真实 DSH 验证跨插件挂接** | 后端 `ctx.provide` / `inject` 与前端由另一插件扩展界面都要先用最小示例验证；前端扩展不了时，微信界面暂留工作台前端、装了微信插件才显示 | §4.6、§7 |
+
+### 0.2 要点
+
+1. **先在单插件内抽出“渠道接口”（Channel），邮件、微信都实现为渠道**。核心（入库、队列、分拣、方案匹配、Agent 准备、审核、自动发送、简报/主题）只认渠道接口。工作台本身（含内置邮件渠道）就是一个完整的产品；之后微信再拆成独立 DSH 插件 `bkms-workbench-wechat`，以可选渠道挂上来。
 2. **只拆微信不够**：邮件逻辑同样深嵌在核心里（草稿、自动发送、IMAP 读原件、Message-ID 关联、活动记录里写死的 `source: 'email'`）。邮件也要退到渠道接口后面，核心才真正与渠道无关，第三个渠道（飞书、企微）也才能接上。
-3. **存储先换接口、后换实现**：把 65 处 `store.read()` / `store.mutate(doc => …)` 整文档读写换成按业务操作的仓储接口（13 组、约 55 个方法，清单见 §5.3，逐调用点对照见附录 A）。第一个实现仍是现有 JSON 文件，数据零变化；之后再加数据库实现。乐观锁沿用现有 `revision`。
-4. **查询层用 Kysely**：一套 TypeScript 查询，编译到 SQLite 与 PostgreSQL 两种方言；方言差异集中在少数几处（§5.7）。**全文搜索单独一个接口**，推荐“应用层中文二元切分 + 数据库内置全文索引”，两种数据库结果一致、不依赖扩展（§5.6）。
-5. **本地数据库在 SQLite 与 PGlite 之间，用 1–2 天实测决定**（清单见 §5.8），倾向 PGlite（本地与 Web 同一方言）。无论选哪个，**同一套“仓储契约测试”跑遍 JSON、本地数据库、PostgreSQL 三种实现**——这是解决“本地与服务器逻辑不兼容”担心的根本办法。
+3. **存储先换接口、后换实现**：把 65 处 `store.read()` / `store.mutate(doc => …)` 整文档读写换成按业务操作的仓储接口（13 组、约 55 个方法，清单见 §5.3，逐调用点对照见附录 A）。过渡实现仍是现有 JSON 文件，数据零变化；随后换成 SQLite。乐观锁沿用现有 `revision`。
+4. **查询层用 Kysely**：一套 TypeScript 查询，现在编译到 SQLite，以后同一套代码可编译到 PostgreSQL 或 MySQL；方言差异集中在少数几处（§5.7）。**全文搜索单独一个接口**，推荐“应用层中文二元切分 + 数据库内置全文索引”，不依赖扩展，换数据库后结果一致（§5.6）。
+5. **同一套“仓储契约测试”跑遍每一种实现**（过渡期的 JSON、SQLite，以后的服务器数据库）——这是解决“本地与服务器逻辑不兼容”担心的根本办法。
 6. **迁移**：从 `workbench-v1.json` 一次性导入，导入后做往返校验；原文件保留并“冻结”（关闭后台处理 + 写一条说明日志），旧版本插件仍能打开、不会用旧游标重复处理；另提供导出回 v1 文件的降级工具。`workbench-v1.json` 永远是 `version: 1` 的交换格式（§5.9）。
-7. **Web 版**：表结构自始带 `user_id`，PostgreSQL 再加行级安全；邮箱授权码信封加密；邮箱轮询用租约表保证同一邮箱只有一个实例在收；AI 通过现有的 5 个 Runner 接口换成直连模型 API 的实现（§6）。
+7. **Web 版（暂缓）**：已记录多用户隔离、授权码加密、轮询单实例、AI 脱离 DSH 的初步方案，供以后参考（§6）。
 
 ## 1. 背景与目标
 
@@ -31,17 +45,17 @@
 
 ### 1.2 目标
 
-- **G1 邮件版独立成立**：只装邮件渠道即可完整运行；先是 DSH 插件，以后作为 Web 服务（存储 PostgreSQL）。
+- **G1 邮件版独立成立**：只装工作台（内置邮件渠道）即可完整运行。以后可能做 Web 服务，目前暂缓（D3）。
 - **G2 微信是可选渠道插件**：装上即多一个来源，卸载后核心不受影响，已有微信任务仍可查看。
-- **G3 本地与 Web 共用存储接口**：业务代码只依赖仓储接口；本地（SQLite 或 PGlite）与 Web（PostgreSQL）共用同一套查询和契约测试。
+- **G3 存储与数据库解耦**：业务代码只依赖仓储接口；本地用 SQLite，以后服务器版（PostgreSQL 或 MySQL）共用同一套查询和契约测试。
 - **G4 遵守数据兼容约定**：`workbench-v1.json` 保持 `version: 1`、新字段可选，旧版本插件能读新数据（`CLAUDE.md`）。
 - **G5 安全边界不变**：没有人工确认不发送；微信只读；来源内容是数据不是指令；密码不进工作台数据、不返回页面。
 
 ### 1.3 非目标
 
 - 不改变现有界面交互和任务状态集合。
-- Web 版不接微信（微信读取依赖本机微信客户端）。
-- 不在本文设计计费、团队权限等 SaaS 功能（共享邮箱问题列入 §8 待决）。
+- 本期不做 Web 版（D3）；将来做时也不接微信（微信读取依赖本机微信客户端）。
+- 不设计计费、团队权限等 SaaS 功能（共享邮箱问题随 Web 版暂缓，见 §8）。
 
 ## 2. 现状耦合盘点
 
@@ -152,28 +166,38 @@
 │ → 自动发送（撤回窗口）→ 简报 / 周报 / 主题 → 活动记录                                │
 └──────────────▲──────────────────────────┬───────────────────────────┬─────────────┘
                │ Channel 接口              │ Repository 接口            │ AI 端口
-   ┌───────────┴───────────┐   ┌──────────┴─────────────┐   ┌─────────┴────────────────┐
-   │ email（内置）          │   │ JSON 文件（现有，过渡） │   │ DSH 实现（现有）          │
-   │ wechat（独立插件，可选）│   │ SQLite 或 PGlite（本地）│   │ 直连模型 API（Web）       │
-   │ feishu / wecom（以后） │   │ PostgreSQL（Web）       │   │                          │
-   └───────────────────────┘   └────────────────────────┘   └──────────────────────────┘
+   ┌───────────┴────────────────┐ ┌────────┴──────────────────┐ ┌─────────┴────────────────┐
+   │ email（内置在工作台）        │ │ JSON 文件（仅过渡，之后删除）│ │ DSH 实现（现有）          │
+   │ wechat（渠道插件，可选）     │ │ SQLite（本地，D1）          │ │ 直连模型 API（Web，暂缓）  │
+   │ feishu / wecom（渠道插件，以后）│ │ PostgreSQL/MySQL（以后）    │ │                          │
+   └────────────────────────────┘ └───────────────────────────┘ └──────────────────────────┘
 ```
+
+**插件划分（D5、D6）**
+
+| 插件 | 内容 | 依赖 |
+| --- | --- | --- |
+| `bkms-workbench`（工作台） | 核心、存储、AI 端口、**内置邮件渠道**（`src/mail/` 不拆出） | 无渠道插件依赖；只装它就是完整的邮件工作台 |
+| `bkms-workbench-wechat` | 微信渠道：`src/wechat.ts`、`wechat/` Python 桥与 `wxread/`、`client/wechat.tsx`、自己的中英文字典 | 依赖工作台提供的 `workbenchChannels`；工作台不依赖它 |
+| 以后的 `bkms-workbench-feishu` 等 | 各自的渠道实现 | 同上 |
+
+渠道插件不自建数据库：任务、游标、渠道状态都通过渠道接口交给工作台，存在工作台的数据库里并按渠道区分；卸载渠道插件不丢数据。
 
 建议的目录（落地时可调整）：
 
 ```text
 src/core/              引擎编排（队列、调度）、分拣、方案匹配、审核动作、快照组装、简报
 src/channels/types.ts  Channel 接口；registry.ts 渠道注册表
-src/channels/email/    邮件渠道：包装 src/mail，迁入 engine/api 里的邮件逻辑
-src/storage/           仓储接口；json/（包装现有 Store）；sql/（Kysely：SQLite / PGlite / PostgreSQL）
+src/channels/email/    内置邮件渠道：包装 src/mail，迁入 engine/api 里的邮件逻辑
+src/storage/           仓储接口；json/（过渡，包装现有 Store）；sql/（Kysely，现为 SQLite）
 src/ai/                AI 端口的 DSH 实现（现 agent.ts、structured.ts、writer.ts 等）
 src/mail/              不动（移植代码）
-bkms-workbench-wechat  独立插件：src/wechat.ts、wechat/、client/wechat.tsx 迁入
+bkms-workbench-wechat  渠道插件：src/wechat.ts、wechat/、client/wechat.tsx 迁入
 ```
 
 **挂接方式**
-- DSH：核心插件 `ctx.provide('workbenchChannels', registry)`（与现有 `ctx.provide('workbenchMail')` 同一机制）。微信插件 `inject: ['workbenchChannels']`，`apply` 中 `const off = ctx.workbenchChannels.register(wechatChannel)`，并用 `ctx.effect` 在卸载时注销。注册表检查 `apiVersion`，不兼容则拒绝并在设置页提示。
-- Web：服务启动时静态注册邮件渠道。
+- 工作台 `ctx.provide('workbenchChannels', registry)`（与现有 `ctx.provide('workbenchMail')` 同一机制）。微信插件 `inject: ['workbenchChannels']`，`apply` 中 `const off = ctx.workbenchChannels.register(wechatChannel)`，并用 `ctx.effect` 在卸载时注销。注册表检查 `apiVersion`，不兼容则拒绝并在设置页提示。内置邮件渠道在工作台启动时直接注册。
+- 这套跨插件挂接尚未在真实 DSH 验证过，拆插件前先用最小示例插件验证（D7，§7 阶段 0）。
 - **渠道缺席时**（微信插件已卸载）：该渠道的任务保留，用通用方式显示（标题、对方、正文）；需要渠道的动作返回 `channel-unavailable`（503）；游标和渠道状态原样保留；只选了 `sources: ['wechat']` 的方案不再命中任何信息。
 
 ## 4. 渠道接口草案
@@ -373,7 +397,7 @@ export interface ClientChannel {
 }
 ```
 
-- **注册**：单插件阶段用静态注册表；拆插件后，核心前端提供客户端注册服务（`ctx.provide` 或插件自定义插槽，如 `bkms-workbench.channel`），微信插件前端注册自己的 `ClientChannel`。**DSH 客户端运行时是否支持插件间 provide/自定义插槽需在真实 DSH 验证**；不支持时退回到核心内置微信前端代码、只拆后端。
+- **注册**：单插件阶段用静态注册表；拆插件后，核心前端提供客户端注册服务（`ctx.provide` 或插件自定义插槽，如 `bkms-workbench.channel`），微信插件前端注册自己的 `ClientChannel`。**DSH 客户端运行时是否支持插件间 provide/自定义插槽需在真实 DSH 验证**（D7）；不支持时的退路：微信界面代码暂留工作台前端，只在微信渠道已注册时显示——后端拆开、前端暂不完全拆开。
 - **渠道前端缺席**：任务按通用方式显示，只保留“忽略、重新处理、选择方案”等核心动作。
 - **i18n 与样式**：渠道插件自带 `en.json` / `system-en.json`，在自己的命名空间注册；`test/i18n.test.mjs` 的规则同样适用；只用核心 `styles.css` 的颜色变量，深色模式与 ≤1000px 单栏要求不变。
 
@@ -385,7 +409,7 @@ export interface ClientChannel {
 - 任何读都整读整校验；任何写都整文件重写、全量校验并 fsync。页面、全局提醒、后台各自每 5–8 秒整读一次；后台开启时每轮还整写一次（§1.1）。
 - 无法分页或索引；快照每 8 秒把全部任务（含正文）发给页面。
 - 调用方自己找任务、比 revision、写日志与活动记录，事务边界散落在业务代码里；换数据库时无法逐处改写。
-- 多用户 Web 版下整文档模型不成立。
+- 以后若做多用户服务器版，整文档模型也不成立。
 
 ### 5.2 设计原则
 
@@ -394,7 +418,7 @@ export interface ClientChannel {
 3. **乐观锁沿用三种 revision**：任务 `revision`、配置 `configRevision`、草稿 `draftRevision`（邮件模块）。文档级 `revision` 变为每用户的“变更序号”`changeSeq`，只用于页面判断是否需要刷新（`preferences.stateRevision` 已在用）。冲突继续返回 `409 conflict`，前端无需改动。
 4. **用户范围隐含在实例里**：`openRepository({ userId })` 返回绑定用户的实例，方法签名不出现 `user_id`，避免漏传；本地固定 `userId = 'local'`。
 5. **读写模型分开**：列表用摘要投影（不含 `body`、`bodyHtml`、历史），详情按 id 取全文。
-6. **实现可替换**：`JsonRepository`（包装现有 `Store`，同一文件、同一锁）与 `SqlRepository`（Kysely），共用一套契约测试。
+6. **实现可替换**：`SqlRepository`（Kysely，现为 SQLite）是正式实现；`JsonRepository`（包装现有 `Store`，同一文件、同一锁）只在过渡期存在，用来单独验证“只换接口、行为不变”，数据库版稳定后删除（D4）。两者共用一套契约测试。
 
 ### 5.3 接口清单
 
@@ -435,7 +459,7 @@ export interface ClientChannel {
 | **briefs** | `get()` / `save(brief, activity?)` | 今日简报 | engine 552、598 |
 | **meta** | `uiLanguage()` / `setUiLanguage(lang)` / `changeSeq()` | 界面语言、变更序号 | engine 72、73；api 134 |
 | **changes** | `since(seq)` | 自某序号以来变化的任务 id、配置是否变化 | 新增：增量快照 |
-| **worker** | `acquire(onLost)` | 后台单实例锁（本地文件锁；Web 用租约，§6.3） | engine 86 |
+| **worker** | `acquire(onLost)` | 后台单实例锁（本地文件锁；以后 Web 版用租约，§6.3） | engine 86 |
 | **search** | 见 §5.6 | | 新增 |
 
 说明：
@@ -560,7 +584,7 @@ CREATE TABLE imports (                 -- 从 workbench-v1.json 导入的记录
 CREATE TABLE schema_migrations (version integer PRIMARY KEY, applied_at text NOT NULL);
 ```
 
-Web 版另加（§6）：`mail_accounts`（加密授权码）、`mail_drafts` 与草稿附件元数据、`mailbox_leases`、任务队列表（用 pg-boss 或 graphile-worker 自带的表）。
+以后若做 Web 版（暂缓，§6）另加：`mail_accounts`（加密授权码）、`mail_drafts` 与草稿附件元数据、`mailbox_leases`、任务队列表。
 
 **取舍说明**
 - **常查询的字段成列，其余放 JSON**：任务约 40 个字段，多数可选且还在演进（如进行中的 `feat/mail-dispatch` 分支新增 `classification`、`dispatch`、`backfill`）。新增可选字段不需要改表，与 v1“新字段一律可选”的约定一致；需要按它查询时再提成列。列由一个共用的 `toRow` / `fromRow` 映射函数从 JSON 派生，两种方言共用。
@@ -569,7 +593,7 @@ Web 版另加（§6）：`mail_accounts`（加密授权码）、`mail_drafts` �
 - **保留上限**：日志、活动 1000 条，报告 200 份，任务历史 100 条，在写入事务内或定期清理时执行，与现状一致；任务总数不再受 64 MiB 限制。
 - **`feat/mail-dispatch` 分支的新数据**：`classifiers`（配置，保存时增加 `configRevision`）建与 `rules` 同构的表；`categoryExamples` 可并入 `rule_examples` 加 `kind` 列；`backfills` 放 `channel_state`（`email`，键为文件夹作用域）；`profile` 在 `settings` 内；任务上的新字段进 `detail`，“待人工分类”视图需要时把 `classification.state` 提成列。
 
-**SQLite 差异**：`jsonb` → `TEXT`、`boolean` → `INTEGER 0/1`、`bigint` → `INTEGER`；部分索引（`WHERE`）与 `ON CONFLICT`、`RETURNING`（3.35+）都支持；启用 WAL。
+**落到 SQLite（D1）时的写法**：上面用 PostgreSQL 写法便于对照服务器数据库，实际先落地的是 SQLite：`jsonb` → `TEXT`、`boolean` → `INTEGER 0/1`、`bigint` → `INTEGER`；部分索引（`WHERE`）与 `ON CONFLICT`、`RETURNING`（3.35+）都支持；启用 WAL 日志模式（读写互不阻塞，写入只追加日志文件）。迁移文件用 Kysely schema builder 编写，同一份定义可生成 SQLite 与以后服务器数据库的 DDL。
 
 ### 5.6 全文搜索接口
 
@@ -587,19 +611,19 @@ export interface SearchDoc { taskId: string; title: string; counterpart: string;
 
 难点是中文：常用词多为两个字（报价、合同、发票），而 SQLite FTS5 `trigram` 分词与 PostgreSQL `pg_trgm` 都需要 3 个字符以上才能用上索引；`unicode61` 分词不切分中文。方案对比：
 
-| 方案 | SQLite | PostgreSQL / PGlite | 评价 |
+| 方案 | SQLite（现在） | 以后的服务器数据库 | 评价 |
 | --- | --- | --- | --- |
-| **A 应用层二元切分（推荐）** | 写入与查询前用同一个 TS 函数把连续中文切成重叠二元组（“合同条款” → “合同 同条 条款”），英文按词；FTS5 `unicode61` 索引；查询用短语匹配保证相邻 | 同一函数切分后存入 `tsvector`（`simple` 配置，内置）+ GIN；查询用 `phraseto_tsquery('simple', …)` | 两种方言结果一致，不依赖扩展，PGlite 可用；两字词有索引。索引体积约为原文两倍 |
-| B 三元组 | FTS5 `tokenize='trigram'`；短于 3 字退回 `LIKE` 全表扫描 | `pg_trgm` + GIN；同样短词退化 | 实现最简单，但两字查询慢；两种方言的排序和边界不同 |
-| C 中文分词扩展 | 无对应 | `zhparser`（SCWS 分词）或 `pg_bigm`（二元组索引，原生支持两字 `LIKE`） | 质量好，但托管云是否提供要按厂商确认；PGlite 不可用；本地与 Web 结果不同 |
+| **A 应用层二元切分（推荐）** | 写入与查询前用同一个 TS 函数把连续中文切成重叠二元组（“合同条款” → “合同 同条 条款”），英文按词；FTS5 `unicode61` 索引；查询用短语匹配保证相邻 | PostgreSQL：同一函数切分后存入 `tsvector`（`simple` 配置，内置）+ GIN，查询用 `phraseto_tsquery('simple', …)`；MySQL：同一函数切分后用 InnoDB `FULLTEXT` 短语查询 | 换数据库后结果一致，不依赖扩展；两字词有索引。索引体积约为原文两倍 |
+| B 三元组 | FTS5 `tokenize='trigram'`；短于 3 字退回 `LIKE` 全表扫描 | PostgreSQL `pg_trgm` + GIN，同样短词退化 | 实现最简单，但两字查询慢；不同数据库的排序和边界不同 |
+| C 数据库自带的中文切分 | 无对应 | PostgreSQL 扩展 `zhparser`（SCWS 分词）或 `pg_bigm`（二元组索引）；MySQL 内置 `ngram` 全文解析器（默认二元） | 质量好、省去应用层切分，但 PostgreSQL 扩展要看托管云是否提供；与本地 SQLite 结果不同 |
 
-- JSON 实现：内存子串匹配（现 `topicMatches` 的做法），只用于过渡期。
+- 过渡期的 JSON 实现：内存子串匹配（现 `topicMatches` 的做法），随 JSON 实现一起删除。
 - 主题匹配数（`api.ts:95` 每次快照对所有主题扫描全部任务）改为通过搜索接口按关键词查询，结果按 `changeSeq` 缓存。
 - 契约测试只断言“固定语料中应命中的一定命中、不应命中的不命中”，不断言排序。
 
-### 5.7 查询层：Kysely 双方言
+### 5.7 查询层：Kysely（现为 SQLite，可换服务器数据库）
 
-**为什么是 Kysely**：只是类型安全的 SQL 构造器，表结构用一个 TypeScript `Database` 接口描述，两种方言共用；官方支持 PostgreSQL（`pg`）与 SQLite（`better-sqlite3`），PGlite、`node:sqlite` 有社区方言；不隐藏 SQL，少数需要方言分支的地方可以直接写。
+**为什么是 Kysely**：只是类型安全的 SQL 构造器，表结构用一个 TypeScript `Database` 接口描述，各方言共用；官方支持 SQLite（`better-sqlite3`）、PostgreSQL（`pg`）与 MySQL（`mysql2`），`node:sqlite` 有社区方言；不隐藏 SQL，少数需要方言分支的地方可以直接写。现在只实现 SQLite；以后做服务器版时新增 PostgreSQL 或 MySQL 实现，业务代码和仓储接口不变。
 
 | 备选 | 不选的原因 |
 | --- | --- |
@@ -621,61 +645,59 @@ export interface SearchDoc { taskId: string; title: string; counterpart: string;
 | 全文搜索 | FTS5 虚表 | `tsvector` + GIN | `SearchIndex` 两个实现，切分函数共用 |
 | 迁移 DDL | 类型名不同 | | 迁移用 Kysely schema builder，加 `json()`、`bool()` 两个按方言出类型的小函数 |
 
-**本地驱动选择**：本插件目前**没有任何原生模块**依赖（`package.json`：imapflow、mailparser、nodemailer、proper-lockfile、yaml）。`better-sqlite3` 是原生模块，需要按平台和 DSH 内置 Node 的 ABI 提供预编译文件；`node:sqlite` 在 Node 22.13 起无需参数即可用，但仍标为实验性（会打印警告），需要社区 Kysely 方言；PGlite 是 WASM，无原生模块。
+以后若服务器版选 MySQL 8，额外差异：upsert 用 `ON DUPLICATE KEY UPDATE`（Kysely `onDuplicateKeyUpdate`）；没有 `RETURNING`，`claimNext` 等改为“条件更新后按 id 再读”；`SKIP LOCKED` 8.0 起支持；`JSON` 类型由映射函数处理；全文搜索见 §5.6。这些都封装在仓储实现里，契约测试保证行为一致。
 
-**仓储契约测试（关键）**：一套测试函数 `repositoryContract(makeRepo)`，覆盖每个仓储方法的结果、409/404 错误码、游标比对、去重、`claimNext` 互斥、保留上限、搜索命中。`pnpm test` 默认跑 JSON 与本地数据库实现；设置 `DATABASE_URL` 时再跑 PostgreSQL（CI 用服务容器）。三种实现行为一致由这套测试保证，而不是靠人工对照。
+**本地驱动（D2）**：本插件目前**没有任何原生模块**依赖（`package.json`：imapflow、mailparser、nodemailer、proper-lockfile、yaml）。
+- 首选 `better-sqlite3`：最常用、最快，同步 API 与现在“同步事务”的写法最接近；但它是原生模块，需要按平台和 DSH 内置 Node 的 ABI 提供预编译文件。
+- 退路 `node:sqlite`：Node 自带（22.13 起无需参数），底层同样是 SQLite C 库，性能相近，不用打包；但仍标为实验性（会打印一条警告），需要社区 Kysely 方言。
+- 选定方法见 §5.8 第 1 项。
 
-### 5.8 PGlite 作为本地统一方言的备选
+**仓储契约测试（关键）**：一套测试函数 `repositoryContract(makeRepo)`，覆盖每个仓储方法的结果、409/404 错误码、游标比对、去重、`claimNext` 互斥、保留上限、搜索命中。`pnpm test` 默认跑 SQLite 实现（过渡期另跑 JSON 实现）；以后有服务器数据库实现时，设置 `DATABASE_URL` 再跑同一套测试。各实现行为一致由这套测试保证，而不是靠人工对照。
 
-**好处**：本地与 Web 同一方言——同一套迁移、同一套 SQL、同样的搜索实现，`claimNext` 也不需要方言分支；纯 WASM，不引入原生模块；支持部分 contrib 扩展。
+### 5.8 SQLite 落地前需实测（PGlite 不采用）
 
-**风险**：同一数据目录只能被一个进程打开（现在 `ownWorker` 已要求同一 DSH_HOME 只有一个后台，API 与后台同在 DSH 进程内，问题应不大，但要验证 DSH 多进程场景）；常驻内存与启动耗时；数据目录格式绑定 PostgreSQL 大版本，PGlite 升级大版本需导出再导入；Windows 上强杀进程后的一致性；社区 Kysely 方言的成熟度。
+**不采用 PGlite 的原因（D1）**：PGlite 是把 PostgreSQL 编译成 WebAssembly 在进程内运行，好处是与服务器 PostgreSQL 同一方言；但多一层 WASM、只有一个连接，查询更慢、启动更慢、常驻内存几十 MB 起，项目也较新（2024 年起），数据目录还绑定 PostgreSQL 大版本。性能优先时 SQLite 更合适；方言差异由 Kysely 与契约测试吸收。
 
-**需实测**（1–2 天 spike，在用户的 Windows 机器与 DSH 内运行）：
+**需实测**（在用户的 Windows 机器与 DSH 内运行；第 1 项在阶段 0 先做，其余在阶段 4 开始时做）：
 
 | # | 项目 | 通过标准 |
 | --- | --- | --- |
-| 1 | 冷启动：打开含 1 万任务（约 150 MB）的数据目录 | < 2 秒 |
-| 2 | 常驻内存增量 | < 150 MB |
-| 3 | 1 万任务下：摘要分页、`claimNext`、单任务更新 | p95 分别 < 20、20、30 毫秒 |
-| 4 | 处理中强杀 DSH 进程 100 次 | 每次都能打开，数据完整 |
+| 1 | `better-sqlite3` 预编译文件能否随插件安装（`pnpm run pack:plugin` 的 tgz 与 `启动工作台.cmd`），并在 DSH 内置 Node 中加载；Windows x64 必测，macOS 可在有设备时测 | 能加载即用 `better-sqlite3`；不能则改用 `node:sqlite`，并确认 DSH 的 Node 版本（`^22.19 \|\| >=24`）可用 |
+| 2 | 1 万任务（约 150 MB）下：摘要分页、`claimNext`、单任务更新 | p95 分别 < 10、10、20 毫秒 |
+| 3 | 冷启动打开上述数据库 | < 1 秒 |
+| 4 | 处理中强杀 DSH 进程 100 次（WAL 模式） | 每次都能打开，数据完整 |
 | 5 | Windows Defender 实时扫描下连续写入 | 无失败，或短暂重试后恢复（`WinError 5/32`） |
-| 6 | 第二个进程打开同一数据目录 | 明确报错，不损坏数据 |
-| 7 | 中文搜索（方案 A） | 与 SQLite 实现通过同一组搜索契约测试 |
-| 8 | DSH 内置 Node 版本（`^22.19 \|\| >=24`）下运行 | 通过 |
-| 9 | 安装包体积增量 | 记录 |
-| 10 | PGlite 升级大版本的数据迁移 | 有可用的导出/导入脚本 |
-| 11 | Kysely PGlite 方言：事务、错误码映射 | 契约测试通过 |
-| 12 | 备份恢复：复制数据目录、`dumpDataDir` | 能恢复 |
-
-SQLite 对照项：Windows x64/arm64、macOS arm64/x64 的预编译 `better-sqlite3` 能否随插件安装并在 DSH 的 Node 中加载；WAL 模式下强杀与杀毒软件占用；`node:sqlite` 作为退路。
-
-**决策规则**：PGlite 通过 1–6 与 8，本地用 PGlite；否则用 SQLite（`better-sqlite3` 优先，打包不可行时用 `node:sqlite`）。两种结果都不影响仓储接口与契约测试。
+| 6 | 第二个进程打开同一数据库并尝试写入 | 等待或明确报错，不损坏数据；后台单实例仍由 `ownWorker` 锁保证 |
+| 7 | 中文搜索（方案 A）：固定语料的两字、三字、英文查询 | 搜索契约测试通过 |
+| 8 | 备份恢复：用 SQLite 在线备份接口导出，再从备份打开 | 能恢复 |
 
 ### 5.9 从 `workbench-v1.json` 迁移
 
-**阶段 A：仓储接口 + JSON 实现**。文件格式不变，旧版本插件照常读写，无需迁移。
+**阶段 A：仓储接口 + JSON 实现（过渡）**。文件格式不变，旧版本插件照常读写，无需迁移。
 
-**阶段 B：数据库**
+**阶段 B：SQLite**
 
-1. **触发**：启动时数据库没有导入记录且存在 `workbench-v1.json` → 用现有 `Store.read()` 读取（含 `validateState`）。文件不合法时不导入，继续用 JSON 实现并在设置页提示，原文件不动。
+1. **触发**：启动时数据库没有导入记录且存在 `workbench-v1.json` → 用现有 `Store.read()` 读取（含 `validateState`）。文件不合法时不导入，原文件不动，在设置页提示并暂停后台处理（不会在空库上从头收信）。
 2. **导入**：一个事务写入全部表，记录文件 sha256 与 `revision` 到 `imports`（重复启动不会重复导入）。
-3. **往返校验**：从数据库导出为 `State`，与原文件深比较（读取时计算的默认值除外）；不一致则回滚，继续用 JSON 实现并保存诊断信息。
+3. **往返校验**：从数据库导出为 `State`，与原文件深比较（读取时计算的默认值除外）；不一致则回滚、保存诊断信息，按第 1 步的方式提示并暂停。
 4. **冻结原文件**：先另存 `workbench-v1.pre-db-<时间>.json` 备份；再用现有 `Store.mutate` 把 `settings.enabled` 置为 `false`，并追加日志“数据已迁移到数据库，此文件为迁移时的备份；如需回退请先在新版本中导出”。旧版本插件（或回退后）打开时：能读（仍是合法的 version 1）、后台不自动处理（不会用旧游标重复收信、重复起草或自动发送）、界面能看到说明。这一步只用到 v1 已有字段。
 5. **不做双写**：之后新插件只读写数据库。双写的一致性问题比收益大。
-6. **降级/回退**：设置中提供“导出为 v1 文件”（另配命令行脚本），从数据库导出完整 `State` 写回 `workbench-v1.json`（写前备份当前文件）；导出文件保持 `version: 1`，新增字段全部可选，旧版本插件可读。JSON 实现保留至少一个版本周期，可在设置中切回。
+6. **降级/回退**：设置中提供“导出为 v1 文件”（另配命令行脚本），从数据库导出完整 `State` 写回 `workbench-v1.json`（写前备份当前文件）；导出文件保持 `version: 1`，新增字段全部可选，旧版本插件可读。不提供“切回 JSON 存储”的开关（D4）：回退方式是导出 v1 文件后安装旧版本插件。
 7. **坐标映射**：
    - 邮件任务：`channel = 'email'`、`scope = JSON.stringify([account, folder])`、`item_key = ${uidValidity}:${uid}`。
    - 微信任务（`source.kind === 'wechat'`）：`channel = 'wechat'`、`scope = source.folder`（会话 id）、`item_key = String(source.uid)`（`toSeq`）。
    - `cursors[key]` → `channel_cursors('email', key)`（键已是 `JSON([account, folder])`）。
    - `wechat.watermarks[chat]` → `channel_cursors('wechat', chat, { seq })`；`wechat.pending[chat]` → `channel_state('wechat', chat)`。
    - 其余字段见附录 B。
-8. **邮件模块文件不迁移**：本地版的 `accounts.json`（含授权码）、`drafts/drafts-v1.json`、附件目录保持原样，由移植的邮件模块继续管理；Web 版另行建表（§6）。
+8. **邮件模块文件不迁移**：本地版的 `accounts.json`（含授权码）、`drafts/drafts-v1.json`、附件目录保持原样，由移植的邮件模块继续管理；以后若做 Web 版再另行建表（§6）。
+10. **删除 JSON 实现**：SQLite 版本在用户环境稳定运行后，删除过渡用的 `JsonRepository` 与相关测试，只保留导入和“导出为 v1 文件”所需的读写代码。
 9. **用真实数据验证**：提供 `scripts/check-migration.mjs <workbench-v1.json 副本>`：导入临时库 → 导出 → 比较 → 输出耗时与差异。用户在 Windows 本机对 1.4 MB 数据的**副本**运行。
 
 **版本语义**：数据库有自己的 `schema_migrations`，独立演进；`workbench-v1.json` 始终是 `version: 1` 的交换格式（导入、导出、备份），符合 `CLAUDE.md` 的数据兼容约定。
 
-## 6. Web 版额外问题
+## 6. Web 版额外问题（暂缓）
+
+> 2026-10-22 决定 Web 版暂不做（D3），本节只作为以后的参考，不在当前计划内。当前设计为它保留的只有两点：每张表带 `user_id`（本地固定 `'local'`）；仓储接口与 AI 端口不依赖 DSH 的具体实现。下文中的 PostgreSQL 写法同样适用于以后选 MySQL 的情况，具体差异届时再定。
 
 ### 6.1 多用户隔离
 
@@ -730,27 +752,32 @@ Web 实现：
 
 ## 7. 分阶段落地
 
-每个阶段一个功能分支、一个 PR，用户本地验证后合并。阶段 1 与阶段 2 都大量改动 `engine.ts`、`api.ts`，应**依次进行**，不要并行。
+**用户确认之前不进入开发**；以下是确认后的执行顺序。每个阶段一个功能分支、一个 PR，用户本地验证后合并。阶段 1 与阶段 2 都大量改动 `engine.ts`、`api.ts`，应**依次进行**，不要并行。
 
 | 阶段 | 目标与主要改动 | 验证方式 | 主要风险 |
 | --- | --- | --- | --- |
-| **0 护栏** | 契约测试骨架（先针对现有 `Store` 语义）；性能基线脚本（读写耗时、快照大小）；“核心不得引用微信”的检查（先以白名单记录现状） | `pnpm test`；基线数据记录在 PR | 低 |
-| **1 仓储接口 + JSON 实现** | 65 处调用换成 §5.3 的方法；快照拆为摘要列表 + 详情，`changeSeq` 不变时返回 `unchanged`；`claimNext` 无任务时不写盘 | 现有测试全过（测试里 83 处直接用 `Store` 的保持可用）；契约测试；用用户真实数据副本对比新旧快照输出；用户环境确认空闲时数据文件不再每 5 秒改写 | 事务边界细微变化，逐处对照附录 A |
-| **2 渠道接口（单插件内）** | `Channel` 接口与注册表；邮件、微信两个实现；核心去掉 kind 分支；任务持久化形状不变 | 现有 `wechat`、`workbench`、`redesign` 等测试不改即通过；新增“假渠道”测试证明核心不改就能接第三个渠道；静态检查 `src/core` 不含微信 | 分拣/准备分支合并引入回归：先原样搬迁，再合并重复逻辑 |
-| **3 前端扩展点** | `ClientChannel` 注册；微信界面迁入 `client/channels/wechat/` | `test/i18n.test.mjs`；`scripts/seed-visual-qa.mjs` 生成数据后截图检查中英文、深色、≤1000px | DSH 客户端跨插件扩展机制未验证：本阶段先用静态注册 |
-| **4 本地数据库** | §5.8 spike 定 SQLite / PGlite；`SqlRepository`（Kysely）；搜索（方案 A）；导入、冻结、导出 | 契约测试覆盖三种实现；`check-migration.mjs` 在用户真实数据副本上往返一致；强杀进程测试；1 万任务性能；回退到旧版本插件时后台确实不处理 | 原生模块打包或 PGlite 稳定性；降级后重复处理（由冻结缓解） |
-| **5 微信独立插件** | `bkms-workbench-wechat`：`workbenchChannels` 服务、Python 桥与 `wxread/` 迁移（`NOTICE.md` 随迁）、前端注册 | 真实 DSH 中安装/卸载微信插件；卸载后微信任务仍可查看；只装工作台时邮件功能完整 | `ctx.provide` 跨插件注入未在真实 DSH 验证（已在 `CLAUDE.md` 未验证清单）；两插件版本兼容（`apiVersion`） |
-| **6 Web 版（邮件）** | PostgreSQL 实现与 RLS、登录、授权码加密、租约与队列、AI Web 实现、对象存储、定时任务、独立前端外壳 | PostgreSQL 契约测试（CI 服务容器）；跨用户隔离与 RLS 测试；双 worker 抢租约测试；测试邮箱真实收发；模型端到端 | AI 工具/技能能力缩水；数据合规；服务商连接数限制 |
+| **0 护栏与两项小验证** | 契约测试骨架（先针对现有 `Store` 语义）；性能基线脚本（读写耗时、快照大小）；“核心不得引用微信”的检查（先以白名单记录现状）。两项在真实 DSH 中的小验证：① `better-sqlite3` 能否随插件安装并加载（§5.8 第 1 项，决定驱动，D2）；② 用最小示例插件验证跨插件挂接——后端 `ctx.provide` / `inject`，前端由另一插件扩展工作台界面（D7） | `pnpm test`；基线数据与两项验证结果记录在 PR | 低；两项验证的结论可能改变阶段 3、5 的做法（见各自退路） |
+| **1 仓储接口 + JSON 实现（过渡）** | 65 处调用换成 §5.3 的方法；快照拆为摘要列表 + 详情，`changeSeq` 不变时返回 `unchanged`；`claimNext` 无任务时不写盘 | 现有测试全过（测试里 83 处直接用 `Store` 的保持可用）；契约测试；用用户真实数据副本对比新旧快照输出；用户环境确认空闲时数据文件不再每 5 秒改写 | 事务边界细微变化，逐处对照附录 A |
+| **2 渠道接口（单插件内）** | `Channel` 接口与注册表；内置邮件、微信两个实现；核心去掉 kind 分支；任务持久化形状不变 | 现有 `wechat`、`workbench`、`redesign` 等测试不改即通过；新增“假渠道”测试证明核心不改就能接第三个渠道；静态检查 `src/core` 不含微信 | 分拣/准备分支合并引入回归：先原样搬迁，再合并重复逻辑 |
+| **3 前端扩展点** | `ClientChannel` 注册；微信界面迁入 `client/channels/wechat/` | `test/i18n.test.mjs`；`scripts/seed-visual-qa.mjs` 生成数据后截图检查中英文、深色、≤1000px | 本阶段先用静态注册；若阶段 0 验证出前端不能跨插件扩展，微信界面按退路暂留工作台前端 |
+| **4 SQLite** | §5.8 其余实测；`SqlRepository`（Kysely + SQLite）；搜索（方案 A）；导入、冻结、导出 v1；稳定后删除 JSON 实现 | 契约测试（SQLite，过渡期另跑 JSON）；`check-migration.mjs` 在用户真实数据副本上往返一致；强杀进程测试；1 万任务性能；回退到旧版本插件时后台确实不处理 | 原生模块打包（退路 `node:sqlite`）；降级后重复处理（由冻结缓解） |
+| **5 微信渠道插件** | `bkms-workbench-wechat`：`workbenchChannels` 服务、Python 桥与 `wxread/` 迁移（`NOTICE.md` 随迁）、前端注册 | 真实 DSH 中安装/卸载微信插件；卸载后微信任务仍可查看；只装工作台时邮件功能完整 | 两插件版本兼容（`apiVersion`）；跨插件挂接的风险已在阶段 0 提前验证 |
+| ~~6 Web 版~~ | **暂缓（D3）**，内容见 §6 | | |
 
-阶段 1 完成后已经能解决本地的读写放大问题；阶段 2 完成后“只有邮件”的版本在 DSH 内已能独立成立（微信只是一个可不启用的渠道）；阶段 5 才是物理拆分。
+阶段 1 完成后已经能解决本地的读写放大问题；阶段 2 完成后，工作台（内置邮件）在 DSH 内已能独立成立，微信只是一个可不启用的渠道；阶段 4 换成 SQLite；阶段 5 才是物理拆分。
 
-## 8. 待决问题
+## 8. 问题状态
 
-1. **本地 SQLite 还是 PGlite**：按 §5.8 实测结果决定，建议阶段 4 开始时先做 spike。
-2. **Web 版用哪家模型服务、准备阶段是否需要工具与技能**：决定 §6.4 的工作量。
-3. **Web 版是否需要共享邮箱或团队**（例如多人处理 `sales@`）：需要的话数据归属应是工作区而不是个人，表上要加 `workspace_id`。建议阶段 6 定表结构前决定；本地版不受影响（固定单用户）。
-4. **JSON 实现保留多久**：建议至少保留一个版本周期作为回退。
-5. **微信插件的发布与版本策略**：独立仓库还是同仓多包；`CHANNEL_API_VERSION` 升级时的兼容规则。
+**已决（2026-10-22，见 §0.1）**
+- 本地数据库：SQLite（D1）；驱动 `better-sqlite3` 优先、`node:sqlite` 退路，阶段 0 验证后定（D2）。
+- Web 版：暂缓（D3）；随之暂缓的问题——用哪家模型服务、准备阶段是否需要工具与技能（§6.4）、是否支持多人共用邮箱（需要的话表上加 `workspace_id`）。
+- JSON 存储：只作过渡和导入/导出格式，稳定后删除，不提供切回开关（D4）。
+- 渠道形态：每个渠道一个插件，邮件内置（D5）；渠道数据存在工作台数据库（D6）。
+
+**仍待决定**
+1. **微信插件的发布方式**：独立仓库，还是与工作台同仓库、分别打包。
+2. **渠道接口的版本规则**：`CHANNEL_API_VERSION` 升级时，旧版微信插件如何处理（拒绝加载并提示升级，或兼容一个版本）。
+3. **阶段 0 两项验证的结论**：会决定 SQLite 驱动，以及微信界面能否随插件一起拆出。
 
 ## 附录 A：65 处整文档读写的对照
 
