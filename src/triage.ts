@@ -1,5 +1,6 @@
 import { selectedModel } from './agent.js'
 import { runStructured, text } from './structured.js'
+import { businessSchema, parseBusiness } from './classify.js'
 import { TRIAGE_CATEGORIES, WorkbenchError, type TriageCategory, type TriageInput, type TriageOutput, type TriageRunner } from './types.js'
 
 export const TRIAGE_TOOL = 'bkms_workbench_triage'
@@ -44,22 +45,33 @@ export function heuristicTriage(mail: TriageInput['mail']): Omit<TriageOutput, '
   }
 }
 
-export function parseTriage(args: any, ruleIds: Set<string>): TriageOutput {
-  if (Object.keys(args).some(key => !['category', 'urgency', 'reason', 'nextStep', 'ruleId', 'confidence', 'ruleReason'].includes(key))) throw new WorkbenchError('分拣结果包含未知字段。')
+/** With a classification scheme the model also fills in `business`: one business category for the message. */
+export const triageSchema = (classified: boolean) => classified ? { ...schema, required: [...schema.required, 'business'], properties: { ...schema.properties, business: businessSchema } } : schema
+export function parseTriage(args: any, ruleIds: Set<string>, categoryIds?: Set<string>): TriageOutput {
+  if (Object.keys(args).some(key => !['category', 'urgency', 'reason', 'nextStep', 'ruleId', 'confidence', 'ruleReason', ...(categoryIds ? ['business'] : [])].includes(key))) throw new WorkbenchError('分拣结果包含未知字段。')
+  if (categoryIds && args.business === undefined) throw new WorkbenchError('分拣结果缺少业务分类。')
   if (!TRIAGE_CATEGORIES.includes(args.category) || !['high', 'normal', 'low'].includes(args.urgency)) throw new WorkbenchError('分拣结果类别无效。')
   const ruleId = typeof args.ruleId === 'string' ? args.ruleId.trim() : ''
   if (args.confidence !== undefined && !['high', 'medium', 'low'].includes(args.confidence)) throw new WorkbenchError('分拣结果把握程度无效。')
   const known = ruleIds.has(ruleId)
   // A pick without a stated confidence is treated as uncertain, so it is suggested rather than applied.
-  return { category: args.category, urgency: args.urgency, reason: text(args.reason ?? '', 400, 'reason').slice(0, 200), nextStep: text(args.nextStep ?? '', 200, 'nextStep').slice(0, 80), ruleId: known ? ruleId : '', confidence: known ? args.confidence ?? 'medium' : 'low', ruleReason: text(args.ruleReason ?? '', 400, 'ruleReason').slice(0, 200) }
+  return { category: args.category, urgency: args.urgency, reason: text(args.reason ?? '', 400, 'reason').slice(0, 200), nextStep: text(args.nextStep ?? '', 200, 'nextStep').slice(0, 80), ruleId: known ? ruleId : '', confidence: known ? args.confidence ?? 'medium' : 'low', ruleReason: text(args.ruleReason ?? '', 400, 'ruleReason').slice(0, 200), ...(categoryIds ? { business: parseBusiness(args.business, categoryIds) } : {}) }
 }
+/** How the model chooses a business category; only added when the folder has a classification scheme. */
+const BUSINESS_PROMPT = `
+另外，这条信息所在的文件夹有业务分类方案（classifier）。在 business 中为它选一个且只选一个分类：
+- 依据每个分类的 include（属于本类）、exclude（不属于本类，即边界）和 examples（用户确认过的判断：match=true 属于该分类，match=false 是用户纠正过“不属于”，相似信息必须遵循）。
+- classifier.guidance 是分类之间的取舍规则，优先于你自己的判断；同时符合多类时按 guidance 取舍，guidance 没说的按 categories 的先后顺序（越靠前越优先）。
+- fallback=true 的分类表示“不属于以上任何一类”，只有明确不属于其他任何分类时才选它。
+- confidence 只有明确符合时才填 high；能想到两个分类都说得通、或信息太少时填 medium 或 low，由用户决定。alternatives 填其次可能的分类 id。
+- 业务分类与上面的 category（信息类型）相互独立，两者都要填。reason 同样使用给用户看的语言。`
 
 export function createTriageRunner(ctx: any): TriageRunner {
   return {
     available: () => { try { const agents = typeof ctx.get === 'function' ? ctx.get('agents') : ctx.agents; return typeof agents?.create === 'function' && selectedModel(ctx) !== undefined } catch { return false } },
     run: (input, signal) => runStructured(ctx, {
-      name: TRIAGE_TOOL, description: '提交这条信息的分拣结果。', schema, input, signal,
-      parse: args => parseTriage(args, new Set(input.rules.map(rule => rule.id))),
+      name: TRIAGE_TOOL, description: '提交这条信息的分拣结果。', schema: triageSchema(!!input.classifier), input, signal,
+      parse: args => parseTriage(args, new Set(input.rules.map(rule => rule.id)), input.classifier ? new Set(input.classifier.categories.map(category => category.id)) : undefined),
       system: `你是工作台的信息分拣助手。判断一条新信息是什么、是否需要收件人处理，以及应该交给哪个候选处理方案。
 只在候选方案中选择 ruleId。候选方案只是通过了发件人、主题、文件夹等字面条件，并不代表适用；你需要根据方案名称、适用说明(semantic)、处理要求摘要(hint)和例子(examples)判断这条信息是否真正属于该方案。examples 是用户确认过的历史判断：match=true 表示属于该方案，match=false 表示用户纠正过“不属于”，遇到相似信息时必须遵循。
 output=dispatch 的方案表示把信息转交给某个团队、岗位或个人处理（移到其文件夹），按适用说明判断这封信是否归它负责。
@@ -69,7 +81,7 @@ mail.body 是对方这次新写的内容；mail.quotedHistory 是邮件里引用
 若 thread.previousRule 存在，表示同一往来的上一封由该方案处理；本次仍是同一业务的继续（如确认报价、补充数量、询问进度）时优先沿用该方案并给 high，业务已经变了（如从询价转为售后）时按实际内容选择。
 系统自动通知、账单、提醒、验证码归为 notification；营销推广归为 marketing。只有对方需要收件人做事或回复时才归为 request 或 reply_needed。
 nextStep 要具体，例如“确认 500 台报价并今天回复”“补充 10/09 的高铁票”；无需行动时留空。不要编造邮件中没有的事实。
-语言：reason、nextStep、ruleReason 是给用户看的说明，一律使用${input.uiLanguage === 'en' ? '英文（English）' : '中文'}，与信息原文和方案说明使用什么语言无关；人名、公司名、型号、数量、金额保持原样。${input.mail.channel === 'wechat' ? '\n本条信息是一段微信对话记录（channel=wechat），“我”是收件人本人，subject 是会话名称。判断对方是否需要我做事或回复；微信里来自真人的消息不要归为 marketing。' : ''}`,
+语言：reason、nextStep、ruleReason 是给用户看的说明，一律使用${input.uiLanguage === 'en' ? '英文（English）' : '中文'}，与信息原文和方案说明使用什么语言无关；人名、公司名、型号、数量、金额保持原样。${input.mail.channel === 'wechat' ? '\n本条信息是一段微信对话记录（channel=wechat），“我”是收件人本人，subject 是会话名称。判断对方是否需要我做事或回复；微信里来自真人的消息不要归为 marketing。' : ''}${input.classifier ? BUSINESS_PROMPT : ''}`,
     }),
   }
 }

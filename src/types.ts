@@ -41,6 +41,28 @@ export type Confidence = 'high' | 'medium' | 'low'
 export interface MatchInfo { ruleId: string; ruleName: string; by: 'ai' | 'literal' | 'manual'; state: 'applied' | 'suggested' | 'rejected'; confidence?: Confidence; reason?: string; at: string }
 /** A message you confirmed or rejected for a workflow, kept as a short summary and shown to AI as an example. */
 export interface RuleExample { id: string; match: boolean; text: string; at: string; taskId?: string }
+/**
+ * A business category in a classification scheme, e.g. 投诉. `include` and `exclude` are the user's own definition
+ * and boundaries; the AI picks exactly one category per message. `fallback` is the scheme's "none of these" category.
+ */
+export interface ClassifierCategory { id: string; name: string; include: string; exclude?: string; action: CategoryAction; folder?: string; fallback?: true }
+/** `label` only records the category; `move` also moves the mail to `folder` (created when missing). */
+export type CategoryAction = 'label' | 'move'
+/**
+ * A classification scheme for one mailbox folder: every new message there gets exactly one category, or waits for
+ * you when the AI is unsure. Categories are in priority order; `guidance` says how to choose between them.
+ */
+export interface Classifier {
+  id: string; name: string; enabled: boolean; account: string; folder: string; guidance?: string
+  /** Classify notifications and marketing too. Off by default: they are archived as before. */
+  includeNotices?: boolean
+  categories: ClassifierCategory[]
+}
+/** The category a message got. `pending` waits for you in “待人工分类”, with the AI's ordered candidates. */
+export interface Classification {
+  classifierId: string; categoryId?: string; categoryName?: string; state: 'applied' | 'pending'
+  by: 'ai' | 'manual'; confidence?: Confidence; reason?: string; candidates?: string[]; at: string
+}
 export interface Cursor { uidValidity: number; lastUid: number }
 /** Where a task came from. Email uses mailbox coordinates; a WeChat segment reuses the same shape (account `wechat`, folder = chat id, uid = last message sequence) so older builds can still read the data. */
 export interface Source { account: string; folder: string; uid: number; uidValidity: number; kind?: 'wechat' }
@@ -109,6 +131,8 @@ export interface Task {
   autoSend?: AutoSend
   wechat?: WechatSegment
   match?: MatchInfo
+  /** Business category from a classification scheme. */
+  classification?: Classification
   /** Where a dispatch workflow moved the mail; the original is read from here afterwards. */
   dispatch?: { folder: string; uid?: number; uidValidity?: number; at: string }
   /** Picked up by processing history from a chosen start time: never sent automatically. */
@@ -157,6 +181,10 @@ export interface State {
   wechat?: WechatState
   /** Learned examples per workflow, outside `rules` so learning never bumps the configuration revision. */
   ruleExamples?: Record<string, RuleExample[]>
+  /** Classification schemes (configuration: saving one bumps `configRevision`). */
+  classifiers?: Classifier[]
+  /** Learned examples per category id, outside `classifiers` so learning never bumps the configuration revision. */
+  categoryExamples?: Record<string, RuleExample[]>
   /** Interface language last used in the workbench; AI-written review text (judgments, summaries, checks) follows it. */
   uiLanguage?: 'zh' | 'en'
   /**
@@ -194,10 +222,14 @@ export interface MailWindow { uidValidity: number; count: number; firstUid?: num
 export interface RangeMessage { uid: number; from: string; subject: string; date: string; hasAttachments: boolean; excerpt: string }
 export interface AgentOutput { summary: string; needsInfo?: string; needsInfoKind?: 'information' | 'attachments'; informationGaps?: string; subject?: string; text?: string; checks?: Check[]; lowRisk?: boolean }
 export interface AgentRunner { available(): boolean; run(task: Task, rule: Rule, signal: AbortSignal, options?: { language?: 'zh' | 'en' }): Promise<{ output: AgentOutput; sessionId?: string }> }
-export interface TriageInput { mail: { from: string; subject: string; body: string; quotedHistory?: string; hasAttachments: boolean; receivedAt: string; channel?: 'email' | 'wechat' }; thread?: { previousRule?: { id: string; name: string } }; rules: { id: string; name: string; semantic: string; output: RuleOutput; hint: string; examples?: { match: boolean; text: string }[] }[]; uiLanguage?: 'zh' | 'en' }
-export interface TriageOutput { category: TriageCategory; urgency: 'high' | 'normal' | 'low'; reason: string; nextStep: string; ruleId: string; confidence?: Confidence; ruleReason?: string }
+export interface TriageInput { mail: { from: string; subject: string; body: string; quotedHistory?: string; hasAttachments: boolean; receivedAt: string; channel?: 'email' | 'wechat' }; thread?: { previousRule?: { id: string; name: string } }; classifier?: TriageClassifier; rules: { id: string; name: string; semantic: string; output: RuleOutput; hint: string; examples?: { match: boolean; text: string }[] }[]; uiLanguage?: 'zh' | 'en' }
+export interface TriageOutput { category: TriageCategory; urgency: 'high' | 'normal' | 'low'; reason: string; nextStep: string; ruleId: string; confidence?: Confidence; ruleReason?: string; business?: BusinessVerdict }
+/** What the triage model sees of a classification scheme. */
+export interface TriageClassifier { guidance: string; categories: { id: string; name: string; include: string; exclude: string; fallback: boolean; examples: { match: boolean; text: string }[] }[] }
+/** The model's business category: one id (or empty), how sure, why, and the next likely categories. */
+export interface BusinessVerdict { categoryId: string; confidence: Confidence; reason: string; alternatives: string[] }
 export interface TriageRunner { available(): boolean; run(input: TriageInput, signal: AbortSignal): Promise<TriageOutput> }
-export type WriterKind = 'brief' | 'weekly' | 'topic' | 'trial'
+export type WriterKind = 'brief' | 'weekly' | 'topic' | 'trial' | 'classify'
 export interface WriterRunner { available(): boolean; run(kind: WriterKind, data: unknown, signal: AbortSignal): Promise<Record<string, unknown>> }
 export interface RuleSuggestion { rule: Rule; warnings: string[] }
 export type RuleAssistant = (input: { description: string; account: string; folder: string; uiLanguage?: 'zh' | 'en' }, signal: AbortSignal) => Promise<RuleSuggestion>

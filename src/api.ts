@@ -9,6 +9,7 @@ import { CLOCK, findTask, log, touch, validateWechatSettings } from './store.js'
 import { chatAllowed, wechatSettingsOf } from './wechat.js'
 import { activityEntry, exampleText, localDate, needsAttention, relations, senderKey, topicMatches, trialData } from './digest.js'
 import { sourceStatuses } from './sources.js'
+import { classifierFor, learnCategory, overlapping, triageClassifier, validateClassifier } from './classify.js'
 import { WorkbenchError, now, type RuleExample, type Task, type State, type RuleAssistant, type InstructionOptimizer, type Topic } from './types.js'
 
 const requireRevision = (revision: unknown): number => { if (!Number.isSafeInteger(revision) || Number(revision) < 1) throw new WorkbenchError('缺少有效版本，请刷新后重试。'); return Number(revision) }
@@ -109,6 +110,7 @@ export class WorkbenchApi {
       sources: sourceStatuses({ ready: health.email, accounts: accounts.length, error: providerError }, health.wechat ? { enabled: wechatSettingsOf(state.settings.wechat).enabled, ...health.wechat } : undefined), meetings: [],
       wechat: { settings: wechatSettingsOf(state.settings.wechat), pending: Object.keys(state.wechat?.pending ?? {}).length, watching: Object.keys(state.wechat?.watermarks ?? {}).length },
       ruleExamples: state.ruleExamples ?? {},
+      classifiers: state.classifiers ?? [], categoryExamples: state.categoryExamples ?? {},
     }
   }
   /**
@@ -140,6 +142,36 @@ export class WorkbenchApi {
     }
     if (ruleMode(rule) === 'ai' && by === 'rules') for (const item of judged) { item.matched = false; item.reason = '字面条件符合，但需要 AI 判断是否适用；当前没有可用的 AI，不会自动处理。' }
     return { by, total: items.length, items: items.map(item => { const mail = list.find(entry => `m${entry.uid}` === item.id)!; return { ...item, subject: mail.subject, from: mail.from, receivedAt: mail.date } }), note: '仅预览匹配结果：直接读取邮箱中这段时间的邮件，不会建立事项、移动或发送邮件。' }
+  }
+  /**
+   * Trial run of a classification scheme before saving: which category each message would get. Read-only: no item
+   * is created, nothing is moved. Mail from a chosen time range is read from the mailbox; otherwise the latest items.
+   */
+  private async trialClassifier(body: any, uiLanguage: 'zh' | 'en' | undefined, signal: AbortSignal): Promise<unknown> {
+    const classifier = validateClassifier({ ...body.classifier, enabled: true }), state = await this.engine.store.read()
+    if (!this.engine.writer?.available()) throw new WorkbenchError('试运行分类需要 AI：请先在 DSH 中配置默认模型。', 'model_unavailable', 503)
+    let mails: { id: string; from: string; subject: string; excerpt: string; receivedAt: string }[]
+    if (body.range) {
+      const email = this.engine.email()
+      if (!email.listRange) throw new WorkbenchError('当前邮件服务不支持按时间读取邮件。', 'provider', 503)
+      const since = startTime(body.range.since), until = body.range.until ? new Date(body.range.until) : new Date()
+      if (Number.isNaN(until.getTime()) || until <= since) throw new WorkbenchError('结束时间需要晚于开始时间。')
+      const account = classifier.account || (await email.accounts())[0]?.id
+      if (!account) throw new WorkbenchError('请先添加邮箱账号。')
+      mails = (await email.listRange(account, classifier.folder, since, until, 30, AbortSignal.any([signal, AbortSignal.timeout(120000)]))).map(mail => ({ id: `m${mail.uid}`, from: mail.from, subject: mail.subject, excerpt: mail.excerpt, receivedAt: mail.date }))
+    } else {
+      mails = state.tasks.filter(task => task.source.kind !== 'wechat' && task.source.folder === classifier.folder && (!classifier.account || task.account === classifier.account)).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)).slice(0, 30)
+        .map(task => ({ id: task.id, from: task.from, subject: task.subject, excerpt: (task.body || '').slice(0, 300), receivedAt: task.receivedAt }))
+    }
+    if (!mails.length) return { total: 0, items: [], note: '这段时间没有邮件。' }
+    const result = await this.engine.writer.run('classify', { classifier: triageClassifier(classifier, state.categoryExamples), mails: mails.map(({ id, from, subject, excerpt }) => ({ id, from, subject, excerpt })), uiLanguage: uiLanguage ?? this.engine.language }, AbortSignal.any([signal, this.controller.signal, AbortSignal.timeout(120000)])) as { results: { id: string; categoryId: string; confidence: 'high' | 'medium' | 'low'; reason: string }[] }
+    const byId = new Map(result.results.map(item => [item.id, item]))
+    const items = mails.map(mail => {
+      const verdict = byId.get(mail.id), category = classifier.categories.find(item => item.id === verdict?.categoryId)
+      // Only a confident pick would be applied; the rest would wait for you.
+      return { id: mail.id, subject: mail.subject, from: mail.from, receivedAt: mail.receivedAt, categoryId: category && verdict!.confidence === 'high' ? category.id : '', likely: category?.id ?? '', confidence: category ? verdict!.confidence : 'low', reason: verdict?.reason ?? '' }
+    })
+    return { total: items.length, items, note: '仅预览分类结果：不会建立事项、移动邮件或发送。' }
   }
   /** Built-in mailbox accounts: list, save, remove, set default, test a login. Passwords never leave the server. */
   private async mailAccounts(body: any, signal: AbortSignal): Promise<unknown> {
@@ -248,6 +280,37 @@ export class WorkbenchApi {
       const rule = validateRule(body.rule)
       return this.engine.store.mutate(state => { configCheck(state, body.revision); const index = state.rules.findIndex(r => r.id === rule.id); if (index < 0) state.rules.push(rule); else state.rules[index] = rule; state.configRevision++; log(state, `已保存规则「${rule.name}」。`); return { ...rule, revision: state.configRevision } })
     }
+    if (body.action === 'saveClassifier') {
+      const classifier = validateClassifier(body.classifier)
+      return this.engine.store.mutate(state => {
+        configCheck(state, body.revision)
+        const list = state.classifiers ?? [], clash = overlapping(list, classifier)
+        if (clash) throw new WorkbenchError(`分类方案「${clash.name}」已在处理这个文件夹；一封邮件只能有一个分类，请先停用其中一个。`, 'conflict', 409)
+        const index = list.findIndex(item => item.id === classifier.id), before = index < 0 ? undefined : list[index]
+        state.classifiers = index < 0 ? [...list, classifier] : list.map(item => item.id === classifier.id ? classifier : item)
+        // Examples of categories that were removed are no longer shown to the AI.
+        for (const category of before?.categories ?? []) if (!classifier.categories.some(item => item.id === category.id)) delete state.categoryExamples?.[category.id]
+        state.configRevision++; log(state, `已保存分类方案「${classifier.name}」。`)
+        return classifier
+      })
+    }
+    if (body.action === 'deleteClassifier') return this.engine.store.mutate(state => {
+      configCheck(state, body.revision)
+      const classifier = state.classifiers?.find(item => item.id === body.id)
+      if (!classifier) throw new WorkbenchError('分类方案不存在。', 'missing', 404)
+      state.classifiers = state.classifiers!.filter(item => item.id !== body.id)
+      if (!state.classifiers.length) delete state.classifiers
+      for (const category of classifier.categories) delete state.categoryExamples?.[category.id]
+      state.configRevision++; log(state, `已删除分类方案「${classifier.name}」；已有事项的分类保留。`)
+      return { deleted: true }
+    })
+    if (body.action === 'deleteCategoryExample') return this.engine.store.mutate(state => {
+      const list = state.categoryExamples?.[body.categoryId]
+      if (typeof body.categoryId !== 'string' || !list?.some(example => example.id === body.exampleId)) throw new WorkbenchError('例子不存在。', 'missing', 404)
+      state.categoryExamples![body.categoryId] = list.filter(example => example.id !== body.exampleId)
+      return { deleted: true }
+    })
+    if (body.action === 'trialClassifier') return this.trialClassifier(body, uiLanguage, signal)
     if (body.action === 'deleteExample') return this.engine.store.mutate(state => {
       const list = state.ruleExamples?.[body.ruleId]
       if (typeof body.ruleId !== 'string' || !list?.some(example => example.id === body.exampleId)) throw new WorkbenchError('例子不存在。', 'missing', 404)
@@ -386,6 +449,31 @@ export class WorkbenchApi {
     return this.exclusive(id, async () => {
       const task = findTask(await this.engine.store.read(), id, requireRevision(body.revision))
       if (task.source.kind === 'wechat' && ['loadMail', 'saveDraft', 'previewSend', 'send', 'resolveSend'].includes(body.action)) throw new WorkbenchError('微信消息只读：请复制建议回复，在微信中发送。', 'wechat-readonly', 409)
+      if (body.action === 'classify') {
+        // You choose the category: applied at once (a move moves the mail now) and remembered as an example.
+        if (task.source.kind === 'wechat') throw new WorkbenchError('微信消息不参与业务分类。', 'state', 409)
+        if (['running', 'queued', 'sending', 'uncertain'].includes(task.status)) throw new WorkbenchError('处理中不能更改分类，请稍后再试。', 'state', 409)
+        const current = await this.engine.store.read()
+        const classifier = current.classifiers?.find(item => item.id === task.classification?.classifierId) ?? classifierFor(current, task.account, task.source.folder)
+        if (!classifier) throw new WorkbenchError('这项信息所在的文件夹没有分类方案。', 'state', 409)
+        const category = classifier.categories.find(item => item.id === body.categoryId)
+        if (!category) throw new WorkbenchError('分类不存在，请刷新后重试。', 'missing', 404)
+        const previous = task.classification?.state === 'applied' && task.classification.categoryId !== category.id ? task.classification : undefined
+        const updated = await this.engine.store.mutate(state => {
+          const item = findTask(state, id, body.revision), example = exampleText(item), at = now()
+          learnCategory(state, category.id, item.id, example, true, at)
+          if (previous?.categoryId) learnCategory(state, previous.categoryId, item.id, example, false, at)
+          if (category.action === 'move') takeOver(state, item, '你更改了分类，自动发送取消。')
+          item.classification = { classifierId: classifier.id, categoryId: category.id, categoryName: category.name, state: 'applied', by: 'manual', at }
+          delete item.error
+          touch(item, previous ? `你把分类从「${previous.categoryName ?? ''}」改为「${category.name}」，AI 会参考这次纠正。` : `你把它归为「${category.name}」，AI 会参考这次判断。`)
+          if (category.action !== 'move' && item.dispatch) touch(item, `邮件仍在「${item.dispatch.folder}」，没有移回。`)
+          log(state, `已归为「${category.name}」。`, item.id)
+          return item
+        })
+        if (category.action === 'move') await this.engine.moveMail(updated, category.folder!, signal, { summary: `已归为「${category.name}」，移到「${category.folder}」。`, label: category.name })
+        return findTask(await this.engine.store.read(), id)
+      }
       if (body.action === 'saveReply') {
         if (task.source.kind !== 'wechat' || task.status !== 'review') throw new WorkbenchError('只有待审核的微信事项可以修改建议回复。', 'state', 409)
         if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 16000) throw new WorkbenchError('请填写不超过 16000 字的回复。')

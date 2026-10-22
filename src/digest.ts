@@ -3,7 +3,7 @@ import type { Activity, State, Task, Topic, TopicSummary } from './types.js'
 
 /** Statuses that require the user's decision. Unmatched requests count too once triage says they need someone. */
 export const ATTENTION = new Set(['review', 'needs_info', 'failed', 'uncertain'])
-export const needsAttention = (task: Task): boolean => ATTENTION.has(task.status) || (task.status === 'unmatched' && (['request', 'reply_needed'].includes(task.triage?.category ?? '') || task.match?.state === 'suggested'))
+export const needsAttention = (task: Task): boolean => ATTENTION.has(task.status) || (task.status === 'unmatched' && (['request', 'reply_needed'].includes(task.triage?.category ?? '') || task.match?.state === 'suggested' || task.classification?.state === 'pending'))
 
 const pad = (value: number) => String(value).padStart(2, '0')
 /** Local calendar date of the DSH host, which runs on the user's machine. */
