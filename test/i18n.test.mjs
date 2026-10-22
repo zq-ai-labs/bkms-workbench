@@ -23,6 +23,8 @@ test('every workbench UI label has English text and matching placeholders', () =
     assert.ok(value.trim(), key)
     assert.doesNotMatch(value, /[\u4e00-\u9fff]/, key)
     assert.deepEqual(placeholders(value), placeholders(key), key)
+    // System messages are recognized by pattern: a text that is only placeholders would match every message.
+    assert.doesNotMatch(value, /^\s*(\{\d+\}\s*)+$/, `${key}: English text is only placeholders`)
   }
   assert.ok(clientFiles.includes('index.tsx') && clientFiles.length > 5)
   for (const file of clientFiles) check(file)

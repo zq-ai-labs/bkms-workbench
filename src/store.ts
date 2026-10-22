@@ -3,6 +3,8 @@ import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import lockfile from 'proper-lockfile'
 import { validateRule } from './rules.js'
+import { validateClassifier } from './classify.js'
+import { validateProfile } from './context-vars.js'
 import { AUTONOMY, HIDEABLE_VIEWS, TRIAGE_CATEGORIES, WorkbenchError, now, type State, type Task } from './types.js'
 
 function validateState(state: State): void {
@@ -40,10 +42,19 @@ function validateState(state: State): void {
   if (state.brief !== undefined && (!state.brief || typeof state.brief.date !== 'string' || typeof state.brief.text !== 'string')) throw new Error('invalid brief')
   if (state.senders !== undefined && (!state.senders || typeof state.senders !== 'object' || Array.isArray(state.senders))) throw new Error('invalid sender preferences')
   if (s.wechat !== undefined) validateWechatSettings(s.wechat)
+  if (s.profile !== undefined) validateProfile(s.profile)
   if (s.hiddenViews !== undefined && (!Array.isArray(s.hiddenViews) || s.hiddenViews.some(view => !HIDEABLE_VIEWS.includes(view)) || new Set(s.hiddenViews).size !== s.hiddenViews.length)) throw new Error('invalid preference')
   if (state.uiLanguage !== undefined && state.uiLanguage !== 'zh' && state.uiLanguage !== 'en') throw new Error('invalid language')
+  if (state.backfills !== undefined && (!state.backfills || typeof state.backfills !== 'object' || Array.isArray(state.backfills) || Object.values(state.backfills).some(item => !item || !positive(item.uidValidity) || !Number.isSafeInteger(item.untilUid) || item.untilUid < 0 || !Array.isArray(item.skip) || item.skip.length > 1000 || item.skip.some(uid => !Number.isSafeInteger(uid)) || typeof item.since !== 'string'))) throw new Error('invalid backfill')
+  for (const task of state.tasks) if (task.dispatch !== undefined && (!task.dispatch || typeof task.dispatch.folder !== 'string' || typeof task.dispatch.at !== 'string' || (task.dispatch.uid !== undefined && !Number.isSafeInteger(task.dispatch.uid)))) throw new Error('invalid dispatch')
   if (state.ruleExamples !== undefined && (!state.ruleExamples || typeof state.ruleExamples !== 'object' || Array.isArray(state.ruleExamples) || Object.values(state.ruleExamples).some(list => !Array.isArray(list) || list.length > 50 || list.some(example => !example || typeof example.id !== 'string' || typeof example.match !== 'boolean' || typeof example.text !== 'string' || example.text.length > 1000)))) throw new Error('invalid rule examples')
-  for (const task of state.tasks) if (task.match !== undefined && (!task.match || typeof task.match.ruleId !== 'string' || !['applied', 'suggested', 'rejected'].includes(task.match.state) || !['ai', 'literal', 'manual'].includes(task.match.by))) throw new Error('invalid match')
+  if (state.classifiers !== undefined) {
+    if (!Array.isArray(state.classifiers) || state.classifiers.length > 20 || new Set(state.classifiers.map(item => item?.id)).size !== state.classifiers.length) throw new Error('invalid classifiers')
+    for (const item of state.classifiers) { if (typeof item?.id !== 'string' || !item.id.trim()) throw new Error('invalid classifier identity'); validateClassifier(item) }
+  }
+  if (state.categoryExamples !== undefined && (!state.categoryExamples || typeof state.categoryExamples !== 'object' || Array.isArray(state.categoryExamples) || Object.values(state.categoryExamples).some(list => !Array.isArray(list) || list.length > 50 || list.some(example => !example || typeof example.id !== 'string' || typeof example.match !== 'boolean' || typeof example.text !== 'string' || example.text.length > 1000)))) throw new Error('invalid category examples')
+  for (const task of state.tasks) if (task.classification !== undefined && (!task.classification || typeof task.classification.classifierId !== 'string' || !['applied', 'pending'].includes(task.classification.state) || !['ai', 'manual'].includes(task.classification.by) || (task.classification.state === 'applied' && typeof task.classification.categoryId !== 'string') || (task.classification.candidates !== undefined && (!Array.isArray(task.classification.candidates) || task.classification.candidates.length > 30 || task.classification.candidates.some(id => typeof id !== 'string'))))) throw new Error('invalid classification')
+  for (const task of state.tasks) if (task.match !== undefined &&(!task.match || typeof task.match.ruleId !== 'string' || !['applied', 'suggested', 'rejected'].includes(task.match.state) || !['ai', 'literal', 'manual'].includes(task.match.by))) throw new Error('invalid match')
   const plain = (value: unknown) => !!value && typeof value === 'object' && !Array.isArray(value)
   if (state.wechat !== undefined && (!plain(state.wechat) || !plain(state.wechat.watermarks) || !plain(state.wechat.pending) || Object.values(state.wechat.watermarks).some(seq => !Number.isSafeInteger(seq) || seq < 0) || Object.values(state.wechat.pending).some(item => !plain(item) || !Array.isArray(item.messages) || item.messages.length > 100))) throw new Error('invalid wechat state')
   for (const task of state.tasks) if (task.wechat !== undefined && (!plain(task.wechat) || typeof task.wechat.chat !== 'string' || !Array.isArray(task.wechat.messages) || task.wechat.messages.length > 100 || (task.wechat.reply !== undefined && (typeof task.wechat.reply !== 'string' || task.wechat.reply.length > 16000)))) throw new Error('invalid wechat task')
@@ -66,8 +77,27 @@ export function validateWechatSettings(value: any): void {
 }
 export const CLOCK = /^([01]\d|2[0-3]):[0-5]\d$/
 
+/** Windows refuses to replace a file that antivirus, the search indexer or a reader has open for a moment. */
+const LOCKED = new Set(['EPERM', 'EACCES', 'EBUSY'])
+/**
+ * Atomically replace `target` with `source`, retrying briefly while Windows holds the target (about 2 s in all).
+ * Any other error, or a lock that does not go away, fails the write; the previous file is left as it was.
+ */
+export async function replaceFile(source: string, target: string, move: (from: string, to: string) => Promise<void> = rename, wait: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms))): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try { return await move(source, target) }
+    catch (error) {
+      if (!LOCKED.has((error as NodeJS.ErrnoException)?.code ?? '')) throw error
+      if (attempt >= 10) throw new WorkbenchError('工作台数据文件被其他程序占用（可能是杀毒软件或索引服务），本次保存未完成，请稍后重试。', 'storage-busy', 503)
+      await wait(Math.min(50 * attempt, 400))
+    }
+  }
+}
+
 export class Store {
   readonly file: string
+  /** Replaces the data file; tests can stand in for a locked file. */
+  replace: (source: string, target: string) => Promise<void> = replaceFile
   constructor(readonly root: string) { this.file = join(root, 'workbench-v1.json') }
   async read(): Promise<State> {
     try {
@@ -102,7 +132,7 @@ export class Store {
       const handle = await open(temporary, 'wx', 0o600)
       try { await handle.writeFile(data); await handle.sync() } finally { await handle.close() }
       if (compromised) throw new WorkbenchError('存储锁已失效，已停止本次写入，请检查运行目录。', 'storage-lock-lost', 503)
-      await rename(temporary, this.file)
+      await this.replace(temporary, this.file)
       return structuredClone(result)
     } finally { if (temporary) await unlink(temporary).catch(() => {}); await release().catch(() => {}) }
   }

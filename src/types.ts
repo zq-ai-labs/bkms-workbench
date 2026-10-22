@@ -13,7 +13,9 @@ export const DEFAULT_EXCLUDE: readonly TriageCategory[] = ['notification', 'mark
 export interface Rule {
   id: string; name: string; enabled: boolean; priority: number; account: string; folder: string
   match: { from: string; subject: string; hasAttachments: boolean; mode: 'all' | 'any' }
-  instructions: string; tools: string[]; skills?: string[]; output: 'reply' | 'report'; maxRetries: number
+  instructions: string; tools: string[]; skills?: string[]; output: RuleOutput; maxRetries: number
+  /** `dispatch` only: the folder matched mail is moved to (created when missing), e.g. `分派/华东销售`. */
+  dispatchFolder?: string
   /** Natural-language applicability judged by AI triage, e.g. “客户的报价或询价请求”. Empty = no semantic condition. */
   semantic?: string
   /** Triage categories this workflow never handles. Undefined keeps the safe default (notifications and marketing). */
@@ -28,11 +30,39 @@ export interface Rule {
   matchMode?: MatchMode
 }
 export type MatchMode = 'ai' | 'literal'
+/**
+ * What a workflow produces. `dispatch` hands the mail to someone else: it is moved to `dispatchFolder` in the
+ * mailbox, where that team's own workbench (or mail client) picks it up. No agent runs for a dispatch.
+ */
+export type RuleOutput = 'reply' | 'report' | 'dispatch'
+export const RULE_OUTPUTS: readonly RuleOutput[] = ['reply', 'report', 'dispatch']
 export type Confidence = 'high' | 'medium' | 'low'
 /** How a task got (or was offered) its workflow, shown as “why this workflow”. */
 export interface MatchInfo { ruleId: string; ruleName: string; by: 'ai' | 'literal' | 'manual'; state: 'applied' | 'suggested' | 'rejected'; confidence?: Confidence; reason?: string; at: string }
 /** A message you confirmed or rejected for a workflow, kept as a short summary and shown to AI as an example. */
 export interface RuleExample { id: string; match: boolean; text: string; at: string; taskId?: string }
+/**
+ * A business category in a classification scheme, e.g. 投诉. `include` and `exclude` are the user's own definition
+ * and boundaries; the AI picks exactly one category per message. `fallback` is the scheme's "none of these" category.
+ */
+export interface ClassifierCategory { id: string; name: string; include: string; exclude?: string; action: CategoryAction; folder?: string; fallback?: true }
+/** `label` only records the category; `move` also moves the mail to `folder` (created when missing). */
+export type CategoryAction = 'label' | 'move'
+/**
+ * A classification scheme for one mailbox folder: every new message there gets exactly one category, or waits for
+ * you when the AI is unsure. Categories are in priority order; `guidance` says how to choose between them.
+ */
+export interface Classifier {
+  id: string; name: string; enabled: boolean; account: string; folder: string; guidance?: string
+  /** Classify notifications and marketing too. Off by default: they are archived as before. */
+  includeNotices?: boolean
+  categories: ClassifierCategory[]
+}
+/** The category a message got. `pending` waits for you in “待人工分类”, with the AI's ordered candidates. */
+export interface Classification {
+  classifierId: string; categoryId?: string; categoryName?: string; state: 'applied' | 'pending'
+  by: 'ai' | 'manual'; confidence?: Confidence; reason?: string; candidates?: string[]; at: string
+}
 export interface Cursor { uidValidity: number; lastUid: number }
 /** Where a task came from. Email uses mailbox coordinates; a WeChat segment reuses the same shape (account `wechat`, folder = chat id, uid = last message sequence) so older builds can still read the data. */
 export interface Source { account: string; folder: string; uid: number; uidValidity: number; kind?: 'wechat' }
@@ -101,8 +131,14 @@ export interface Task {
   autoSend?: AutoSend
   wechat?: WechatSegment
   match?: MatchInfo
+  /** Business category from a classification scheme. */
+  classification?: Classification
+  /** Where a dispatch workflow moved the mail; the original is read from here afterwards. */
+  dispatch?: { folder: string; uid?: number; uidValidity?: number; at: string }
+  /** Picked up by processing history from a chosen start time: never sent automatically. */
+  backfill?: true
 }
-export type ActivityKind = 'archive' | 'auto_send_scheduled' | 'auto_sent' | 'auto_send_canceled' | 'auto_send_blocked' | 'report' | 'brief' | 'weekly' | 'topic'
+export type ActivityKind = 'dispatch' | 'archive' | 'auto_send_scheduled' | 'auto_sent' | 'auto_send_canceled' | 'auto_send_blocked' | 'report' | 'brief' | 'weekly' | 'topic'
 export interface Activity {
   id: string; at: string; kind: ActivityKind; title: string; detail?: string
   taskId?: string; ruleName?: string; autonomy?: Autonomy; source?: SourceKind
@@ -122,6 +158,8 @@ export interface Report {
 export interface Brief { date: string; text: string; generatedAt: string; by: 'ai' | 'template' }
 export interface SenderPreference { neverArchive?: boolean; neverAutoSend?: boolean }
 export interface Log { id: string; at: string; level: 'info' | 'error'; message: string; taskId?: string }
+/** Your profile (Settings › My profile). Shown to the AI as trusted context; never passwords or keys. */
+export interface Profile { name?: string; department?: string; role?: string; title?: string; phone?: string; company?: string; signature?: string; timezone?: string }
 export interface Settings {
   enabled: boolean; pollSeconds: number; showWorkbench?: boolean; notifyNewTodo?: boolean
   /** AI triage before workflow matching. Defaults on. */
@@ -132,6 +170,8 @@ export interface Settings {
   weeklyEnabled?: boolean; weeklyDay?: number; weeklyTime?: string
   meetingBriefMinutes?: number
   wechat?: WechatSettings
+  /** Who uses this workbench, for `{{user.*}}` variables and the AI's runtime context. No secrets. */
+  profile?: Profile
   /** Optional pages hidden from the workbench navigation. */
   hiddenViews?: HideableView[]
 }
@@ -145,9 +185,19 @@ export interface State {
   wechat?: WechatState
   /** Learned examples per workflow, outside `rules` so learning never bumps the configuration revision. */
   ruleExamples?: Record<string, RuleExample[]>
+  /** Classification schemes (configuration: saving one bumps `configRevision`). */
+  classifiers?: Classifier[]
+  /** Learned examples per category id, outside `classifiers` so learning never bumps the configuration revision. */
+  categoryExamples?: Record<string, RuleExample[]>
   /** Interface language last used in the workbench; AI-written review text (judgments, summaries, checks) follows it. */
   uiLanguage?: 'zh' | 'en'
+  /**
+   * History being processed after a baseline was moved back to a chosen time, keyed like `cursors`.
+   * Mail up to `untilUid` is marked as backfill; `skip` lists mail already answered when the range was chosen.
+   */
+  backfills?: Record<string, Backfill>
 }
+export interface Backfill { uidValidity: number; untilUid: number; skip: number[]; since: string; at: string }
 export interface EmailService {
   version: number
   suppressPopups?(): () => void
@@ -165,13 +215,27 @@ export interface EmailService {
     send(id: string, previewId: string, confirmed: boolean, signal?: AbortSignal): Promise<any>
     resolveSend?(id: string, revision: number, outcome: 'sent' | 'not_sent', confirmed: boolean, signal?: AbortSignal): Promise<any>
   }
+  /** Move one message to `target` (created when missing); returns where it landed. Used by dispatch workflows. */
+  move?(account: string, folder: string, uid: number, target: string, signal?: AbortSignal, expectedUidValidity?: number): Promise<{ folder: string; uid?: number; uidValidity?: number }>
+  /** Mail received at or after `since` in one folder: how many, the first UID, and which were already answered. */
+  window?(account: string, folder: string, since: Date, signal?: AbortSignal): Promise<MailWindow>
+  /** Up to `limit` messages received in [since, until), newest first, with a short text excerpt; read-only. */
+  listRange?(account: string, folder: string, since: Date, until: Date, limit: number, signal?: AbortSignal): Promise<RangeMessage[]>
 }
+export interface MailWindow { uidValidity: number; count: number; firstUid?: number; lastUid?: number; answered: number[] }
+export interface RangeMessage { uid: number; from: string; subject: string; date: string; hasAttachments: boolean; excerpt: string }
 export interface AgentOutput { summary: string; needsInfo?: string; needsInfoKind?: 'information' | 'attachments'; informationGaps?: string; subject?: string; text?: string; checks?: Check[]; lowRisk?: boolean }
-export interface AgentRunner { available(): boolean; run(task: Task, rule: Rule, signal: AbortSignal, options?: { language?: 'zh' | 'en' }): Promise<{ output: AgentOutput; sessionId?: string }> }
-export interface TriageInput { mail: { from: string; subject: string; body: string; quotedHistory?: string; hasAttachments: boolean; receivedAt: string; channel?: 'email' | 'wechat' }; thread?: { previousRule?: { id: string; name: string } }; rules: { id: string; name: string; semantic: string; output: 'reply' | 'report'; hint: string; examples?: { match: boolean; text: string }[] }[]; uiLanguage?: 'zh' | 'en' }
-export interface TriageOutput { category: TriageCategory; urgency: 'high' | 'normal' | 'low'; reason: string; nextStep: string; ruleId: string; confidence?: Confidence; ruleReason?: string }
+/** Trusted runtime context for the AI: variable values for the instructions and a short description of who and when. */
+export interface RuntimeContext { values: Record<string, string>; text: string }
+export interface AgentRunner { available(): boolean; run(task: Task, rule: Rule, signal: AbortSignal, options?: { language?: 'zh' | 'en'; context?: RuntimeContext }): Promise<{ output: AgentOutput; sessionId?: string }> }
+export interface TriageInput { mail: { from: string; subject: string; body: string; quotedHistory?: string; hasAttachments: boolean; receivedAt: string; channel?: 'email' | 'wechat' }; thread?: { previousRule?: { id: string; name: string } }; classifier?: TriageClassifier; context?: { now: string; timezone: string; department?: string; role?: string }; rules: { id: string; name: string; semantic: string; output: RuleOutput; hint: string; examples?: { match: boolean; text: string }[] }[]; uiLanguage?: 'zh' | 'en' }
+export interface TriageOutput { category: TriageCategory; urgency: 'high' | 'normal' | 'low'; reason: string; nextStep: string; ruleId: string; confidence?: Confidence; ruleReason?: string; business?: BusinessVerdict }
+/** What the triage model sees of a classification scheme. */
+export interface TriageClassifier { guidance: string; categories: { id: string; name: string; include: string; exclude: string; fallback: boolean; examples: { match: boolean; text: string }[] }[] }
+/** The model's business category: one id (or empty), how sure, why, and the next likely categories. */
+export interface BusinessVerdict { categoryId: string; confidence: Confidence; reason: string; alternatives: string[] }
 export interface TriageRunner { available(): boolean; run(input: TriageInput, signal: AbortSignal): Promise<TriageOutput> }
-export type WriterKind = 'brief' | 'weekly' | 'topic' | 'trial'
+export type WriterKind = 'brief' | 'weekly' | 'topic' | 'trial' | 'classify'
 export interface WriterRunner { available(): boolean; run(kind: WriterKind, data: unknown, signal: AbortSignal): Promise<Record<string, unknown>> }
 export interface RuleSuggestion { rule: Rule; warnings: string[] }
 export type RuleAssistant = (input: { description: string; account: string; folder: string; uiLanguage?: 'zh' | 'en' }, signal: AbortSignal) => Promise<RuleSuggestion>

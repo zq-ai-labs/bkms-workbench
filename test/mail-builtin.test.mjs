@@ -7,7 +7,7 @@ import { createServer } from 'node:net'
 import { Store } from '../lib/store.js'
 import { Engine } from '../lib/engine.js'
 import { WorkbenchApi } from '../lib/api.js'
-import { MailService } from '../lib/mail/service.js'
+import { MailService, moveMessage, mailWindow, listRange } from '../lib/mail/service.js'
 import { MailAccounts } from '../lib/mail/accounts.js'
 
 const account = { provider: 'qq', user: 'Sales@Example.test', password: 'synthetic-auth-code', senderName: '销售部' }
@@ -191,4 +191,48 @@ test('end to end through the built-in service: baseline, new mail, draft, review
   await store.mutate(doc => { doc.tasks[0].status = 'review' })
   snapshot = await api.snapshot()
   assert.match(snapshot.health.error, /草稿无法读取/)
+})
+
+
+/** A pool whose IMAP client is scripted: one folder of messages, '.' as the hierarchy delimiter. */
+function scriptedPool(messages, { folders = ['INBOX'], uidValidity = 7 } = {}) {
+  const calls = { created: [], moved: [] }
+  const client = {
+    mailbox: { uidValidity: BigInt(uidValidity) },
+    async fetchOne(uid) { return messages.some(m => m.uid === Number(uid)) ? { uid: Number(uid) } : false },
+    async list() { return folders.map(path => ({ path, delimiter: '.' })) },
+    async mailboxCreate(path) { calls.created.push(path); folders.push(path); return { path, created: true } },
+    async messageMove(range, path) { calls.moved.push([Number(range), path]); return { path: 'INBOX', destination: path, uidValidity: 9n, uidMap: new Map([[Number(range), 55]]) } },
+    async search(query) { calls.search = query; return messages.map(m => m.uid) },
+    async fetchAll(uids) { return messages.filter(m => uids.includes(m.uid)).map(m => ({ uid: m.uid, internalDate: new Date(m.at), flags: new Set(m.answered ? ['\\Answered'] : []), envelope: { subject: m.subject, from: [{ name: '李明', address: 'li@x.example' }] }, bodyStructure: m.attachment ? { childNodes: [{ disposition: 'attachment' }] } : {} })) },
+  }
+  const pool = {
+    async withImap(account, folder, run, readOnly) { calls.readOnly = readOnly; return run(client) },
+    async readForWorkbench(account, folder, uid) { return { text: `第 ${uid} 封的新内容\n\n------------------ 原始邮件 ------------------\n发件人: a\n发送时间: b\n\n旧内容` } },
+  }
+  return { pool, calls }
+}
+
+test('dispatch move: creates the folder with the server delimiter, checks the generation, returns the new place', async () => {
+  const { pool, calls } = scriptedPool([{ uid: 11 }])
+  assert.deepEqual(await moveMessage(pool, 'a', 'INBOX', 11, '分派/华东销售', undefined, 7), { folder: '分派.华东销售', uid: 55, uidValidity: 9 })
+  assert.deepEqual(calls.created, ['分派.华东销售']); assert.deepEqual(calls.moved, [[11, '分派.华东销售']]); assert.equal(calls.readOnly, false)
+  await moveMessage(pool, 'a', 'INBOX', 11, '分派/华东销售', undefined, 7)
+  assert.equal(calls.created.length, 1, 'an existing folder is not created again')
+  await assert.rejects(moveMessage(pool, 'a', 'INBOX', 11, '分派/华东销售', undefined, 8), /重新编号/)
+  await assert.rejects(moveMessage(pool, 'a', 'INBOX', 12, '分派/华东销售', undefined, 7), /已不在这个文件夹/)
+})
+
+test('history window and range: exact receive time, answered mail, newest first with the new text only', async () => {
+  const at = day => Date.UTC(2026, 9, day, 9, 30)
+  const { pool, calls } = scriptedPool([{ uid: 3, at: at(5) }, { uid: 5, at: at(6) }, { uid: 6, at: at(6) + 3600000, answered: true }, { uid: 9, at: at(8), subject: '询价', attachment: true }])
+  const since = new Date(at(6))
+  const window = await mailWindow(pool, 'a', 'INBOX', since)
+  assert.deepEqual(window, { uidValidity: 7, count: 3, firstUid: 5, lastUid: 9, answered: [6] })
+  assert.ok(calls.search.since < since, 'the server search starts a day early; the exact time filters after')
+  const list = await listRange(pool, 'a', 'INBOX', since, new Date(at(8)), 30)
+  assert.deepEqual(list.map(m => m.uid), [6, 5], 'until is exclusive, newest first')
+  const top = (await listRange(pool, 'a', 'INBOX', since, new Date(at(9)), 1))
+  assert.equal(top.length, 1); assert.equal(top[0].uid, 9); assert.equal(top[0].hasAttachments, true); assert.equal(top[0].from, '李明 <li@x.example>')
+  assert.equal(top[0].excerpt, '第 9 封的新内容', 'quoted history is left out of the excerpt')
 })

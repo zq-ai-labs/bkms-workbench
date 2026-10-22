@@ -19,6 +19,15 @@ const specs: Record<WriterKind, { schema: Record<string, unknown>; system: (en: 
     system: en => `根据与某个客户或项目相关的信息，概括这个主题的现状（3 句以内，说明阶段、最新进展和下一步）、风险（只列有依据的）、待办（谁要做什么）。level：有明显阻塞或逾期为 risk，有需要关注的未决事项为 attention，否则 good。不编造。使用${en ? '英文' : '中文'}。`,
     parse: args => { keys(args, ['text', 'level', 'risks', 'todos']); if (!['good', 'attention', 'risk'].includes(args.level)) throw new WorkbenchError('结果字段 level 无效。'); return { text: text(args.text, 1200, 'text'), level: args.level, risks: list(args.risks, 5, 300, 'risks'), todos: list(args.todos, 6, 240, 'todos') } },
   },
+  classify: {
+    schema: { type: 'object', additionalProperties: false, required: ['results'], properties: { results: { type: 'array', maxItems: 30, items: { type: 'object', additionalProperties: false, required: ['id', 'categoryId', 'confidence', 'reason'], properties: { id: { type: 'string' }, categoryId: { type: 'string' }, confidence: { type: 'string', enum: ['high', 'medium', 'low'] }, reason: { type: 'string', maxLength: 120 } } } } } },
+    system: en => `按业务分类方案（classifier）为每封邮件选一个且只选一个分类，用于保存前的试运行。依据每个分类的 include（属于本类）、exclude（不属于本类）和 examples（用户确认过的判断，相似邮件须遵循）；classifier.guidance 是分类之间的取舍规则，优先于你自己的判断，没说到的按 categories 先后顺序（越靠前越优先）。fallback=true 的分类只在明确不属于其他任何分类时选。confidence 只有明确符合时填 high，两个分类都说得通或信息太少时填 medium 或 low。每封邮件返回一项，id 与输入一致，categoryId 只能是 classifier.categories 中的 id。reason 一句话引用邮件事实，使用${en ? '英文（English）' : '中文'}。`,
+    parse: args => {
+      keys(args, ['results'])
+      if (!Array.isArray(args.results) || args.results.length > 30) throw new WorkbenchError('试运行结果无效。')
+      return { results: args.results.map((item: any) => ({ id: text(item?.id, 80, 'id'), categoryId: typeof item?.categoryId === 'string' ? item.categoryId.trim() : '', confidence: ['high', 'medium', 'low'].includes(item?.confidence) ? item.confidence : 'low', reason: text(item?.reason ?? '', 400, 'reason').slice(0, 120) })) }
+    },
+  },
   trial: {
     schema: { type: 'object', additionalProperties: false, required: ['matches'], properties: { matches: { type: 'array', maxItems: 30, items: { type: 'object', additionalProperties: false, required: ['id', 'matched', 'reason'], properties: { id: { type: 'string' }, matched: { type: 'boolean' }, reason: { type: 'string', maxLength: 120 } } } } } },
     system: en => `判断处理方案是否适用于每封邮件。依据方案名称、适用说明(semantic)、处理要求摘要(hint)和例子(examples：用户确认过属于 match=true、纠正过不属于 match=false，相似邮件须遵循)；exclude 中的类别一律不适用。拿不准时判为不适用。对每封邮件给出 matched 和一句话理由。只判断，不处理邮件。理由使用${en ? '英文' : '中文'}。`,

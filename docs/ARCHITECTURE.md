@@ -20,11 +20,15 @@
 | src/mail/drafts.ts、draft-store.ts | 草稿保存、预览、发送锁与回执（移植） |
 | src/mail/mail-client.ts 等 | IMAP/SMTP、解析、HTML 排版、收件人规则（原样移植） |
 | src/rules.ts | 规则输入校验、条件匹配、优先级 |
+| src/classify.ts | 业务分类方案：校验、找出文件夹适用的方案、给分拣模型的输入与结果解析、把握高才应用、学习例子 |
+| src/context-vars.ts | 我的资料校验、处理要求中的 `{{变量}}`（白名单、按时区取值、替换）、给 AI 的运行上下文 |
 | src/engine.ts | 增量收件、去重、排队、重试、生成草稿 |
 | src/agent.ts | 隔离 DSH Agent、技能加载、精确工具授权、文件路径约束、结构化结果 |
 | src/rule-assistant.ts | 自然语言方案草稿生成、能力目录校验与受限生成 Agent |
 | src/api.ts | 快照、配置、人工操作、草稿审核发送、冲突校验 |
 | client/index.tsx | 标准 main/sidebar/settings 插槽、交互界面 |
+| client/classifiers.tsx、classification.tsx | 分类方案编辑与试运行；事项上的待人工分类、改分类与批量归类 |
+| client/variables.tsx | 我的资料、变量按钮与预览 |
 
 ## 2026-10 重构概览
 
@@ -48,6 +52,8 @@
 ## 数据和状态
 
 数据版本为 `1`；全局写版本与配置版本分开，后台任务更新不会让正在编辑的规则无故冲突。任务有独立 revision、规则快照、收件 UID/UIDVALIDITY、执行次数、来源键和历史。
+
+业务分类：`state.classifiers`（配置，保存会增加 `configRevision`）与 `state.categoryExamples`（学习例子，不增加配置版本）；事项上的 `classification` 记录分类及 `applied`/`pending` 状态。待人工分类的事项状态为 `unmatched`，旧版本按未匹配显示。归类在分拣的同一次模型调用中完成（`business` 字段）；动作为“移到文件夹”时由引擎 `moveMail()` 移动邮件并完成事项，与分派方案共用。我的资料存于 `settings.profile`。
 
 任务主链路为 `queued → running → review → sending → sent`；报告为 `completed`。另有 `needs_info`、`failed`、`uncertain`、`unmatched`、`ignored`。邮箱游标与新建任务同一事务保存。新邮件按账号、文件夹、UIDVALIDITY、UID 去重，不依赖未读状态。
 

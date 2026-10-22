@@ -16,6 +16,8 @@ const ICONS: Record<string, React.ReactNode> = {
   check: <path d="m5 12 4 4L19 6" />,
   close: <path d="m6 6 12 12M6 18 18 6" />,
   arrow: <path d="m9 5 7 7-7 7" />,
+  up: <path d="m5 15 7-7 7 7" />,
+  down: <path d="m5 9 7 7 7-7" />,
   back: <path d="m14 5-7 7 7 7M7 12h14" />,
   file: <path d="M14 3H5v18h14V8zM14 3v5h5M8 12h8M8 16h6" />,
   info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7v1" /></>,

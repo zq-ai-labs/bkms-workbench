@@ -6,17 +6,19 @@ import { AUTONOMY_LABEL, CATEGORY, LABELS, api, counterpart, dayLabel, longDate,
 import { Empty, Icon, PageHeader, Section, SourceTag, StatusTag, Tag } from "./ui";
 import { ChatsView } from "./wechat";
 import { TaskWorkspace } from "./workspace";
+import { BatchClassify } from "./classification";
 import { setSourceExpanded, useSourceLayout } from "./layout";
 
 const DAY = 864e5;
 const greeting = () => { const hour = new Date().getHours(); return hour < 11 ? t("早上好") : hour < 14 ? t("中午好") : hour < 18 ? t("下午好") : t("晚上好"); };
 const ACTIVITY: Record<string, { label: string; tone: "good" | "accent" | "muted" | "danger" | "warn" }> = {
-  archive: { label: "归档", tone: "muted" }, auto_send_scheduled: { label: "待发送", tone: "accent" }, auto_sent: { label: "已回复", tone: "good" },
+  dispatch: { label: "分派", tone: "accent" }, archive: { label: "归档", tone: "muted" }, auto_send_scheduled: { label: "待发送", tone: "accent" }, auto_sent: { label: "已回复", tone: "good" },
   auto_send_canceled: { label: "已撤回", tone: "muted" }, auto_send_blocked: { label: "未发送", tone: "danger" }, report: { label: "报告", tone: "good" },
   brief: { label: "简报", tone: "accent" }, weekly: { label: "周报", tone: "accent" }, topic: { label: "主题", tone: "accent" },
 };
 const activityText = (item: Activity): string => {
   switch (item.kind) {
+    case "dispatch": return t("分派到「{0}」：{1}", item.detail || "", item.title);
     case "archive": return t("归档：{0}", item.title);
     case "auto_send_scheduled": return t("已起草回复，等待自动发送：{0}", item.title);
     case "auto_sent": return t("自动回复：{0}", item.title);
@@ -103,14 +105,17 @@ export function TodayView() {
   </div>;
 }
 
-type Filter = "all" | "review" | "reply" | "info" | "issue";
-const FILTERS: [Filter, string][] = [["all", "全部"], ["review", "审核"], ["reply", "答复"], ["info", "补充"], ["issue", "异常"]];
-const inFilter = (task: Task, filter: Filter) => filter === "all" || (filter === "review" && task.status === "review") || (filter === "reply" && task.status === "unmatched") || (filter === "info" && task.status === "needs_info") || (filter === "issue" && ["failed", "uncertain"].includes(task.status));
+type Filter = "all" | "classify" | "review" | "reply" | "info" | "issue";
+const FILTERS: [Filter, string][] = [["all", "全部"], ["classify", "待分类"], ["review", "审核"], ["reply", "答复"], ["info", "补充"], ["issue", "异常"]];
+const waitingCategory = (task: Task) => task.status === "unmatched" && task.classification?.state === "pending";
+const inFilter = (task: Task, filter: Filter) => filter === "all" || (filter === "classify" && waitingCategory(task)) || (filter === "review" && task.status === "review") || (filter === "reply" && task.status === "unmatched" && !waitingCategory(task)) || (filter === "info" && task.status === "needs_info") || (filter === "issue" && ["failed", "uncertain"].includes(task.status));
 const groupOf = (task: Task) => ["failed", "uncertain"].includes(task.status) ? "issue" : task.triage?.urgency === "high" || Date.parse(task.receivedAt) > Date.now() - DAY ? "today" : "later";
 
 export function DecideView({ selected }: { selected?: string }) {
   const { data, go } = useWorkbench();
   const [filter, setFilter] = useState<Filter>("all");
+  // Waiting items can be classified several at a time.
+  const [picked, setPicked] = useState<Set<string>>(new Set());
   const listRef = useRef<HTMLDivElement>(null);
   const layout = useSourceLayout();
   const tasks = useMemo(() => data.tasks.filter(task => task.attention).sort((a, b) => urgencyRank(a) - urgencyRank(b) || b.receivedAt.localeCompare(a.receivedAt)), [data.tasks]);
@@ -139,13 +144,15 @@ export function DecideView({ selected }: { selected?: string }) {
       <div className="bkw-chips" role="group" aria-label={t("按类型筛选")}>
         {FILTERS.map(([id, label]) => { const count = tasks.filter(task => inFilter(task, id)).length; if (!count && id !== "all" && filter !== id) return null; return <button type="button" key={id} className={`bkw-chip ${filter === id ? "on" : ""}`} aria-pressed={filter === id} disabled={!count && id !== "all"} onClick={() => setFilter(id)}>{t(label)} <span>{count}</span></button>; })}
       </div>
+      {filter === "classify" && <BatchClassify tasks={shown.filter(task => picked.has(task.id))} onDone={() => setPicked(new Set())} />}
       {groups.map(([id, label, items]) => items.length ? <div key={id} className="bkw-group">
         <h4>{label}</h4>
-        {items.map(task => <button type="button" key={task.id} className={`bkw-li ${task.id === current?.id ? "on" : ""}`} aria-current={task.id === current?.id} onClick={() => go({ view: "decide", task: task.id })}>
-          <span className="bkw-li-top"><SourceTag kind={sourceOf(task)} />{task.triage?.urgency === "high" && <Tag tone="danger">{t("紧急")}</Tag>}<time>{when(task.receivedAt)}</time></span>
+        {items.map(task => { const row = <button type="button" key={task.id} className={`bkw-li ${task.id === current?.id ? "on" : ""}`} aria-current={task.id === current?.id} onClick={() => go({ view: "decide", task: task.id })}>
+          <span className="bkw-li-top"><SourceTag kind={sourceOf(task)} />{task.triage?.urgency === "high" && <Tag tone="danger">{t("紧急")}</Tag>}{task.classification?.state === "applied" && <Tag tone="accent">{task.classification.categoryName}</Tag>}{waitingCategory(task) && <Tag tone="warn">{t("待分类")}</Tag>}<time>{when(task.receivedAt)}</time></span>
           <strong>{taskTitle(task)}</strong>
           <span className="bkw-li-sub">{counterpart(task)} · {nextStep(task)}</span>
-        </button>)}
+        </button>;
+          return filter === "classify" ? <div key={task.id} className="bkw-li-pick"><input type="checkbox" aria-label={t("选择 {0}", taskTitle(task))} checked={picked.has(task.id)} onChange={event => { const next = new Set(picked); if (event.target.checked) next.add(task.id); else next.delete(task.id); setPicked(next); }} />{row}</div> : row; })}
       </div> : null)}
       {!shown.length && <p className="bkw-card-empty">{t("没有符合条件的事项。")}</p>}
       <p className="bkw-keys"><kbd>J</kbd><kbd>K</kbd> {t("切换")} · <kbd>⌘↵</kbd> {t("保存或发送")}</p>
@@ -154,7 +161,7 @@ export function DecideView({ selected }: { selected?: string }) {
   </div>;
 }
 
-const KINDS: [string, string, (item: Activity) => boolean][] = [["all", "全部", () => true], ["reply", "回复", item => item.kind.startsWith("auto_send") || item.kind === "auto_sent"], ["archive", "归档", item => item.kind === "archive"], ["report", "报告与简报", item => ["report", "brief", "weekly", "topic"].includes(item.kind)]];
+const KINDS: [string, string, (item: Activity) => boolean][] = [["all", "全部", () => true], ["reply", "回复", item => item.kind.startsWith("auto_send") || item.kind === "auto_sent"], ["dispatch", "分派", item => item.kind === "dispatch"], ["archive", "归档", item => item.kind === "archive"], ["report", "报告与简报", item => ["report", "brief", "weekly", "topic"].includes(item.kind)]];
 export function DoneView() {
   const { data, go } = useWorkbench();
   const [kind, setKind] = useState("all");
@@ -162,7 +169,7 @@ export function DoneView() {
   const items = data.activity.filter(filter).sort((a, b) => b.at.localeCompare(a.at));
   const days = items.reduce<[string, Activity[]][]>((acc, item) => { const key = new Date(item.at).toDateString(); const last = acc.at(-1); if (last && last[0] === key) last[1].push(item); else acc.push([key, [item]]); return acc; }, []);
   const week = data.activity.filter(item => Date.parse(item.at) >= Date.now() - 7 * DAY);
-  const countBy = (autonomy: string) => data.rules.filter(rule => (rule.autonomy || "draft") === autonomy).length;
+  const countBy = (autonomy: string) => data.rules.filter(rule => rule.output !== "dispatch" && (rule.autonomy || "draft") === autonomy).length;
   return <div className="bkw-split">
     <div className="bkw-split-main">
       <div className="bkw-toolbar">
@@ -184,7 +191,7 @@ export function DoneView() {
         <p className="bkw-card-lead">{t("AI 能自己做什么，由每个方案的自主级别决定。")}</p>
         <div className="bkw-kv-rows">
           <div><span>{t("AI 分拣 · 通知归档")}</span><Tag tone={data.defaults.triage ? "good" : "muted"}>{data.defaults.triage ? t("已开启") : t("已关闭")}</Tag></div>
-          {data.rules.map(rule => <div key={rule.id}><span>{rule.name}</span><Tag tone={rule.autonomy === "auto" ? "warn" : rule.autonomy === "low_risk" ? "accent" : "muted"}>{t(AUTONOMY_LABEL[rule.autonomy || "draft"])}</Tag></div>)}
+          {data.rules.map(rule => <div key={rule.id}><span>{rule.name}</span>{rule.output === "dispatch" ? <Tag tone="accent">{t("分派")}</Tag> : <Tag tone={rule.autonomy === "auto" ? "warn" : rule.autonomy === "low_risk" ? "accent" : "muted"}>{t(AUTONOMY_LABEL[rule.autonomy || "draft"])}</Tag>}</div>)}
         </div>
         <p className="bkw-footnote">{t("仅起草 {0} · 低风险自动 {1} · 全自动 {2}", countBy("draft"), countBy("low_risk"), countBy("auto"))}</p>
       </Section>
@@ -195,7 +202,7 @@ export function DoneView() {
 
 export function ItemsView({ selected, chats }: { selected?: string; chats?: boolean }) {
   const { data, go } = useWorkbench();
-  const [search, setSearch] = useState(""), [status, setStatus] = useState("all"), [category, setCategory] = useState("all");
+  const [search, setSearch] = useState(""), [status, setStatus] = useState("all"), [category, setCategory] = useState("all"), [business, setBusiness] = useState("all");
   const task = selected ? data.tasks.find(item => item.id === selected) : undefined;
   if (selected && task) return <div className="bkw-detail-page">
     <PageHeader title={t("事项详情")} backLabel={t("返回全部事项")} onBack={() => go({ view: "items" })}
@@ -208,7 +215,10 @@ export function ItemsView({ selected, chats }: { selected?: string; chats?: bool
     <button type="button" role="tab" aria-selected={!!chats} className={chats ? "on" : ""} onClick={() => go({ view: "items", chats: true })}>{t("按会话")}</button>
   </div>;
   if (chats && wechatOn) return <div className="bkw-chats-page"><div className="bkw-chats-bar">{modes}<span className="bkw-muted">{t("像微信一样按会话阅读，AI 识别的事项直接标在对话里。")}</span></div><ChatsView /></div>;
-  const rows = data.tasks.filter(item => (status === "all" || item.status === status || (status === "archived" && item.status === "ignored" && item.triage?.archived)) && (category === "all" || item.triage?.category === category)
+  // Business categories of every scheme, by name (the same name in two schemes is one filter).
+  const businessNames = [...new Set((data.classifiers ?? []).flatMap(item => item.categories.map(category => category.name)))];
+  const businessOk = (item: Task) => business === "all" || (business === "pending" ? item.classification?.state === "pending" : item.classification?.state === "applied" && item.classification.categoryName === business);
+  const rows = data.tasks.filter(item => (status === "all" || item.status === status || (status === "archived" && item.status === "ignored" && item.triage?.archived)) && (category === "all" || item.triage?.category === category) && businessOk(item)
     && `${item.subject} ${item.title} ${item.from} ${item.ruleName || ""} ${item.summary || ""}`.toLowerCase().includes(search.trim().toLowerCase())).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
   return <div className="bkw-pad">
     <div className="bkw-toolbar">
@@ -222,18 +232,22 @@ export function ItemsView({ selected, chats }: { selected?: string; chats?: bool
         <option value="all">{t("全部类别")}</option>
         {Object.entries(CATEGORY).map(([id, label]) => <option key={id} value={id}>{t(label)}</option>)}
       </select>
+      {!!businessNames.length && <select aria-label={t("按业务分类筛选")} value={business} onChange={event => setBusiness(event.target.value)}>
+        <option value="all">{t("全部业务分类")}</option><option value="pending">{t("待人工分类")}</option>
+        {businessNames.map(name => <option key={name} value={name}>{name}</option>)}
+      </select>}
       <span className="bkw-muted">{t("{0} 项", rows.length)}</span>
     </div>
     {rows.length ? <div className="bkw-table" role="table" aria-label={t("全部事项")}>
       <div className="bkw-tr head" role="row"><span role="columnheader">{t("事项 / 下一步")}</span><span role="columnheader">{t("来源")}</span><span role="columnheader">{t("处理方案")}</span><span role="columnheader">{t("状态")}</span><span role="columnheader">{t("时间")}</span></div>
       {rows.map(item => <button type="button" role="row" key={item.id} className="bkw-tr" onClick={() => go({ view: "items", task: item.id })}>
-        <span className="bkw-td-title" role="cell"><strong>{taskTitle(item) || t("无主题邮件")}</strong><small>{nextStep(item)}</small></span>
+        <span className="bkw-td-title" role="cell"><strong>{item.classification?.state === "applied" && <Tag tone="accent">{item.classification.categoryName}</Tag>}{taskTitle(item) || t("无主题邮件")}</strong><small>{nextStep(item)}</small></span>
         <span className="bkw-td-from" role="cell"><SourceTag kind={sourceOf(item)} /><span title={item.from}>{counterpart(item)}</span></span>
         <span className={`bkw-td-rule ${item.ruleName ? "" : "muted"}`} role="cell" title={item.ruleName}>{item.ruleName || (item.triage?.category ? t(CATEGORY[item.triage.category]) : t("尚未匹配方案"))}</span>
         <span role="cell"><StatusTag task={item} /></span>
         <time role="cell">{when(item.receivedAt)}</time>
       </button>)}
-    </div> : <Empty title={search || status !== "all" || category !== "all" ? t("没有符合条件的事项") : t("从第一封邮件开始")} text={search || status !== "all" || category !== "all" ? t("试试其他关键词或筛选条件。") : t("开启自动处理后，新信息会在这里汇总，并按方案准备处理结果。")} />}
+    </div> : <Empty title={search || status !== "all" || category !== "all" || business !== "all" ? t("没有符合条件的事项") : t("从第一封邮件开始")} text={search || status !== "all" || category !== "all" || business !== "all" ? t("试试其他关键词或筛选条件。") : t("开启自动处理后，新信息会在这里汇总，并按方案准备处理结果。")} />}
   </div>;
 }
 

@@ -6,6 +6,7 @@ import { OriginalMailBody } from "./original-mail";
 import { AUTONOMY_LABEL, CATEGORY, CONFIDENCE, api, counterpart, draftValue, downloadOriginal, downloadPreview, errorMessage, fullDate, minutesLeft, nextStep, senderName, sourceOf, statusLabel, taskTitle, time, uploadDraftAttachment, when, type Draft, type EditDraft, type Rule, type SendPlan, type Task } from "./lib";
 import { Alert, AutoTextarea, Field, Icon, Modal, SourceTag, StatusTag, Tag } from "./ui";
 import { ChatHistory, SegmentConversation } from "./wechat";
+import { ClassificationBlock } from "./classification";
 import { MIN_RESULT, MIN_SOURCE, setSourceExpanded, setSourceRatio, sourceColumn, useSourceLayout } from "./layout";
 
 /** Unsaved edits survive switching views and remounts, keyed by task. */
@@ -178,7 +179,8 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
       <div className="bkw-actions"><button type="button" className="bkw-btn primary" disabled={!!busy || !supplement.trim() || !modelReady} onClick={() => run("supplement", async () => { await api("supplement", { id: task.id, revision: task.revision, text: supplement }); setSupplement(""); await refresh(); notify(t("补充信息已保存，任务继续处理")); })}>{t("提交并继续处理")}</button></div>
     </section>}
 
-    {task.status === "unmatched" && task.match?.state === "suggested" && <section className="bkw-block bkw-suggest">
+    <ClassificationBlock task={task} />
+    {task.status === "unmatched" && task.classification?.state !== "pending" && task.match?.state === "suggested" && <section className="bkw-block bkw-suggest">
       <h3><Icon name="sparkle" size={15} />{t("AI 建议用「{0}」处理", task.match.ruleName)}<Tag tone={task.match.confidence === "low" ? "muted" : "warn"}>{t(CONFIDENCE[task.match.confidence ?? "medium"])}</Tag></h3>
       {task.match.reason && <p className="bkw-block-lead">{systemMessage(task.match.reason)}</p>}
       <p className="bkw-muted">{t("把握不足，没有自动处理。确认或否定都会成为这个方案的例子，AI 之后判断相似信息时参考。")}</p>
@@ -187,8 +189,8 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
         <button type="button" className="bkw-btn" disabled={!!busy} onClick={() => run("rejectRule", async () => { await api("rejectRule", { id: task.id, revision: task.revision }); await refresh(); notify(t("已记下：这类信息不属于该方案")); })}>{t("不是这个")}</button>
       </div>
     </section>}
-    {task.status === "unmatched" && task.match?.state === "rejected" && <Alert>{t("你已判断这条信息不属于「{0}」。可以选择其他方案或忽略。", task.match.ruleName)}</Alert>}
-    {task.status === "unmatched" && task.match?.state !== "suggested" && <section className="bkw-block">
+    {task.status === "unmatched" && task.classification?.state !== "pending" && task.match?.state === "rejected" && <Alert>{t("你已判断这条信息不属于「{0}」。可以选择其他方案或忽略。", task.match.ruleName)}</Alert>}
+    {task.status === "unmatched" && task.classification?.state !== "pending" && task.match?.state !== "suggested" && <section className="bkw-block">
       <h3>{t("为这条信息选择处理方案")}</h3>
       <p className="bkw-block-lead">{task.triage?.nextStep || t("没有自动命中方案，可以指定一个已配置的方案开始处理。")}</p>
       <div className="bkw-inline-form">
@@ -209,7 +211,7 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
     {["queued", "running"].includes(task.status) && <div className="bkw-progress"><span className="bkw-spinner" aria-hidden="true" /><div><strong>{task.triage?.state === "pending" ? t("AI 正在分拣") : task.status === "running" ? t("正在准备处理结果") : t("任务已加入队列")}</strong><span>{t("你可以继续处理其他任务，结果会自动更新。")}</span></div></div>}
 
     {task.summary && (task.outputKind === "report" || !task.draft) && <section className="bkw-block bkw-report">
-      <h3>{task.outputKind === "report" ? t("分析报告") : t("处理摘要")}</h3>
+      <h3>{task.outputKind === "report" ? t("分析报告") : task.outputKind === "dispatch" ? t("分派结果") : t("处理摘要")}</h3>
       <div className="bkw-prose">{task.summary}</div>
       {task.informationGaps && task.status !== "review" && <div className="bkw-gaps"><strong>{t("待人工核实")}</strong><p>{task.informationGaps}</p><small>{t("以下事项不影响本次报告完成，可按需补充核实。")}</small></div>}
     </section>}

@@ -8,7 +8,18 @@ export function validateRule(input: any): Rule {
     id: input.id ? string(input.id, 80) : randomUUID(), name: string(input.name, 100), enabled: input.enabled === true,
     priority: Number(input.priority), account: string(input.account ?? '', 200), folder: string(input.folder || 'INBOX', 200),
     match: { from: string(input.match.from ?? '', 1000), subject: string(input.match.subject ?? '', 1000), hasAttachments: input.match.hasAttachments === true, mode: input.match.mode === 'any' ? 'any' : 'all' },
-    instructions: string(input.instructions, 16000), tools: [], output: input.output === 'report' ? 'report' : 'reply', maxRetries: Number(input.maxRetries ?? 1),
+    instructions: string(input.instructions ?? '', 16000), tools: [], output: input.output === 'report' ? 'report' : input.output === 'dispatch' ? 'dispatch' : 'reply', maxRetries: Number(input.maxRetries ?? 1),
+  }
+  if (rule.output === 'dispatch') {
+    // A dispatch only moves mail: no agent, tools, skills or replies. It needs a target folder other than its own.
+    const target = string(input.dispatchFolder ?? '', 200).replace(/^\/+|\/+$/g, '')
+    if (!target || /[\r\n\t*%]/.test(target)) throw new WorkbenchError('分派方案需要填写目标文件夹。')
+    if (target.toLowerCase() === rule.folder.toLowerCase()) throw new WorkbenchError('目标文件夹不能和方案读取的文件夹相同。')
+    if (input.sources !== undefined && (!Array.isArray(input.sources) || input.sources.some((s: unknown) => s !== 'email'))) throw new WorkbenchError('分派只适用于邮件：微信消息是只读的，不能移动。')
+    rule.dispatchFolder = target
+    // Older builds require instructions; keep one so they can still read the data (they would only write a report).
+    if (!rule.instructions) rule.instructions = `把匹配的邮件移到文件夹「${target}」，由该文件夹的负责人处理。`
+    input = { ...input, tools: [], skills: [], autonomy: undefined, sources: undefined }
   }
   if (!rule.name || !rule.instructions || !Number.isSafeInteger(rule.priority) || Math.abs(rule.priority) > 10000 || !Number.isSafeInteger(rule.maxRetries) || rule.maxRetries < 0 || rule.maxRetries > 3) throw new WorkbenchError('规则名称和处理要求必填；优先级为 ±10000 内整数，重试次数为 0–3。')
   if (!Array.isArray(input.tools) || input.tools.length > 30 || input.tools.some((t: unknown) => typeof t !== 'string' || !/^[\w.-]{1,120}$/.test(t))) throw new WorkbenchError('工具应为最多 30 个准确工具名称。')
