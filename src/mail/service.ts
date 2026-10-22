@@ -6,6 +6,7 @@
  * can look up and read mail but cannot send it: every outgoing message goes through the workbench's review.
  */
 import nodemailer from 'nodemailer'
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { MailAccounts, MailAccountError, type MailAccountInput, type MailAccountView } from './accounts.js'
 import type { ResolvedEmailSettings } from './config.js'
@@ -59,6 +60,8 @@ export function createEmailWorkbenchService(runtime: { getEffectiveSettings?(): 
   }
 }
 
+const SMTP_TEST_TIMEOUT_MS = 20000
+
 function fingerprint(settings: ResolvedEmailSettings): string {
   return JSON.stringify({ accounts: [...settings.accounts.entries()], defaultAccount: settings.defaultAccount, downloadDir: settings.downloadDir, maxAttachmentBytes: settings.maxAttachmentBytes, idleTimeoutMs: settings.idleTimeoutMs })
 }
@@ -81,6 +84,23 @@ export class MailService {
   constructor(readonly root: string, private readonly createPool: (settings: ResolvedEmailSettings) => EmailPool = settings => new EmailPool(settings)) {
     this.accounts = new MailAccounts(root)
     this.drafts = new EmailDraftBackend({ getEffectiveSettings: () => this.effective(), getPool: () => this.getPool() }, { store: new DraftStore(root, 'drafts') })
+  }
+
+  /**
+   * Bring over the drafts the separate dsh-email plugin kept, once, so tasks created before the switch still
+   * show their draft. Only when the built-in store has never been written; old attachments stay where they are
+   * and are marked not owned, so removing a draft here never deletes the old plugin's files.
+   */
+  async importLegacyDrafts(file: string): Promise<number> {
+    const target = join(this.drafts.store.root, 'drafts-v1.json')
+    let doc: { version?: unknown; drafts?: { attachments?: { owned?: boolean }[] }[] }
+    try { doc = JSON.parse(await readFile(file, 'utf8')) } catch { return 0 }
+    if (doc?.version !== 1 || !Array.isArray(doc.drafts) || !doc.drafts.length) return 0
+    for (const draft of doc.drafts) for (const attachment of Array.isArray(draft?.attachments) ? draft.attachments : []) attachment.owned = false
+    await mkdir(this.drafts.store.root, { recursive: true, mode: 0o700 })
+    try { await writeFile(target, JSON.stringify(doc, null, 2), { flag: 'wx', mode: 0o600 }) } catch { return 0 }
+    // A document the store cannot read would break every draft action: drop it and start empty instead.
+    try { return (await this.drafts.store.list()).length } catch { await unlink(target).catch(() => {}); return 0 }
   }
 
   /** Load accounts; call once at start and after every account change. */
@@ -128,15 +148,37 @@ export class MailService {
     const secrets = [config.password, config.authPassword]
     const imap = { ok: false, host: `${config.imap.host}:${config.imap.port}` } as { ok: boolean; host: string; error?: string }
     const smtp = { ok: false, host: `${config.smtp.host}:${config.smtp.port}` } as { ok: boolean; host: string; error?: string }
-    const pool = this.createPool(settings)
-    try { await pool.withImap(account.id, null, async () => 'connected', false, signal); imap.ok = true }
-    catch (error) { const raw = safe(error, secrets); imap.error = /command failed|authentication|login|auth/i.test(raw) ? `登录失败，请检查邮箱地址和授权码（${raw}）` : raw }
-    finally { pool.dispose() }
+    // bkms-workbench: both checks run at once. Tencent/QQ servers hold a rejected SMTP login for about two minutes,
+    // so the SMTP check is capped, and skipped as soon as the IMAP login (same 授权码) has been refused.
+    const imapRefused = new AbortController()
+    const checkImap = async () => {
+      const pool = this.createPool(settings)
+      try { await pool.withImap(account.id, null, async () => 'connected', false, signal); imap.ok = true }
+      catch (error) {
+        const raw = safe(error, secrets), refused = /command failed|authentication|login|auth/i.test(raw)
+        imap.error = refused ? `登录失败，请检查邮箱地址和授权码（${raw}）` : raw
+        if (refused) imapRefused.abort()
+      }
+      finally { pool.dispose() }
+    }
+    const checkSmtp = async () => {
+      const transport = nodemailer.createTransport({ host: config.smtp.host, port: config.smtp.port, secure: config.smtp.secure, auth: smtpAuthOf(config, undefined), connectionTimeout: 15000, greetingTimeout: 10000, socketTimeout: 20000 })
+      let stop: (reason: Error) => void = () => {}
+      const stopped = new Promise<never>((_, reject) => { stop = reject })
+      const timer = setTimeout(() => stop(new Error('timeout')), SMTP_TEST_TIMEOUT_MS)
+      const onRefused = () => stop(new Error('refused'))
+      imapRefused.signal.addEventListener('abort', onRefused, { once: true })
+      try { await Promise.race([transport.verify(), stopped]); smtp.ok = true }
+      catch (error) {
+        const raw = safe(error, secrets)
+        smtp.error = imapRefused.signal.aborted ? '收信登录已失败，未继续测试发信（收发使用同一个授权码）'
+          : raw === 'timeout' ? `发信服务器 ${SMTP_TEST_TIMEOUT_MS / 1000} 秒内未完成登录；授权码错误时部分邮箱会故意延迟回应，请先核对授权码`
+          : /auth|login|535|534/i.test(raw) ? `发信登录失败，请检查授权码和 SMTP 服务器（${raw}）` : raw
+      }
+      finally { clearTimeout(timer); imapRefused.signal.removeEventListener('abort', onRefused); transport.close() }
+    }
+    await Promise.all([checkImap(), checkSmtp()])
     signal?.throwIfAborted()
-    const transport = nodemailer.createTransport({ host: config.smtp.host, port: config.smtp.port, secure: config.smtp.secure, auth: smtpAuthOf(config, undefined), connectionTimeout: 20000, greetingTimeout: 10000, socketTimeout: 20000 })
-    try { await transport.verify(); smtp.ok = true }
-    catch (error) { const raw = safe(error, secrets); smtp.error = /auth|login|535|534/i.test(raw) ? `发信登录失败，请检查授权码和 SMTP 服务器（${raw}）` : raw }
-    finally { transport.close() }
     return { imap, smtp }
   }
 

@@ -20,7 +20,7 @@ export function Workbench() {
   useWorkbenchLocale();
   const [data, setData] = useState<Snapshot>(EMPTY), [loaded, setLoaded] = useState(false);
   const [route, setRoute] = useState<Route>(lastRoute);
-  const [busy, setBusy] = useState(""), [error, setError] = useState(""), [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(""), [error, setError] = useState(""), [notice, setNotice] = useState(""), [hiddenStatus, setHiddenStatus] = useState("");
   const op = useRef(false), sequence = useRef(0), mounted = useRef(true), leave = useRef<(() => boolean) | undefined>(undefined);
   const refresh = useCallback(async () => {
     const request = ++sequence.current;
@@ -58,6 +58,9 @@ export function Workbench() {
   const recent = data.activity.filter(item => Date.parse(item.at) >= Date.now() - 864e5 && !item.undoneAt).length;
   const mailReady = data.health.email && data.accounts.length > 0;
   const servicesReady = mailReady && data.health.agent && data.health.running;
+  // Closing the status line hides this exact message; a different message shows again.
+  const status = !loaded || error || (servicesReady && !data.health.error) ? "" : (data.health.error && systemMessage(data.health.error)) || (!mailReady ? t("还没有添加邮箱账号。请在设置的“信息源”中添加邮箱。") : !data.health.running ? t("后台任务服务尚未就绪；已有任务和方案仍可查看，请检查实例运行状态。") : t("DSH 执行服务尚未就绪；方案和待办可查看，自动生成将等待服务恢复。"));
+  const showStatus = !!status && status !== hiddenStatus;
   const connected = data.sources.filter(source => source.connected).length;
   // Preferences update immediately when settings are saved; the snapshot follows on its next refresh.
   const shared = usePreferences();
@@ -90,10 +93,10 @@ export function Workbench() {
           </button>)}
         </nav>
       </header>
-      {(error || notice || (loaded && (!servicesReady || data.health.error))) && <div className="bkw-feedback">
+      {(error || notice || showStatus) && <div className="bkw-feedback">
         {error && <Alert tone="danger" onClose={() => setError("")}>{systemMessage(error)}</Alert>}
-        {notice && <Alert tone="success">{systemMessage(notice)}</Alert>}
-        {loaded && !error && (!servicesReady || data.health.error) && <Alert>{(data.health.error && systemMessage(data.health.error)) || (!mailReady ? t("还没有添加邮箱账号。请在设置的“信息源”中添加邮箱。") : !data.health.running ? t("后台任务服务尚未就绪；已有任务和方案仍可查看，请检查实例运行状态。") : t("DSH 执行服务尚未就绪；方案和待办可查看，自动生成将等待服务恢复。"))}</Alert>}
+        {notice && <Alert tone="success" onClose={() => setNotice("")}>{systemMessage(notice)}</Alert>}
+        {showStatus && <Alert onClose={() => setHiddenStatus(status)}>{status}</Alert>}
       </div>}
       <main className="bkw-content">{page}</main>
     </div>

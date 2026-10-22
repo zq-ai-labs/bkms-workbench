@@ -31,7 +31,9 @@ export function apply(ctx: any): void {
   const wechat = new WechatConnector(join(store.root, 'wechat-cache'))
   const engine = new Engine(store, () => mail.configured() ? email : undefined, createAgentRunner(ctx, join(store.root, 'tasks')), () => getCapabilities(ctx), createTriageRunner(ctx), createWriter(ctx), wechat)
   const api = new WorkbenchApi(engine, createRuleAssistant(ctx), createInstructionOptimizer(ctx), mail)
-  const ready = mail.reload().then(() => engine.start())
+  // Drafts written by the old dsh-email plugin are copied in once, so earlier tasks keep their draft.
+  const legacyDrafts = mail.importLegacyDrafts(join(home, 'data', 'dsh-email', 'drafts-v1.json')).then(count => { if (count) ctx.logger?.info?.('bkms-workbench: imported %d drafts from dsh-email', count) }, () => {})
+  const ready = legacyDrafts.then(() => mail.reload()).then(() => engine.start())
   ready.catch((error: unknown) => ctx.logger?.error?.('bkms-workbench startup: %s', error instanceof Error ? error.message : 'failed'))
   ctx.effect(() => async () => {
     // Withdraw API admission first. A confirmed send already accepted must

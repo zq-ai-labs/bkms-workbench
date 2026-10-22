@@ -9,11 +9,12 @@
 
 | 文件 | 来源 | 修改 |
 | --- | --- | --- |
-| `config.ts` `mail-client.ts` `parse.ts` `recipient-policy.ts` `email-format.ts` `types.ts` `oauth2.ts` `oauth2-storage.ts` `mailparser.d.ts` | 上游 + 补丁，原样复制 | 无 |
+| `config.ts` `parse.ts` `recipient-policy.ts` `email-format.ts` `types.ts` `oauth2.ts` `oauth2-storage.ts` `mailparser.d.ts` | 上游 + 补丁，原样复制 | 无 |
+| `mail-client.ts` | 上游 + 补丁 | `scanChanges` 每次扫描前重新打开文件夹：连接池复用的连接上，腾讯企业邮等服务器不推送新邮件，否则会一直收不到新信 |
 | `draft-store.ts` | 上游 + 补丁 | 构造函数增加存储目录参数（工作台放在 `<数据目录>/bkms-workbench/mail/drafts`） |
 | `drafts.ts` | 上游 `draft-web.ts` | 账号和收件人规则改由工作台账号存储提供；去掉设置页规则编辑接口和插件路由安装；路由改为 `/api/bkms-workbench/drafts` |
 | `service.ts` 中的 `createEmailWorkbenchService` | 上游 `workbench.ts` | 去掉新邮件弹窗相关接口 |
-| `accounts.ts`、`service.ts` 其余部分 | 工作台新增 | 账号存储、连接池生命周期、连接测试、对其他插件的只读接口 |
+| `accounts.ts`、`service.ts` 其余部分 | 工作台新增 | 账号存储、连接池生命周期、连接测试（收发并行、发信限时）、旧 dsh-email 草稿一次性导入、对其他插件的只读接口 |
 
 未移植：对话中的邮件工具（`tools.ts`、`tool-contract.ts`）、对话发信审批（`approval.ts`）、DSH 设置页（`web.ts`、`settings.ts`、`client.js`）、新邮件弹窗与提醒图片、旧设置迁移（`legacy-settings.ts`）。
 

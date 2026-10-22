@@ -84,7 +84,10 @@ export class WorkbenchApi {
         if (['sending', 'uncertain', 'review'].includes(task.status) && (['sent', 'uncertain'].includes(draft.state) || (task.status !== 'review' && restoredDraft)) && (task.status !== reconciledStatus || task.error !== draft.error) && !this.busy.has(task.id)) {
           await this.engine.store.mutate(doc => { const current = findTask(doc, task.id); if (['sending', 'uncertain', 'review'].includes(current.status)) { current.status = restoredDraft ? 'review' : draft.state; current.error = draft.error; touch(current, restoredDraft ? '已恢复为待审核草稿，请重新预览后手动发送。' : draft.state === 'sent' ? '已核对邮件发送记录。' : '发送结果待核实，请先核对邮箱。'); Object.assign(task, current) } })
         }
-      } catch (error) { providerError ??= this.engine.safe(error) }
+      } catch (error) {
+        // A finished task (sent, ignored…) whose old draft is gone is history, not a mailbox problem worth a banner.
+        if (!(error instanceof WorkbenchError && error.code === 'draft-unavailable') || ['review', 'sending', 'uncertain'].includes(task.status)) providerError ??= this.engine.safe(error)
+      }
       const { workspace, rule, ...safe } = task
       const latestRule = state.rules.find(rule => rule.id === task.ruleId)
       return { ...safe, canResolveSend: task.status === 'uncertain' && draft?.state === 'uncertain' && sendRecoveryAvailable, outputKind: task.rule?.output, ruleUpdated: !!latestRule && !!task.rule && JSON.stringify(latestRule) !== JSON.stringify(task.rule), attachments: task.attachments.map(({ localPath, ...file }) => file), draft: draft ? { ...draft, sourceKey: undefined, attachments: draft.attachments.map(({ id, filename }: any) => ({ id, filename })) } : undefined }
