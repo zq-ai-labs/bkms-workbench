@@ -399,5 +399,6 @@
   "结束时间需要晚于开始时间。": "The end time must be after the start time.",
   "请先添加邮箱账号。": "Add a mailbox first.",
   "仅预览匹配结果：直接读取邮箱中这段时间的邮件，不会建立事项、移动或发送邮件。": "Preview only: reads mail from this time range in the mailbox; creates no items, moves and sends nothing.",
-  "邮件已在「{0}」，服务器没有返回它的新编号，无法再次移动；请在邮箱中手动移到「{1}」。": "The mail is in “{0}” but the server returned no new number for it, so it cannot be moved again. Move it to “{1}” in the mailbox by hand."
+  "邮件已在「{0}」，服务器没有返回它的新编号，无法再次移动；请在邮箱中手动移到「{1}」。": "The mail is in “{0}” but the server returned no new number for it, so it cannot be moved again. Move it to “{1}” in the mailbox by hand.",
+  "工作台数据文件被其他程序占用（可能是杀毒软件或索引服务），本次保存未完成，请稍后重试。": "The workbench data file is in use by another program (possibly antivirus or the search indexer). This change was not saved; try again shortly."
 }

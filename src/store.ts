@@ -68,8 +68,27 @@ export function validateWechatSettings(value: any): void {
 }
 export const CLOCK = /^([01]\d|2[0-3]):[0-5]\d$/
 
+/** Windows refuses to replace a file that antivirus, the search indexer or a reader has open for a moment. */
+const LOCKED = new Set(['EPERM', 'EACCES', 'EBUSY'])
+/**
+ * Atomically replace `target` with `source`, retrying briefly while Windows holds the target (about 2 s in all).
+ * Any other error, or a lock that does not go away, fails the write; the previous file is left as it was.
+ */
+export async function replaceFile(source: string, target: string, move: (from: string, to: string) => Promise<void> = rename, wait: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms))): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try { return await move(source, target) }
+    catch (error) {
+      if (!LOCKED.has((error as NodeJS.ErrnoException)?.code ?? '')) throw error
+      if (attempt >= 10) throw new WorkbenchError('工作台数据文件被其他程序占用（可能是杀毒软件或索引服务），本次保存未完成，请稍后重试。', 'storage-busy', 503)
+      await wait(Math.min(50 * attempt, 400))
+    }
+  }
+}
+
 export class Store {
   readonly file: string
+  /** Replaces the data file; tests can stand in for a locked file. */
+  replace: (source: string, target: string) => Promise<void> = replaceFile
   constructor(readonly root: string) { this.file = join(root, 'workbench-v1.json') }
   async read(): Promise<State> {
     try {
@@ -104,7 +123,7 @@ export class Store {
       const handle = await open(temporary, 'wx', 0o600)
       try { await handle.writeFile(data); await handle.sync() } finally { await handle.close() }
       if (compromised) throw new WorkbenchError('存储锁已失效，已停止本次写入，请检查运行目录。', 'storage-lock-lost', 503)
-      await rename(temporary, this.file)
+      await this.replace(temporary, this.file)
       return structuredClone(result)
     } finally { if (temporary) await unlink(temporary).catch(() => {}); await release().catch(() => {}) }
   }
