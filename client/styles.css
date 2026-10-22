@@ -29,11 +29,13 @@ body[data-ds-dark-theme] .bkw, body[data-ds-dark-theme] .bkw-settings, body[data
 .bkw button { cursor: pointer; }
 .bkw button:disabled, .bkw-settings button:disabled { cursor: not-allowed; opacity: .45; }
 .bkw :focus-visible, .bkw-settings :focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
+/* Text fields and lists show focus with their own border and soft ring; the outer outline would draw a second frame. */
+.bkw :where(input:not([type=checkbox]):not([type=radio]), select, textarea):focus-visible, .bkw-settings :where(input:not([type=checkbox]):not([type=radio]), select, textarea):focus-visible { outline: none; }
 .bkw :where(input:not([type=checkbox]):not([type=radio]):not([type=file]), select, textarea), .bkw-settings :where(input:not([type=checkbox]), select) {
   min-height: 32px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surf); color: var(--ink); outline: none; transition: border-color .15s, box-shadow .15s;
 }
 .bkw :where(input:not([type=checkbox]):not([type=radio]), select, textarea):hover { border-color: var(--accH); }
-.bkw :where(input:not([type=checkbox]):not([type=radio]), select, textarea):focus, .bkw-settings :where(input, select):focus { border-color: var(--acc); box-shadow: 0 0 0 2px var(--accS); }
+.bkw :where(input:not([type=checkbox]):not([type=radio]), select, textarea):focus, .bkw-settings :where(input, select, textarea):focus { border-color: var(--acc); box-shadow: 0 0 0 2px var(--accS); }
 .bkw :where(input, select, textarea):disabled { background: var(--surf2); color: var(--ink2); cursor: not-allowed; }
 .bkw :where(textarea) { line-height: 1.7; width: 100%; }
 .bkw input[type=checkbox], .bkw-settings input[type=checkbox] { accent-color: var(--acc); }
