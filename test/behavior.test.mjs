@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import { WorkbenchRepository } from '../lib/storage/repository.js'
 import { Engine } from '../lib/engine.js'
 import { WorkbenchApi } from '../lib/api.js'
+import { ChannelRegistry } from '../lib/channels/registry.js'
+import { createWechatChannel } from '../lib/channels/wechat/channel.js'
 
 /**
  * Behaviour through the public surface only: `WorkbenchApi` actions and snapshots, and the engine's driving
@@ -65,7 +67,9 @@ async function fixture(t, { triage, email = true, wechat = false } = {}) {
   const mail = fakeEmail(), chat = fakeWechat(), received = []
   let output = { summary: '已整理客户需求。', subject: 'Re: 报价', text: '您好，报价如下。' }, failure
   const agent = { available: () => true, async run(task, rule, signal) { signal.throwIfAborted(); received.push(task); if (failure) throw new Error(failure); return { output: structuredClone(output), sessionId: 's' } } }
-  const engine = new Engine(openStorage(root), () => email ? mail.email : undefined, agent, undefined, triage, undefined, wechat ? chat.connector : undefined)
+  const channels = new ChannelRegistry()
+  if (wechat) channels.register(createWechatChannel(chat.connector))
+  const engine = new Engine(openStorage(root), () => email ? mail.email : undefined, agent, undefined, triage, undefined, channels)
   const api = new WorkbenchApi(engine)
   await engine.start()
   t.after(async () => { await engine.stop(); await rm(root, { recursive: true, force: true }) })
@@ -292,24 +296,24 @@ test('baseline: rebuilding it needs confirmation and skips mail already in the f
 test('wechat: a conversation segment gets a suggested reply; it is read-only and copied by hand', async t => {
   const f = await fixture(t, { email: false, wechat: true })
   await f.saveRule(wechatRule)
-  await f.saveSettings({ wechat: { enabled: true, people: { mode: 'allow', list: ['wxid_li'] }, groups: { mode: 'allow', list: [], scope: 'mention' } } })
-  await f.engine.pollWechat()
+  await f.saveSettings({ channels: { wechat: { enabled: true, people: { mode: 'allow', list: ['wxid_li'] }, groups: { mode: 'allow', list: [], scope: 'mention' } } } })
+  await f.engine.pollChannel(f.engine.channels.get('wechat'))
   f.chat.say('wxid_li', '报价单今天能发吗？')
   f.chat.say('wxid_mom', '晚上回家吃饭吗？')
-  await f.engine.pollWechat()
+  await f.engine.pollChannel(f.engine.channels.get('wechat'))
   const tasks = (await f.snapshot()).tasks
   assert.equal(tasks.length, 1, 'only allowed conversations are read')
-  assert.equal(tasks[0].wechat.chatName, '李明')
+  assert.equal(tasks[0].channelData.chatName, '李明')
   await f.drain()
   const task = await f.task()
   assert.equal(task.status, 'review')
-  assert.equal(task.wechat.reply, '您好，报价如下。')
+  assert.equal(task.reply.text, '您好，报价如下。')
   await rejectsWith(f.api.action({ action: 'saveDraft', id: task.id, revision: task.revision, draftRevision: 1, draft: {} }), 'wechat-readonly')
   await rejectsWith(f.api.action({ action: 'send', id: task.id, revision: task.revision, draftRevision: 1, planId: 'x', confirmed: true }), 'wechat-readonly')
-  await f.api.action({ action: 'saveReply', id: task.id, revision: task.revision, replyRevision: task.wechat.replyRevision, text: '好的，下午发您。' })
+  await f.api.action({ action: 'saveReply', id: task.id, revision: task.revision, replyRevision: task.reply.revision, text: '好的，下午发您。' })
   const edited = await f.task()
-  assert.equal(edited.wechat.reply, '好的，下午发您。')
-  await rejectsWith(f.api.action({ action: 'saveReply', id: edited.id, revision: edited.revision, replyRevision: task.wechat.replyRevision, text: '旧版本' }), 'conflict')
+  assert.equal(edited.reply.text, '好的，下午发您。')
+  await rejectsWith(f.api.action({ action: 'saveReply', id: edited.id, revision: edited.revision, replyRevision: task.reply.revision, text: '旧版本' }), 'conflict')
   await rejectsWith(f.api.action({ action: 'wechatHistory', chat: 'wxid_mom' }), 'wechat-blocked')
   assert.equal((await f.api.action({ action: 'wechatHistory', chat: 'wxid_li' })).messages.length, 1)
   await f.api.action({ action: 'markHandled', id: edited.id, revision: edited.revision })

@@ -15,7 +15,9 @@
 | --- | --- |
 | src/index.ts | Cordis 服务生命周期、依赖注入、鉴权 Connection 路由 |
 | src/storage/ | SQLite 存储（经 `zq-sqlite`）：表结构与迁移、按记录读写与事务、worker 所有权 |
-| src/store.ts | 微信设置校验、任务历史 `touch` |
+| src/store.ts | 任务历史 `touch` |
+| src/channels/types.ts、registry.ts | 渠道接口（`CHANNEL_API_VERSION`）与已安装渠道的注册表；版本不一致的渠道被拒绝并提示升级 |
+| src/channels/wechat/ | 微信只读渠道：读取、分段、建议回复规范、页面用的会话列表与聊天记录 |
 | src/mail/service.ts | 内置邮件服务：连接池生命周期、引擎使用的 `EmailService`、连接测试、对其他插件的只读接口 |
 | src/mail/accounts.ts | 邮箱账号存储与校验、服务商预设、收件人规则 |
 | src/mail/drafts.ts、draft-store.ts | 草稿保存、预览、发送锁与回执（移植） |
@@ -39,7 +41,7 @@
 | src/structured.ts | 无工具、只提交一个结构化结果的隔离 Agent 运行 |
 | src/writer.ts | 每日简报、周报草稿、主题概括和方案试运行的生成 |
 | src/digest.ts | 待办判定、会话关联、主题匹配，以及简报/周报/主题的输入数据与模板 |
-| src/sources.ts | 信息源适配器约定与连接状态 |
+| src/sources.ts | 信息源连接状态（邮件内置，其余来自已安装渠道） |
 | client/index.tsx | 插件入口、工作台外壳、路由与共享状态 |
 | client/views.tsx, workspace.tsx, topics.tsx, plans.tsx, settings.tsx | 各视图；workspace 为审核与详情共用的 AI 产出 + 原始信息两栏 |
 | client/lib.ts, ui.tsx, store.ts, context.ts | 接口、类型、通用组件、偏好与提醒状态、视图上下文 |

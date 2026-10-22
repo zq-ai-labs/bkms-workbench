@@ -4,7 +4,8 @@ import { rm } from 'node:fs/promises'
 import { delimiter, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
-import { WorkbenchError, type WechatChat, type WechatList, type WechatMessage, type WechatPending, type WechatService, type WechatSettings, type WechatStatus } from './types.js'
+import { WorkbenchError } from '../../types.js'
+import type { WechatChat, WechatList, WechatMessage, WechatPending, WechatService, WechatSettings, WechatStatus } from './types.js'
 
 /** Accounts that are never conversations with people: official accounts, system helpers and folded entries. */
 const SYSTEM = new Set(['filehelper', 'weixin', 'fmessage', 'floatbottle', 'medianote', 'notifymessage', 'newsapp', 'brandsessionholder', 'brandservicesessionholder', 'qqmail', 'qmessage', 'tmessage', 'notification_messages', 'opencustomerservicemsg', 'officialaccounts', 'helper_entry'])
@@ -18,6 +19,22 @@ export const SEGMENT_MAX_MESSAGES = 40
 export const SEGMENT_MAX_MINUTES = 30
 const PENDING_CAP = 60
 
+const CHAT_ID = /^[\w@.\-]{1,120}$/
+/** Checked before WeChat settings are saved, so a bad list can never be stored. */
+export function validateWechatSettings(value: any): void {
+  const fail = () => { throw new WorkbenchError('微信设置无效。') }
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !['enabled', 'python', 'library', 'people', 'groups', 'quietMinutes', 'names'].includes(key))) fail()
+  if (typeof value.enabled !== 'boolean') fail()
+  for (const key of ['python', 'library']) if (value[key] !== undefined && (typeof value[key] !== 'string' || value[key].length > 500 || /[\0\r\n]/.test(value[key]))) fail()
+  for (const key of ['people', 'groups']) {
+    const list = value[key]
+    if (!list || typeof list !== 'object' || !['allow', 'block'].includes(list.mode) || !Array.isArray(list.list) || list.list.length > 2000 || list.list.some((id: unknown) => typeof id !== 'string' || !CHAT_ID.test(id))) fail()
+    if (list.list.some((id: string) => (key === 'groups') !== id.endsWith('@chatroom'))) throw new WorkbenchError(key === 'groups' ? '群聊名单里只能放群聊。' : '人员名单里不能放群聊。')
+  }
+  if (!['mention', 'all'].includes(value.groups.scope)) fail()
+  if (value.quietMinutes !== undefined && (!Number.isSafeInteger(value.quietMinutes) || value.quietMinutes < 1 || value.quietMinutes > 60)) fail()
+  if (value.names !== undefined && (!value.names || typeof value.names !== 'object' || Array.isArray(value.names) || Object.keys(value.names).length > 4000 || Object.entries(value.names).some(([id, name]) => !CHAT_ID.test(id) || typeof name !== 'string' || name.length > 200))) fail()
+}
 export function wechatSettingsOf(value?: WechatSettings): WechatSettings & { quietMinutes: number } {
   return {
     enabled: value?.enabled === true,
@@ -81,7 +98,7 @@ function pythonCommand(setting: string | undefined): string[] {
   if (existsSync(value) || /\.exe$/i.test(value)) return [value]
   return value.split(/\s+/)
 }
-export const BRIDGE_PATH = fileURLToPath(new URL('../wechat/bridge.py', import.meta.url))
+export const BRIDGE_PATH = fileURLToPath(new URL('../../../wechat/bridge.py', import.meta.url))
 
 /** Long-lived read-only bridge process speaking JSON lines. */
 export class WechatBridge implements WechatService {
