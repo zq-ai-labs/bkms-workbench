@@ -36,7 +36,7 @@ export function unknownVariables(text: string): string[] {
 }
 export function checkVariables(text: string, label: string): void {
   const unknown = unknownVariables(text)
-  if (unknown.length) throw new WorkbenchError(`${label}里有不认识的变量：${unknown.map(name => `{{${name}}}`).join('、')}。可用变量见编辑框上方。`)
+  if (unknown.length) throw new WorkbenchError(`${label}里有不认识的变量：${unknown.map(name => `{{${name}}}`).join('、')}。在编辑框中输入 / 可查看可用的变量。`)
 }
 
 /** Current values. Times are in your time zone; empty profile fields say so instead of being left blank. */

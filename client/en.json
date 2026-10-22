@@ -1154,11 +1154,9 @@
   "保存分类方案": "Save scheme",
   "选择业务分类": "Choose a business category",
   "{0} 个分类 · 待人工 {1}": "{0} categories · {1} for you",
-  "投诉、查询、咨询…每封邮件归入一类": "Complaints, inquiries, questions… one category per email",
   "分类方案不存在": "Classification scheme not found",
   "它可能已被删除。": "It may have been deleted.",
   "新建的方案不再提供“分派”：要把邮件按业务分给不同的人，请用“业务分类”，为分类选择“移到文件夹”。这个方案仍会照常运行。": "New workflows no longer offer “Dispatch”. To hand email to different people by business type, use business categories and choose “Move to folder” for a category. This workflow keeps running as before.",
-  "不认识的变量：{0}。保存前请改成编辑框上方列出的变量。": "Unknown variables: {0}. Change them to the variables listed above the editor before saving.",
   "发给 AI 前的样子": "What the AI will read",
   "按你的资料和现在的时间填入": "Filled in from your profile and the current time",
   "我的资料": "My profile",
@@ -1176,7 +1174,6 @@
   "时区": "Time zone",
   "当前邮箱": "Current mailbox",
   "插入变量": "Insert variable",
-  "插入变量：": "Insert variable:",
   "例如：赵晓强": "Alex Zhao",
   "例如：客户服务部": "Customer Service",
   "例如：客服主管": "Service lead",
@@ -1191,5 +1188,7 @@
   "选择 {0}": "Select {0}",
   "按业务分类筛选": "Filter by business category",
   "全部业务分类": "All business categories",
-  "AI：{0}": "AI: {0}"
+  "AI：{0}": "AI: {0}",
+  "不认识的变量：{0}。输入 / 可查看可用的变量。": "Unknown variables: {0}. Type / to see the available variables.",
+  "输入 / 插入变量，例如姓名、部门、今天的日期。": "Type / to insert a variable, such as your name, department or today’s date."
 }

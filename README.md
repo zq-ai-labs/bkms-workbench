@@ -70,7 +70,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-workbench.ps1
 
 「设置 → 我的资料」填写姓名、部门、角色、职务、电话、公司、签名和时区（不要填密码或密钥）。
 
-- 处理要求里可以用变量引用这些资料和当前时间：`{{user.name}}` `{{user.department}}` `{{user.role}}` `{{user.title}}` `{{user.phone}}` `{{user.company}}` `{{user.signature}}` `{{today}}` `{{now}}` `{{weekday}}` `{{timezone}}` `{{mailbox}}`。编辑框上方点一下即可插入，下方可预览“发给 AI 前的样子”；写错的变量名保存时会被拦下。没填的资料显示为“[未设置：…]”，AI 不会自己编。
+- 处理要求里可以用变量引用这些资料和当前时间：`{{user.name}}` `{{user.department}}` `{{user.role}}` `{{user.title}}` `{{user.phone}}` `{{user.company}}` `{{user.signature}}` `{{today}}` `{{now}}` `{{weekday}}` `{{timezone}}` `{{mailbox}}`。在编辑框中输入 / 会列出变量，选一个即可插入，下方可预览“发给 AI 前的样子”；写错的变量名保存时会被拦下。没填的资料显示为“[未设置：…]”，AI 不会自己编。
 - AI 处理和分拣时也会拿到“运行上下文”：现在的时间、时区、你是谁。它放在系统提示里，与邮件内容分开；角色和部门只影响措辞，不代表可以越权承诺。
 
 ### 从指定时间开始处理（补处理历史邮件）

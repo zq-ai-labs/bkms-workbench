@@ -424,7 +424,6 @@
   "{0}包含不允许的字符。": "{0} contains characters that aren't allowed.",
   "{0}无效或过长（最多 {1} 字）。": "{0} is invalid or too long (at most {1} characters).",
   "请填写{0}。": "Fill in {0}.",
-  "处理要求里有不认识的变量：{0}。可用变量见编辑框上方。": "The instructions use unknown variables: {0}. The available variables are listed above the editor.",
   "分类「{0}」的目标文件夹不能是方案读取的文件夹。": "The target folder of category “{0}” can't be the folder the scheme reads.",
   "分类「{0}」要移到文件夹，请填写目标文件夹。": "Category “{0}” moves mail; fill in its target folder.",
   "分类名称「{0}」重复。": "The category name “{0}” is used twice.",
@@ -442,5 +441,6 @@
   "当前没有可用的 AI 判断业务分类，等待你选择。": "No AI is available to choose the business category; waiting for you to choose.",
   "你把分类从「{0}」改为「{1}」，AI 会参考这次纠正。": "You changed the category from “{0}” to “{1}”. The AI will take this correction into account.",
   "你把它归为「{0}」，AI 会参考这次判断。": "You classified it as “{0}”. The AI will take this into account.",
-  "你更改了分类，自动发送取消。": "You changed the category, so the automatic send was canceled."
+  "你更改了分类，自动发送取消。": "You changed the category, so the automatic send was canceled.",
+  "处理要求里有不认识的变量：{0}。在编辑框中输入 / 可查看可用的变量。": "The instructions use unknown variables: {0}. Type / in the editor to see the available variables."
 }

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { t } from "./i18n";
 import { Field } from "./ui";
 
@@ -31,12 +31,45 @@ export function previewVariables(text: string, profile: Profile | undefined, mai
   return text.replace(REFERENCE, (whole, name: string) => values[name] ?? whole);
 }
 
-/** Variable buttons that insert `{{name}}` at the cursor of the field they belong to. */
-export function VariableBar({ onInsert }: { onInsert: (reference: string) => void }) {
-  return <div className="bkw-var-bar" role="group" aria-label={t("插入变量")}>
-    <small className="bkw-muted">{t("插入变量：")}</small>
-    {VARIABLE_LABELS.map(([name, label]) => <button type="button" key={name} className="bkw-var" title={t(label)} onClick={() => onInsert(`{{${name}}}`)}>{`{{${name}}}`}</button>)}
-  </div>;
+/**
+ * Typing "/" in a text field lists the variables; arrows choose, Enter or Tab inserts, Esc closes. Typing after the
+ * "/" filters by name or meaning. The "/" is replaced by `{{name}}`. A "/" in ordinary text (a folder path) that
+ * matches nothing simply closes the list.
+ */
+export function useVariableMenu(text: string, onText: (next: string) => void) {
+  const [menu, setMenu] = useState<{ start: number; query: string; index: number }>();
+  const field = useRef<HTMLTextAreaElement | null>(null);
+  const query = menu?.query.toLowerCase() ?? "";
+  const options = menu ? VARIABLE_LABELS.filter(([name, label]) => !query || name.toLowerCase().includes(query) || t(label).toLowerCase().includes(query)) : [];
+  const close = () => setMenu(undefined);
+  const onChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const element = event.target, caret = element.selectionStart, value = element.value;
+    field.current = element;
+    if (value.length === text.length + 1 && value[caret - 1] === "/") { setMenu({ start: caret - 1, query: "", index: 0 }); return; }
+    if (!menu) return;
+    const typed = value.slice(menu.start + 1, caret);
+    if (caret <= menu.start || value[menu.start] !== "/" || /\s/.test(typed) || typed.length > 30) close();
+    else setMenu({ ...menu, query: typed, index: 0 });
+  };
+  const pick = (name: string) => {
+    if (!menu) return;
+    const reference = `{{${name}}}`, end = menu.start + 1 + menu.query.length, at = menu.start + reference.length;
+    onText(text.slice(0, menu.start) + reference + text.slice(end));
+    close();
+    requestAnimationFrame(() => { const element = field.current; if (element) { element.focus(); element.setSelectionRange(at, at); } });
+  };
+  const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    field.current = event.currentTarget;
+    if (!menu || !options.length) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); const step = event.key === "ArrowDown" ? 1 : -1; setMenu({ ...menu, index: (menu.index + step + options.length) % options.length }); }
+    else if (event.key === "Enter" || event.key === "Tab") { event.preventDefault(); pick(options[Math.min(menu.index, options.length - 1)][0]); }
+    else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
+  };
+  const element = menu && options.length ? <div className="bkw-var-menu" role="listbox" aria-label={t("插入变量")}>
+    {options.map(([name, label], index) => <button type="button" role="option" key={name} aria-selected={index === menu.index} className={`bkw-var-option ${index === menu.index ? "on" : ""}`}
+      onMouseDown={event => { event.preventDefault(); pick(name); }}><code>{`{{${name}}}`}</code><small>{t(label)}</small></button>)}
+  </div> : null;
+  return { onChange, onKeyDown, close, menu: element };
 }
 
 const FIELDS: [keyof Profile, string, string][] = [
