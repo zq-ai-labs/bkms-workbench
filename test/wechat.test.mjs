@@ -23,10 +23,11 @@ function fakeWechat() {
     { id: '222@chatroom', name: '家人群', kind: 'group' },
   ]
   const messages = { wxid_li: [{ seq: 5, at: minutesAgo(60), sender: 'wxid_li', senderName: '李明', self: false, type: '文本', text: '历史消息' }], wxid_mom: [], '111@chatroom': [], '222@chatroom': [] }
-  const polled = [], historyCalls = []
+  const polled = [], historyCalls = [], chatCalls = []
+  let chatGate
   const service = {
     async status() { return { ready: true, wxid: 'wxid_me', name: '赵晓强', library: 'test' } },
-    async chats() { return chats },
+    async chats() { chatCalls.push(Date.now()); if (chatGate) await chatGate; return [...chats] },
     async search(q) { return chats.filter(chat => chat.name.includes(q)) },
     async latest(ids) { return Object.fromEntries(ids.map(id => [id, Math.max(0, ...(messages[id] || []).map(m => m.seq))])) },
     async poll(marks) { polled.push(Object.keys(marks)); return Object.fromEntries(Object.entries(marks).map(([id, seq]) => [id, (messages[id] || []).filter(m => m.seq > seq)])) },
@@ -34,7 +35,7 @@ function fakeWechat() {
   }
   let seq = 100
   const say = (chat, text, extra = {}) => { chats.find(c => c.id === chat).lastAt = new Date(Date.now() + seq).toISOString(); messages[chat].push({ seq: ++seq, at: extra.at ?? minutesAgo(10), sender: extra.self ? 'wxid_me' : extra.sender ?? chat, senderName: extra.self ? '赵晓强' : extra.senderName ?? chats.find(c => c.id === chat).name, self: !!extra.self, type: '文本', text, ...(extra.mentionsMe ? { mentionsMe: true } : {}) }) }
-  return { service, say, polled, historyCalls, messages }
+  return { service, say, polled, historyCalls, chatCalls, messages, chats, gate(promise) { chatGate = promise } }
 }
 
 async function fixture(t, { triage, agentOutput } = {}) {
@@ -231,6 +232,51 @@ test('settings validation, status in the snapshot and clearing the local cache',
   assert.equal(snapshot.wechat.watching, 1); assert.equal(snapshot.wechat.settings.groups.scope, 'mention')
   await assert.rejects(f.api.action({ action: 'clearWechatCache' }), /确认/)
   await f.api.action({ action: 'clearWechatCache', confirmed: true }); assert.equal(f.cleared, 1)
+})
+
+test('the session list is answered from memory; one bridge query at a time; stale lists refresh in the background', async t => {
+  const f = await fixture(t)
+  await f.configure({ wechat: settings() })
+  f.engine.wechatChanged()
+  f.fake.chatCalls.length = 0
+  // Concurrent first requests share one bridge query.
+  let open; f.fake.gate(new Promise(resolve => { open = resolve }))
+  const first = Promise.all([f.api.action({ action: 'wechatChats' }), f.api.action({ action: 'wechatChats' })])
+  await new Promise(resolve => setTimeout(resolve, 20))
+  open(); f.fake.gate(undefined)
+  const [a, b] = await first
+  assert.equal(a.length, 4); assert.deepEqual(a, b)
+  assert.equal(f.fake.chatCalls.length, 1, 'one query for both callers')
+  // Fresh: answered from memory, the bridge is not asked.
+  f.fake.chats[0] = { ...f.fake.chats[0], name: '李明（新）' }
+  assert.equal((await f.api.action({ action: 'wechatChats' }))[0].name, '李明')
+  assert.equal(f.fake.chatCalls.length, 1)
+  // Older than a minute: the old list comes back at once and a refresh starts behind it.
+  f.engine.wechatChatList.at -= 61000
+  assert.equal((await f.api.action({ action: 'wechatChats' }))[0].name, '李明', 'stale list returned without waiting')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(f.fake.chatCalls.length, 2)
+  assert.equal((await f.api.action({ action: 'wechatChats' }))[0].name, '李明（新）', 'refreshed list is used next time')
+  // A page that goes away stops waiting without cancelling the shared query.
+  f.engine.wechatChanged()
+  f.fake.gate(new Promise(resolve => { open = resolve }))
+  const controller = new AbortController()
+  const waiting = f.engine.wechatChats(controller.signal)
+  const other = f.api.action({ action: 'wechatChats' })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  controller.abort(new Error('页面已离开'))
+  await assert.rejects(waiting, /页面已离开/)
+  open(); f.fake.gate(undefined)
+  assert.equal((await other).length, 4)
+  // Lists changed while a query was in flight: its answer is not kept as the cache.
+  f.engine.wechatChanged()
+  f.fake.gate(new Promise(resolve => { open = resolve }))
+  const before = f.api.action({ action: 'wechatChats' })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  f.engine.wechatChanged()
+  open(); f.fake.gate(undefined)
+  await before
+  assert.equal(f.engine.wechatChatList, undefined, 'old answer dropped after the lists changed')
 })
 
 const python = ['python3', 'python'].find(cmd => spawnSync(cmd, ['--version']).status === 0)

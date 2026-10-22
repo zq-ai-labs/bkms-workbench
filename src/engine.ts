@@ -25,6 +25,13 @@ const EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g
 const STALE_AUTO_SEND = 60 * 60000
 /** Most recent learned examples per workflow given to AI. */
 const EXAMPLES_IN_PROMPT = 8
+/** Wait for a shared promise, but stop waiting when this caller is cancelled. */
+const waitFor = <T>(promise: Promise<T>, signal: AbortSignal): Promise<T> => new Promise<T>((resolve, reject) => {
+  const abort = () => reject(signal.reason instanceof Error ? signal.reason : new Error('已取消'))
+  if (signal.aborted) return abort()
+  signal.addEventListener('abort', abort, { once: true })
+  promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+})
 /** Deterministic bounds for an automatic reply. The model's own judgement is necessary but never sufficient. */
 export function autoSendDecision(rule: Rule, task: Task, output: AgentOutput, checks: Check[], prefs: State['senders']): { ok: true } | { ok: false; reason: string } {
   const autonomy = rule.autonomy ?? 'draft'
@@ -60,6 +67,9 @@ export class Engine {
   private wechatPolling = false
   private wechatInfo?: WechatStatus & { at: number }
   private wechatChatList?: { at: number; chats: WechatChat[] }
+  /** The session-list query in flight, shared by the page and the background poll so the bridge is asked once. */
+  private wechatChatFetch?: Promise<WechatChat[]>
+  private wechatGeneration = 0
   private wechatError?: string
   /** Last-message time per conversation at the last successful poll; unchanged conversations are not queried. */
   private wechatSeen = new Map<string, string>()
@@ -223,18 +233,33 @@ export class Engine {
     if (this.wechatInfo.ready) this.wechatError = undefined
     return this.wechatInfo
   }
+  /** The session list for the page: answered from memory at once; a list older than a minute is refreshed in the background. */
   async wechatChats(signal: AbortSignal): Promise<WechatChat[]> {
     const { service } = await this.wechatService()
-    this.wechatChatList = { at: Date.now(), chats: await service.chats(signal) }
-    return this.wechatChatList.chats
+    const cached = this.wechatChatList
+    if (!cached) return waitFor(this.fetchWechatChats(service), signal)
+    if (Date.now() - cached.at > 60000) this.fetchWechatChats(service).catch(() => {})
+    return cached.chats
+  }
+  /** Ask the bridge for the session list once at a time. The query belongs to the engine, so a page that goes away does not cancel it for others. */
+  private fetchWechatChats(service: WechatService): Promise<WechatChat[]> {
+    if (this.wechatChatFetch) return this.wechatChatFetch
+    const generation = this.wechatGeneration
+    const fetch = service.chats(this.controller.signal).then(chats => {
+      // Lists changed meanwhile: the answer may be from the old settings, so it is not kept.
+      if (generation === this.wechatGeneration) this.wechatChatList = { at: Date.now(), chats }
+      return chats
+    }).finally(() => { if (this.wechatChatFetch === fetch) this.wechatChatFetch = undefined })
+    this.wechatChatFetch = fetch
+    return fetch
   }
   /** Forget cached chat names and status after the lists change. */
-  wechatChanged(): void { this.wechatChatList = undefined; this.wechatSeen.clear(); this.wechatSweepAt = 0 }
+  wechatChanged(): void { this.wechatGeneration++; this.wechatChatList = undefined; this.wechatChatFetch = undefined; this.wechatSeen.clear(); this.wechatSweepAt = 0 }
   private async wechatEligible(service: WechatService, settings: WechatSettings | undefined, signal: AbortSignal): Promise<Map<string, WechatChat>> {
     // The session list is one cheap query; it tells which conversations have anything new.
-    if (!this.wechatChatList || Date.now() - this.wechatChatList.at > 4000) this.wechatChatList = { at: Date.now(), chats: await service.chats(signal) }
+    const chats = this.wechatChatList && Date.now() - this.wechatChatList.at <= 4000 ? this.wechatChatList.chats : await waitFor(this.fetchWechatChats(service), signal)
     const s = wechatSettingsOf(settings), eligible = new Map<string, WechatChat>()
-    for (const chat of this.wechatChatList.chats) if (chatAllowed(settings, chat.id)) eligible.set(chat.id, chat)
+    for (const chat of chats) if (chatAllowed(settings, chat.id)) eligible.set(chat.id, chat)
     // Listed chats outside the recent session list are still read.
     for (const id of [...(s.people.mode === 'allow' ? s.people.list : []), ...(s.groups.mode === 'allow' ? s.groups.list : [])]) {
       const kind = chatKind(id)
