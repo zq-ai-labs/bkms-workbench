@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Store } from '../lib/store.js'
+import { WorkbenchRepository } from '../lib/storage/repository.js'
+import { stateOf, setSettings, editRules, editTask, editTasks, readFresh } from './helpers.mjs'
 import { Engine } from '../lib/engine.js'
 import { WorkbenchApi } from '../lib/api.js'
 import { renderVariables, runtimeContext, unknownVariables, validateProfile, variableValues } from '../lib/context-vars.js'
@@ -34,7 +35,7 @@ test('the profile is validated: no unknown fields, no line breaks, a real time z
 
 test('workflows with unknown variables are refused on save; the AI gets the filled-in context', async t => {
   const root = await mkdtemp(join(tmpdir(), 'bkms-vars-'))
-  const store = new Store(root), seen = { agent: [], triage: [] }, folders = { INBOX: [] }
+  const store = new WorkbenchRepository(root), seen = { agent: [], triage: [] }, folders = { INBOX: [] }
   const email = {
     version: 1, accounts: () => [{ id: 'service@corp.example', address: 'service@corp.example', inboxFolder: 'INBOX' }],
     async scan({ cursor }) { const last = folders.INBOX.at(-1)?.uid ?? 0; return cursor ? { cursor: { uidValidity: 7, lastUid: last }, messages: folders.INBOX.filter(m => m.uid > cursor.lastUid), firstRun: false, reset: false, hasMore: false } : { cursor: { uidValidity: 7, lastUid: last }, messages: [], firstRun: true, reset: false, hasMore: false } },
@@ -45,9 +46,9 @@ test('workflows with unknown variables are refused on save; the AI gets the fill
   const agent = { available: () => true, async run(task, rule, signal, options) { seen.agent.push(options); return { output: { summary: '已整理。', subject: 'Re', text: '您好。' }, sessionId: 's' } } }
   const engine = new Engine(store, () => email, agent, undefined, triage), api = new WorkbenchApi(engine)
   await engine.start()
-  t.after(async () => { await engine.stop(); await rm(root, { recursive: true, force: true, maxRetries: 5 }) })
+  t.after(async () => { await engine.stop(); await store.close(); await rm(root, { recursive: true, force: true, maxRetries: 5 }) })
   const rule = { name: '询价回复', enabled: true, priority: 100, account: '', folder: 'INBOX', match: { from: '', subject: '', hasAttachments: false, mode: 'all' }, tools: [], output: 'reply', maxRetries: 0, matchMode: 'literal' }
-  const revision = async () => (await store.read()).configRevision
+  const revision = async () => (await stateOf(store)).configRevision
   await assert.rejects(api.action({ action: 'saveRule', revision: await revision(), rule: { ...rule, instructions: '落款 {{user.nmae}}。' } }), /不认识的变量：\{\{user\.nmae\}\}/)
   await api.action({ action: 'saveRule', revision: await revision(), rule: { ...rule, instructions: '以{{user.department}}的名义回复，落款{{user.name}}。' } })
   await assert.rejects(api.action({ action: 'saveSettings', revision: await revision(), settings: { profile: { apiKey: 'x' } } }), /我的资料无效/)
@@ -56,10 +57,10 @@ test('workflows with unknown variables are refused on save; the AI gets the fill
   await engine.poll()
   folders.INBOX.push({ uid: 11, date: new Date().toISOString(), from: [{ address: 'buyer@client.example' }], subject: '询价', seen: false, hasAttachments: false })
   await engine.poll()
-  for (let i = 0; i < 10 && (await store.read()).tasks.some(task => task.status === 'queued'); i++) await engine.processNext()
+  for (let i = 0; i < 10 && (await stateOf(store)).tasks.some(task => task.status === 'queued'); i++) await engine.processNext()
   assert.equal(seen.triage[0].context.department, '客户服务部'); assert.match(seen.triage[0].context.now, /^\d{4}-\d\d-\d\d \d\d:\d\d$/)
   const options = seen.agent[0]
   assert.equal(options.context.values['user.name'], '赵晓强'); assert.equal(options.context.values.mailbox, 'service@corp.example')
   assert.match(options.context.text, /工作台用户：姓名 赵晓强/)
-  assert.equal(renderVariables((await store.read()).rules[0].instructions, options.context.values), '以客户服务部的名义回复，落款赵晓强。')
+  assert.equal(renderVariables((await stateOf(store)).rules[0].instructions, options.context.values), '以客户服务部的名义回复，落款赵晓强。')
 })

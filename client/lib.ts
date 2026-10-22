@@ -52,6 +52,8 @@ export type Report = { id: string; kind: "weekly" | "topic"; title: string; text
 export type Log = { id?: string; at?: string; level?: string; message?: string; taskId?: string };
 export type Defaults = { triage: boolean; undoMinutes: number; briefEnabled: boolean; briefTime: string; weeklyEnabled: boolean; weeklyDay: number; weeklyTime: string; meetingBriefMinutes: number };
 export type Snapshot = {
+  /** Data version; `unchanged` answers a periodic check when nothing changed since that version. */
+  version?: string; unchanged?: boolean;
   revision: number; tasks: Task[]; rules: Rule[]; accounts: { id: string; label: string; inboxFolder?: string }[]; logs: Log[];
   capabilities?: Capabilities; settings: Preferences["settings"] & Partial<Defaults>; defaults: Defaults;
   health: { email: boolean; agent?: boolean; running?: boolean; lastPoll?: string; error?: string; triage?: boolean; writer?: boolean; wechat?: { ready: boolean; name?: string; library?: string; error?: string } };

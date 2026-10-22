@@ -110,10 +110,9 @@ export function decideCategory(classifier: Classifier, verdict: BusinessVerdict 
   return { candidates: [...new Set([verdict?.categoryId, ...(verdict?.alternatives ?? [])].filter((id): id is string => !!id && known.has(id)))] }
 }
 
-/** Remember a confirmed or corrected category, outside the configuration. */
-export function learnCategory(state: State, categoryId: string, taskId: string, text: string, match: boolean, now: string): void {
-  const examples = (state.categoryExamples ??= {})
-  const current = (examples[categoryId] ?? []).filter(example => !(example.taskId === taskId && example.match === match))
+/** A category's examples after remembering a confirmed or corrected message (latest 20 kept), outside the configuration. */
+export function learnCategory(list: RuleExample[], taskId: string, text: string, match: boolean, now: string): RuleExample[] {
+  const current = list.filter(example => !(example.taskId === taskId && example.match === match))
   const example: RuleExample = { id: randomUUID(), match, text, at: now, taskId }
-  examples[categoryId] = [...current, example].slice(-20)
+  return [...current, example].slice(-20)
 }

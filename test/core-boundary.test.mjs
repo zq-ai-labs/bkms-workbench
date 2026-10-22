@@ -12,14 +12,14 @@ import { fileURLToPath } from 'node:url'
 const CHANNEL_FILES = new Set(['src/wechat.ts', 'client/wechat.tsx'])
 const BASELINE = {
   'src/agent.ts': 3,
-  'src/api.ts': 29,
+  'src/api.ts': 28,
   'src/classify.ts': 1,
   'src/digest.ts': 6,
   'src/engine.ts': 85,
   'src/index.ts': 5,
   'src/rules.ts': 4,
   'src/sources.ts': 3,
-  'src/store.ts': 5,
+  'src/store.ts': 2,
   'src/triage.ts': 1,
   'src/types.ts': 31,
   'client/lib.ts': 17,

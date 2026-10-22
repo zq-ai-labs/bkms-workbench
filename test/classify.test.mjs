@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Store } from '../lib/store.js'
+import { WorkbenchRepository } from '../lib/storage/repository.js'
+import { stateOf, setSettings, editRules, editTask, editTasks, readFresh } from './helpers.mjs'
 import { Engine } from '../lib/engine.js'
 import { WorkbenchApi } from '../lib/api.js'
 import { validateClassifier, decideCategory, parseBusiness } from '../lib/classify.js'
@@ -22,7 +23,7 @@ const replyRule = { name: '查询回复', enabled: true, priority: 100, account:
 /** A mailbox, a triage model whose business verdict each test sets, and a writer for trial runs. */
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'bkms-classify-'))
-  const store = new Store(root), folders = { INBOX: [] }, moves = [], drafts = new Map(), seen = []
+  const store = new WorkbenchRepository(root), folders = { INBOX: [] }, moves = [], drafts = new Map(), seen = []
   let nextUid = 500, verdict = () => ({}), category = () => 'request', runs = 0
   const email = {
     version: 1, accounts: () => [{ id: 'service@corp.example', address: 'service@corp.example', inboxFolder: 'INBOX' }],
@@ -55,11 +56,11 @@ async function fixture(t) {
   const agent = { available: () => true, async run() { runs++; return { output: { summary: '已整理。', subject: 'Re', text: '您好。' }, sessionId: 's' } } }
   const engine = new Engine(store, () => email, agent, undefined, triage, writer), api = new WorkbenchApi(engine)
   await engine.start()
-  await store.mutate(state => { state.settings.triage = true })
-  t.after(async () => { await engine.stop(); await rm(root, { recursive: true, force: true, maxRetries: 5 }) })
+  await setSettings(store, { triage: true })
+  t.after(async () => { await engine.stop(); await store.close(); await rm(root, { recursive: true, force: true, maxRetries: 5 }) })
   let uid = 10
-  const arrive = async (subject, text = subject) => { folders.INBOX.push({ uid: ++uid, date: new Date().toISOString(), from: [{ address: 'buyer@client.example' }], subject, text, seen: false, hasAttachments: false }); await engine.poll(); for (let i = 0; i < 20 && (await store.read()).tasks.some(task => ['queued'].includes(task.status)); i++) await engine.processNext() }
-  const saveScheme = async (input = scheme) => api.action({ action: 'saveClassifier', revision: (await store.read()).configRevision, classifier: input })
+  const arrive = async (subject, text = subject) => { folders.INBOX.push({ uid: ++uid, date: new Date().toISOString(), from: [{ address: 'buyer@client.example' }], subject, text, seen: false, hasAttachments: false }); await engine.poll(); for (let i = 0; i < 20 && (await stateOf(store)).tasks.some(task => ['queued'].includes(task.status)); i++) await engine.processNext() }
+  const saveScheme = async (input = scheme) => api.action({ action: 'saveClassifier', revision: (await stateOf(store)).configRevision, classifier: input })
   const byName = (saved, name) => saved.categories.find(item => item.name === name)
   return { store, engine, api, folders, moves, seen, arrive, saveScheme, byName, set verdict(fn) { verdict = fn }, set category(fn) { category = fn }, get runs() { return runs } }
 }
@@ -92,13 +93,13 @@ test('the triage model gets a business category field only for a classified fold
 test('a confident category is applied: a move moves the mail, a label lets the workflows run as before', async t => {
   const f = await fixture(t)
   const saved = await f.saveScheme(), complaint = f.byName(saved, '投诉'), query = f.byName(saved, '查询')
-  await f.api.action({ action: 'saveRule', revision: (await f.store.read()).configRevision, rule: replyRule })
+  await f.api.action({ action: 'saveRule', revision: (await stateOf(f.store)).configRevision, rule: replyRule })
   await f.engine.poll()
   f.verdict = input => /延误/.test(input.mail.subject) ? { categoryId: complaint.id, confidence: 'high', reason: '订单延误，表达不满。' } : { categoryId: query.id, confidence: 'high', reason: '询问物流。' }
   await f.arrive('订单延误一周还没人联系我')
   await f.arrive('请问 SO-20931 到哪了')
   assert.equal(f.seen[0].classifier.categories.length, 3); assert.equal(f.seen[0].classifier.guidance, scheme.guidance)
-  const [moved, labeled] = (await f.store.read()).tasks
+  const [moved, labeled] = (await stateOf(f.store)).tasks
   assert.equal(moved.classification.categoryName, '投诉'); assert.equal(moved.classification.state, 'applied')
   assert.equal(moved.status, 'completed'); assert.deepEqual(f.moves, [{ folder: 'INBOX', uid: 11, target: '客服/投诉' }])
   assert.equal(moved.ruleId, undefined, 'a moved mail does not reach the workflows of its old folder')
@@ -109,11 +110,11 @@ test('a confident category is applied: a move moves the mail, a label lets the w
 test('an unsure category waits for you; nothing runs until you choose, and your choice is learned', async t => {
   const f = await fixture(t)
   const saved = await f.saveScheme(), complaint = f.byName(saved, '投诉'), query = f.byName(saved, '查询')
-  await f.api.action({ action: 'saveRule', revision: (await f.store.read()).configRevision, rule: replyRule })
+  await f.api.action({ action: 'saveRule', revision: (await stateOf(f.store)).configRevision, rule: replyRule })
   await f.engine.poll()
   f.verdict = () => ({ categoryId: query.id, confidence: 'medium', reason: '像在问价格，也提到和上次不一样。', alternatives: [complaint.id] })
   await f.arrive('关于上次报价，我们有些疑问')
-  let task = (await f.store.read()).tasks[0]
+  let task = (await stateOf(f.store)).tasks[0]
   assert.equal(task.status, 'unmatched'); assert.equal(task.classification.state, 'pending')
   assert.deepEqual(task.classification.candidates, [query.id, complaint.id])
   assert.equal(needsAttention(task), true)
@@ -121,13 +122,13 @@ test('an unsure category waits for you; nothing runs until you choose, and your 
   assert.equal(task.match.state, 'suggested')
   // You decide it is a complaint: moved now, remembered as an example.
   await f.api.action({ action: 'classify', id: task.id, revision: task.revision, categoryId: complaint.id })
-  let state = await f.store.read(); task = state.tasks[0]
+  let state = await stateOf(f.store); task = state.tasks[0]
   assert.equal(task.classification.categoryName, '投诉'); assert.equal(task.classification.by, 'manual')
   assert.equal(task.status, 'completed'); assert.equal(f.moves.length, 1)
   assert.deepEqual(state.categoryExamples[complaint.id].map(example => example.match), [true])
   // Corrected later: the wrong category gets a counter-example; the mail stays where it is.
   await f.api.action({ action: 'classify', id: task.id, revision: task.revision, categoryId: query.id })
-  state = await f.store.read(); task = state.tasks[0]
+  state = await stateOf(f.store); task = state.tasks[0]
   assert.equal(task.classification.categoryName, '查询')
   assert.deepEqual(state.categoryExamples[complaint.id].map(example => example.match), [true, false])
   assert.match(task.history.at(-1).message, /仍在「客服\/投诉」/)
@@ -143,11 +144,11 @@ test('notifications are archived as before unless the scheme classifies them too
   f.category = () => 'notification'
   f.verdict = () => ({ categoryId: query.id, confidence: 'high', reason: '' })
   await f.arrive('您的账单已出')
-  let task = (await f.store.read()).tasks[0]
+  let task = (await stateOf(f.store)).tasks[0]
   assert.equal(task.status, 'ignored'); assert.equal(task.classification, undefined)
   await f.saveScheme({ ...saved, includeNotices: true })
   await f.arrive('您的账单又出了')
-  task = (await f.store.read()).tasks[1]
+  task = (await stateOf(f.store)).tasks[1]
   assert.equal(task.classification.categoryName, '查询')
 })
 
@@ -156,10 +157,10 @@ test('one folder, one enabled scheme; deleting a scheme keeps the categories alr
   const saved = await f.saveScheme()
   await assert.rejects(f.saveScheme({ ...scheme, name: '第二套' }), /已在处理这个文件夹/)
   await f.saveScheme({ ...scheme, name: '第二套', enabled: false })
-  const state = await f.store.read()
+  const state = await stateOf(f.store)
   assert.equal(state.classifiers.length, 2)
   await f.api.action({ action: 'deleteClassifier', id: saved.id, revision: state.configRevision })
-  assert.deepEqual((await f.store.read()).classifiers.map(item => item.name), ['第二套'])
+  assert.deepEqual((await stateOf(f.store)).classifiers.map(item => item.name), ['第二套'])
 })
 
 test('a trial run shows the category each message would get and changes nothing', async t => {
@@ -167,11 +168,11 @@ test('a trial run shows the category each message would get and changes nothing'
   await f.engine.poll()
   f.verdict = () => ({})
   await f.arrive('订单延误了'); await f.arrive('关于报价的疑问')
-  const before = JSON.stringify(await f.store.read())
+  const before = JSON.stringify(await stateOf(f.store))
   const result = await f.api.action({ action: 'trialClassifier', classifier: scheme })
   assert.equal(result.total, 2)
   const bySubject = Object.fromEntries(result.items.map(item => [item.subject, item]))
   assert.ok(bySubject['订单延误了'].categoryId, 'confident: would be applied')
   assert.equal(bySubject['关于报价的疑问'].categoryId, '', 'unsure: would wait for you'); assert.ok(bySubject['关于报价的疑问'].likely)
-  assert.equal(JSON.stringify(await f.store.read()), before); assert.equal(f.moves.length, 0)
+  assert.equal(JSON.stringify(await stateOf(f.store)), before); assert.equal(f.moves.length, 0)
 })

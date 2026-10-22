@@ -5,7 +5,8 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { Store } from '../lib/store.js'
+import { WorkbenchRepository } from '../lib/storage/repository.js'
+import { stateOf, setSettings, editRules, editTask, editTasks, readFresh } from './helpers.mjs'
 import { DEMO } from '../scripts/demo-content.mjs'
 
 const run = promisify(execFile)
@@ -23,11 +24,11 @@ for (const lang of ['zh', 'en']) test(`seed-demo creates a readable ${lang} work
   t.after(() => rm(root, { recursive: true, force: true }))
   const home = join(root, 'runtime', 'poc', 'bkms-workbench-demo-' + lang)
   await run(process.execPath, ['scripts/seed-demo.mjs', '--home', home, '--lang', lang])
-  const state = await new Store(join(home, 'data', 'bkms-workbench')).read()
+  const state = await readFresh(join(home, 'data', 'bkms-workbench'))
   assert.equal(state.uiLanguage, lang)
   assert.equal(state.settings.enabled, false)
   assert.deepEqual(state.rules.map(rule => rule.name), Object.values(DEMO[lang].rules).map(rule => rule.name))
   assert.equal(state.tasks.filter(task => task.draftId).length, DEMO[lang].mails.filter(mail => mail.reply).length)
-  assert.ok(!(await readFile(join(home, 'data', 'bkms-workbench', 'workbench-v1.json'), 'utf8')).includes('demo-placeholder'))
+  assert.ok(!(await readFile(join(home, 'data', 'bkms-workbench', 'workbench.sqlite'))).includes('demo-placeholder'), 'the placeholder password stays in the mail account file')
   await assert.rejects(run(process.execPath, ['scripts/seed-demo.mjs', '--home', join(root, 'elsewhere'), '--lang', lang]))
 })

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * Storage baseline (docs/DESIGN-CORE-CHANNELS.md, phase 0): how long the workbench takes to read its data, write one
- * change, build the page snapshot, and run one idle background step, with synthetic tasks of realistic size.
+ * Storage benchmark (docs/DESIGN-CORE-CHANNELS.md): how long the workbench takes to read all tasks, write one change,
+ * build the page snapshot, and run one idle background step, with synthetic tasks of realistic size. The JSON-file
+ * baseline measured before the SQLite change is recorded in docs/VALIDATION.md.
  * Run after `pnpm run build`:  node scripts/bench-storage.mjs [task counts, default 100,1000,3000]
  * Data goes to a temporary folder that is removed afterwards; nothing touches your workbench data.
  */
@@ -9,7 +10,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Store } from '../lib/store.js'
+import { WorkbenchRepository } from '../lib/storage/repository.js'
 import { Engine } from '../lib/engine.js'
 import { WorkbenchApi } from '../lib/api.js'
 
@@ -37,22 +38,22 @@ console.log('tasks  file MB  read p50/p95 ms    write p50/p95 ms   snapshot p50/
 for (const count of counts) {
   const root = await mkdtemp(join(tmpdir(), 'bkms-bench-'))
   try {
-    const store = new Store(root)
-    await store.mutate(state => { for (let i = 0; i < count; i++) state.tasks.push(syntheticTask(i)) })
-    const size = (await stat(store.file)).size
+    const store = new WorkbenchRepository(root)
+    await store.write(async tx => { for (let i = 0; i < count; i++) await tx.insertTask(syntheticTask(i)) })
+    const size = (await stat(join(root, 'workbench.sqlite'))).size
     const engine = new Engine(store, () => undefined, { available: () => false, async run() { throw new Error('unused') } })
     const api = new WorkbenchApi(engine)
     await engine.start()
     try {
       const runs = count > 2000 ? 5 : 20
-      const read = await time(runs, () => store.read())
-      const ids = (await store.read()).tasks.map(task => task.id)
-      const write = await time(runs, i => store.mutate(state => { const task = state.tasks.find(item => item.id === ids[(i * 37) % ids.length]); task.summary = `新摘要 ${i}`; task.revision++ }))
+      const read = await time(runs, () => store.tasks())
+      const ids = (await store.tasks()).map(task => task.id)
+      const write = await time(runs, i => store.updateTask(ids[(i * 37) % ids.length], undefined, task => { task.summary = `新摘要 ${i}`; task.revision++ }))
       let bytes = 0
       const snapshot = await time(runs, async () => { bytes = Buffer.byteLength(JSON.stringify(await api.snapshot())) })
       // processNext with nothing queued: the background does this on every tick while processing is on.
       const idle = await time(runs, () => engine.processNext())
       console.log(`${String(count).padStart(5)} ${(size / 1048576).toFixed(1).padStart(8)} ${ms(read.p50)} /${ms(read.p95)} ${ms(write.p50)} /${ms(write.p95)} ${ms(snapshot.p50)} /${ms(snapshot.p95)} ${(bytes / 1048576).toFixed(1).padStart(10)} ${ms(idle.p50)}`)
-    } finally { await engine.stop() }
+    } finally { await engine.stop(); await store.close() }
   } finally { await rm(root, { recursive: true, force: true }) }
 }

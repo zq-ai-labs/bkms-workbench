@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Store } from '../lib/store.js'
+import { WorkbenchRepository } from '../lib/storage/repository.js'
+import { stateOf, setSettings, editRules, editTask, editTasks, readFresh } from './helpers.mjs'
 import { Engine } from '../lib/engine.js'
 import { WorkbenchApi } from '../lib/api.js'
 import { validateRule, decideAfterTriage } from '../lib/rules.js'
@@ -17,7 +18,7 @@ const orderRule = { name: '订单处理', enabled: true, priority: 100, account:
 /** Mail fixture with a scriptable triage: `verdict(input)` returns the AI result. */
 async function fixture(t, { verdict, available = true } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'bkms-matching-'))
-  const store = new Store(root), drafts = new Map(), mails = new Map(), seen = [], ran = []
+  const store = new WorkbenchRepository(root), drafts = new Map(), mails = new Map(), seen = [], ran = []
   let inbox = [], uid = 10
   const email = {
     version: 1, accounts: () => [{ id: 'sales', address: 'sales@example.test', inboxFolder: 'INBOX' }],
@@ -32,11 +33,11 @@ async function fixture(t, { verdict, available = true } = {}) {
   const agent = { available: () => true, async run(task, rule, signal, options) { ran.push(options); return { output: { summary: '已整理。', subject: 'Re', text: '您好，已收到。' }, sessionId: 's' } } }
   const engine = new Engine(store, () => email, agent, undefined, triage), api = new WorkbenchApi(engine)
   await engine.start(); await engine.poll()
-  t.after(async () => { await engine.stop(); await rm(root, { recursive: true, force: true }) })
+  t.after(async () => { await engine.stop(); await store.close(); await rm(root, { recursive: true, force: true }) })
   const deliver = async (subject, text, references = '') => { uid++; mails.set(uid, { address: 'buyer@example.test', text, references }); inbox = [...inbox, { uid, date: new Date().toISOString(), from: [{ address: 'buyer@example.test' }], subject, hasAttachments: false }]; await engine.poll() }
-  const drain = async () => { for (let i = 0; i < 20 && (await store.read()).tasks.some(task => task.status === 'queued'); i++) await engine.processNext() }
+  const drain = async () => { for (let i = 0; i < 20 && (await stateOf(store)).tasks.some(task => task.status === 'queued'); i++) await engine.processNext() }
   const task = async subject => (await api.snapshot()).tasks.find(item => item.subject === subject)
-  const save = async rule => api.action({ action: 'saveRule', revision: (await store.read()).configRevision, rule })
+  const save = async rule => api.action({ action: 'saveRule', revision: (await stateOf(store)).configRevision, rule })
   return { store, engine, api, deliver, drain, task, save, seen, ran }
 }
 
@@ -110,9 +111,9 @@ test('“not this workflow” undoes a confident assignment, records a counter-e
   // Rejecting again on the same task replaces, not duplicates; deleting an example and the workflow cleans up.
   await assert.rejects(f.api.action({ action: 'rejectRule', id: task.id, revision: task.revision }), /还没有方案|状态/)
   await f.api.action({ action: 'deleteExample', ruleId: rule.id, exampleId: examples[0].id })
-  assert.deepEqual((await f.api.snapshot()).ruleExamples[rule.id], [])
+  assert.deepEqual((await f.api.snapshot()).ruleExamples[rule.id] ?? [], [])
   await assert.rejects(f.api.action({ action: 'deleteExample', ruleId: rule.id, exampleId: 'nope' }), /例子不存在/)
-  await f.api.action({ action: 'deleteRule', id: rule.id, revision: (await f.store.read()).configRevision })
+  await f.api.action({ action: 'deleteRule', id: rule.id, revision: (await stateOf(f.store)).configRevision })
   assert.equal((await f.api.snapshot()).ruleExamples[rule.id], undefined)
 })
 
@@ -172,7 +173,7 @@ test('triage classifies by the new text, reads the quote as context, and knows t
   assert.equal(input.mail.body, '数量改成 300 台。'); assert.match(input.mail.quotedHistory, /【往来 1｜发件人: buyer · 发送时间: 昨天】\n请按报价下 200 台。/)
   assert.deepEqual(input.thread, { previousRule: { id: rule.id, name: '订单处理' } })
   // The agent gets the same split.
-  const task = (await f.store.read()).tasks.find(item => item.subject === 'RE: 下单')
+  const task = (await stateOf(f.store)).tasks.find(item => item.subject === 'RE: 下单')
   const mail = mailInput(task)
   assert.equal(mail.body, '数量改成 300 台。'); assert.match(mail.quotedHistory, /请按报价下 200 台/)
   // Without a model, a bare “thanks” under a quoted request is not mistaken for a new request.
@@ -183,10 +184,10 @@ test('triage classifies by the new text, reads the quote as context, and knows t
 
 test('optional pages can be hidden from navigation; only known pages are accepted', async t => {
   const f = await fixture(t, { verdict: () => ({}) })
-  const revision = (await f.store.read()).configRevision
+  const revision = (await stateOf(f.store)).configRevision
   const saved = await f.api.action({ action: 'saveSettings', revision, settings: { hiddenViews: ['today', 'meetings', 'today'] } })
   assert.deepEqual(saved.hiddenViews, ['today', 'meetings'])
-  for (const bad of [['plans'], 'today', ['decide']]) await assert.rejects(f.api.action({ action: 'saveSettings', revision: (await f.store.read()).configRevision, settings: { hiddenViews: bad } }), /页签设置无效/)
+  for (const bad of [['plans'], 'today', ['decide']]) await assert.rejects(f.api.action({ action: 'saveSettings', revision: (await stateOf(f.store)).configRevision, settings: { hiddenViews: bad } }), /页签设置无效/)
   assert.deepEqual((await f.api.action({ action: 'preferences' })).settings.hiddenViews, ['today', 'meetings'])
 })
 
@@ -194,7 +195,7 @@ test('review text follows the interface language, which is saved for background 
   const { store, engine, api, deliver, drain, save, seen, ran } = await fixture(t, { verdict: input => ({ ruleId: input.rules[0]?.id ?? '', confidence: 'high' }) })
   await save(orderRule)
   await api.action({ action: 'snapshot', uiLanguage: 'en' })
-  assert.equal((await store.read()).uiLanguage, 'en', 'the language is saved')
+  assert.equal((await stateOf(store)).uiLanguage, 'en', 'the language is saved')
   await deliver('PO 88', 'Please book order PO-88 for 500 units.')
   await drain()
   assert.equal(seen.at(-1).uiLanguage, 'en')

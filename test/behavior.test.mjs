@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Store } from '../lib/store.js'
+import { WorkbenchRepository } from '../lib/storage/repository.js'
 import { Engine } from '../lib/engine.js'
 import { WorkbenchApi } from '../lib/api.js'
 
@@ -13,7 +13,7 @@ import { WorkbenchApi } from '../lib/api.js'
  * when the storage is replaced (docs/DESIGN-CORE-CHANNELS.md, phase 0). `openStorage` is the only line that
  * knows how storage is created.
  */
-const openStorage = root => new Store(root)
+const openStorage = root => new WorkbenchRepository(root)
 
 const quoteRule = { name: '询价回复', enabled: true, priority: 100, account: '', folder: 'INBOX', match: { from: '', subject: '', hasAttachments: false, mode: 'all' }, instructions: '根据客户来信生成报价回复草稿。', tools: [], output: 'reply', maxRetries: 0 }
 const wechatRule = { ...quoteRule, name: '微信客户答复', instructions: '根据对话起草简短的微信回复。', sources: ['wechat'] }
@@ -211,7 +211,7 @@ test('matching: an uncertain suggestion is confirmed or rejected, and both are l
   examples = (await f.snapshot()).ruleExamples[ruleId]
   assert.deepEqual(examples.map(example => example.match), [false], 'a newer verdict on the same message replaces the older one')
   await f.api.action({ action: 'deleteExample', ruleId, exampleId: examples[0].id })
-  assert.deepEqual((await f.snapshot()).ruleExamples[ruleId], [])
+  assert.deepEqual((await f.snapshot()).ruleExamples[ruleId] ?? [], [])
 })
 
 test('autonomy: an automatic reply is scheduled and can be withdrawn; that contact then stays manual', async t => {

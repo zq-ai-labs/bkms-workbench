@@ -22,15 +22,24 @@ export function Workbench() {
   const [route, setRoute] = useState<Route>(lastRoute);
   const [busy, setBusy] = useState(""), [error, setError] = useState(""), [notice, setNotice] = useState(""), [hiddenStatus, setHiddenStatus] = useState("");
   const op = useRef(false), sequence = useRef(0), mounted = useRef(true), leave = useRef<(() => boolean) | undefined>(undefined);
+  /** Version of the data on screen; the periodic check sends it and gets only “unchanged” while nothing changed. */
+  const version = useRef<string | undefined>(undefined);
   const refresh = useCallback(async () => {
     const request = ++sequence.current;
     const snapshot = await api<Snapshot>("snapshot");
-    if (mounted.current && request === sequence.current) { setData(snapshot); setLoaded(true); }
+    if (mounted.current && request === sequence.current) { version.current = snapshot.version; setData(snapshot); setLoaded(true); }
     return snapshot;
   }, []);
   useEffect(() => {
     mounted.current = true;
-    const load = () => refresh().catch(failure => setError(errorMessage(failure)));
+    const check = async () => {
+      if (!version.current) { await refresh(); return; }
+      const request = ++sequence.current;
+      const snapshot = await api<Snapshot>("snapshot", { since: version.current });
+      if (!mounted.current || request !== sequence.current || snapshot.unchanged) return;
+      version.current = snapshot.version; setData(snapshot); setLoaded(true);
+    };
+    const load = () => check().catch(failure => setError(errorMessage(failure)));
     load();
     const timer = setInterval(load, 8000);
     return () => { mounted.current = false; clearInterval(timer); };

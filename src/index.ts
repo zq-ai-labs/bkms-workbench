@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { WorkbenchApi } from './api.js'
 import { createAgentRunner, getCapabilities } from './agent.js'
 import { Engine } from './engine.js'
-import { Store } from './store.js'
+import { WorkbenchRepository } from './storage/repository.js'
 import { createRuleAssistant } from './rule-assistant.js'
 import { createInstructionOptimizer } from './instruction-optimizer.js'
 import { createTriageRunner } from './triage.js'
@@ -16,7 +16,8 @@ export const name = 'bkms-workbench'
 export const inject = ['connection']
 export function apply(ctx: any): void {
   const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
-  const store = new Store(join(home, 'data', 'bkms-workbench'))
+  // One SQLite database for the workbench, opened on first use (docs/DESIGN-CORE-CHANNELS.md D1, D8).
+  const store = new WorkbenchRepository(join(home, 'data', 'bkms-workbench'))
   // Mail is built in: accounts, IMAP/SMTP connections and drafts live in the workbench data folder.
   const mail = new MailService(join(store.root, 'mail'))
   const email = mail.service()
