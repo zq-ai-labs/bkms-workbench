@@ -126,13 +126,10 @@ export function ClassifierEditor({ classifier }: { classifier: Classifier }) {
               <Field label={t("分类名称")}><input required maxLength={40} value={current.name} onChange={event => editCategory(current.id, { name: event.target.value })} placeholder={current.fallback ? t("其他") : t("例如：投诉")} /></Field>
               <div className="bkw-field"><span>{t("动作")}</span><div className="bkw-seg" role="radiogroup" aria-label={t("动作")}>
                 <button type="button" role="radio" aria-checked={current.action === "label"} className={current.action === "label" ? "on" : ""} onClick={() => editCategory(current.id, { action: "label", folder: undefined })}>{t("只打标签")}</button>
-                <button type="button" role="radio" aria-checked={current.action === "move"} className={current.action === "move" ? "on" : ""} onClick={() => editCategory(current.id, { action: "move", folder: current.folder || (current.name.trim() ? t("分类/{0}", current.name.trim()) : "") })}>{t("移到文件夹")}</button>
+                <button type="button" role="radio" aria-checked={current.action === "move"} className={current.action === "move" ? "on" : ""} onClick={() => editCategory(current.id, { action: "move", folder: current.folder || "" })}>{t("移到文件夹")}</button>
               </div></div>
             </div>
-            {current.action === "move" && <Field label={t("目标文件夹")} hint={t("归入这一类的邮件会移到这里，不存在时自动创建；用这个邮箱的人都会看到变化。")}>
-              <input required maxLength={200} list="bkw-category-folders" value={current.folder || ""} onChange={event => editCategory(current.id, { folder: event.target.value })} placeholder={t("例如：客服/投诉")} />
-              <datalist id="bkw-category-folders">{folders.map(path => <option key={path} value={path} />)}</datalist>
-            </Field>}
+            {current.action === "move" && <TargetFolder key={current.id} value={current.folder || ""} folders={folders} onChange={folder => editCategory(current.id, { folder })} />}
             {current.fallback ? <p className="bkw-muted">{t("AI 明确判断不属于其他任何一类时归到这里；拿不准的邮件不会放进来，而是交给你。")}</p> : <div className="bkw-grid2">
               <Field label={t("属于本类")} hint={t("定义和典型说法")}><textarea required rows={4} maxLength={2000} value={current.include} onChange={event => editCategory(current.id, { include: event.target.value })} placeholder={t("例如：表达不满、要求赔偿或道歉、威胁差评或投诉到平台。")} /></Field>
               <Field label={t("不属于本类")} hint={t("边界：容易混淆、但应该归到别处的情况")}><textarea rows={4} maxLength={2000} value={current.exclude || ""} onChange={event => editCategory(current.id, { exclude: event.target.value || undefined })} placeholder={t("例如：只是询问价格或进度、语气平和的，算查询或咨询。")} /></Field>
@@ -188,4 +185,26 @@ export function ClassifierEditor({ classifier }: { classifier: Classifier }) {
       <button type="submit" className="bkw-btn primary" disabled={working}>{busy === "saveClassifier" ? t("保存中…") : t("保存分类方案")}</button>
     </div>
   </form>;
+}
+
+const NEW_FOLDER = "\u0000new";
+/**
+ * Where a category moves mail: one of the mailbox's folders, or a new one typed in (created on the first move).
+ * A plain list always shows every folder, so a choice can be changed at any time.
+ */
+function TargetFolder({ value, folders, onChange }: { value: string; folders: string[]; onChange: (folder: string) => void }) {
+  const [typing, setTyping] = useState(() => !!value && !folders.includes(value));
+  // Folders arrive after the first render: a saved folder that exists is shown in the list, not as typed text.
+  useEffect(() => { if (typing && value && folders.includes(value)) setTyping(false); }, [folders.join("\n")]);
+  return <div className="bkw-field">
+    <span>{t("目标文件夹")}</span>
+    {typing ? <span className="bkw-inline-form">
+      <input required autoFocus aria-label={t("新文件夹名称")} maxLength={200} value={value} onChange={event => onChange(event.target.value)} />
+      {!!folders.length && <button type="button" className="bkw-btn small" onClick={() => { setTyping(false); onChange(folders.includes(value) ? value : ""); }}>{t("选择已有文件夹")}</button>}
+    </span> : <select required aria-label={t("目标文件夹")} value={folders.includes(value) ? value : ""} onChange={event => { if (event.target.value === NEW_FOLDER) { setTyping(true); onChange(""); } else onChange(event.target.value); }}>
+      <option value="">{t("请选择文件夹")}</option>
+      {folders.map(path => <option key={path} value={path}>{path}</option>)}
+      <option value={NEW_FOLDER}>{t("新建文件夹…")}</option>
+    </select>}
+  </div>;
 }

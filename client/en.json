@@ -1123,10 +1123,7 @@
   "分类名称": "Category name",
   "例如：投诉": "Complaint",
   "动作": "Action",
-  "分类/{0}": "Categories/{0}",
   "移到文件夹": "Move to folder",
-  "归入这一类的邮件会移到这里，不存在时自动创建；用这个邮箱的人都会看到变化。": "Email in this category is moved here; the folder is created when missing. Everyone using this mailbox sees the change.",
-  "例如：客服/投诉": "Service/Complaints",
   "AI 明确判断不属于其他任何一类时归到这里；拿不准的邮件不会放进来，而是交给你。": "Email the AI clearly judges to fit no other category goes here. Email it isn't sure about is not put here; it waits for you.",
   "属于本类": "What belongs",
   "定义和典型说法": "Definition and typical wording",
@@ -1190,5 +1187,9 @@
   "全部业务分类": "All business categories",
   "AI：{0}": "AI: {0}",
   "不认识的变量：{0}。输入 / 可查看可用的变量。": "Unknown variables: {0}. Type / to see the available variables.",
-  "输入 / 插入变量，例如姓名、部门、今天的日期。": "Type / to insert a variable, such as your name, department or today’s date."
+  "输入 / 插入变量，例如姓名、部门、今天的日期。": "Type / to insert a variable, such as your name, department or today’s date.",
+  "新文件夹名称": "New folder name",
+  "选择已有文件夹": "Choose an existing folder",
+  "请选择文件夹": "Choose a folder",
+  "新建文件夹…": "New folder…"
 }
