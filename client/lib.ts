@@ -52,7 +52,7 @@ export type Report = { id: string; kind: "weekly" | "topic"; title: string; text
 export type Log = { id?: string; at?: string; level?: string; message?: string; taskId?: string };
 export type Defaults = { triage: boolean; undoMinutes: number; briefEnabled: boolean; briefTime: string; weeklyEnabled: boolean; weeklyDay: number; weeklyTime: string; meetingBriefMinutes: number };
 /** An installed channel as the page sees it. */
-export type ChannelInfo = { kind: string; label: { zh: string; en: string }; reply: "copy" | "none"; enabled: boolean };
+export type ChannelInfo = { kind: string; label: { zh: string; en: string }; reply: "copy" | "none"; enabled: boolean; systemEnglish?: Record<string, string> };
 /** A channel that cannot be used until one side is upgraded. */
 export type RejectedChannel = { kind: string; label: { zh: string; en: string }; upgrade: "channel" | "workbench" };
 export type Snapshot = {

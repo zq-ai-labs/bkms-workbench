@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { AUTONOMY, DEFAULT_EXCLUDE, SOURCE_KINDS, TRIAGE_CATEGORIES, WorkbenchError, type Confidence, type Rule, type TriageCategory } from './types.js'
+import { AUTONOMY, CHANNEL_KIND, DEFAULT_EXCLUDE, TRIAGE_CATEGORIES, WorkbenchError, type Confidence, type Rule, type TriageCategory } from './types.js'
 import { isPreparationTool } from './agent.js'
 const string = (v: unknown, max: number): string => { if (typeof v !== 'string' || v.length > max || v.includes('\0')) throw new WorkbenchError('规则字段格式或长度无效。'); return v.trim() }
 export function validateRule(input: any): Rule {
@@ -43,7 +43,7 @@ export function validateRule(input: any): Rule {
   }
   if (rule.autonomy && rule.output !== 'reply') delete rule.autonomy
   if (input.sources !== undefined) {
-    if (!Array.isArray(input.sources) || !input.sources.length || input.sources.some((s: unknown) => !SOURCE_KINDS.includes(s as any))) throw new WorkbenchError('信息来源无效。')
+    if (!Array.isArray(input.sources) || !input.sources.length || input.sources.some((s: unknown) => typeof s !== 'string' || !CHANNEL_KIND.test(s))) throw new WorkbenchError('信息来源无效。')
     const sources = [...new Set(input.sources)] as Rule['sources']
     if (!(sources!.length === 1 && sources![0] === 'email')) rule.sources = sources
   }

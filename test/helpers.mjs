@@ -4,13 +4,12 @@
  */
 /** The former document left empty records out; so does this view. */
 const present = async value => { const record = await value; return Object.keys(record).length ? record : undefined }
-const wechatOf = async repo => { const { cursors, entries } = await repo.channelState('wechat'); return { watermarks: cursors, pending: entries } }
 export async function stateOf(repo) {
   const config = await repo.config()
   return {
     version: 1, revision: await repo.changeSeq(), configRevision: config.revision, settings: config.settings, rules: config.rules,
     classifiers: config.classifiers, uiLanguage: config.uiLanguage,
-    tasks: await repo.tasks(), cursors: await repo.cursors(), backfills: await present(repo.backfills()), wechat: await wechatOf(repo),
+    tasks: await repo.tasks(), cursors: await repo.cursors(), backfills: await present(repo.backfills()),
     logs: await repo.logs(), activity: await repo.activity(), topics: await repo.topics(), reports: await repo.reports(), brief: await repo.brief(),
     senders: await repo.contacts(), ruleExamples: await repo.examples('rule'), categoryExamples: await repo.examples('category'),
   }

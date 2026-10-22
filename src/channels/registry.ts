@@ -1,4 +1,5 @@
 import { CHANNEL_API_VERSION, type Channel, type Lang } from './types.js'
+import { CHANNEL_KIND } from '../types.js'
 
 /** A channel that could not be used, and which side has to be upgraded (decision D10). */
 export interface RejectedChannel { kind: string; label: Record<Lang, string>; upgrade: 'channel' | 'workbench' }
@@ -9,7 +10,7 @@ export class ChannelRegistry {
   private readonly refused = new Map<string, RejectedChannel>()
   /** Add a channel; the returned function removes it again (plugin unloaded). Same version only. */
   register(channel: Channel<any>): () => void {
-    if (!/^[a-z][a-z0-9-]{0,30}$/.test(channel.kind) || channel.kind === 'email') throw new Error(`invalid channel kind: ${channel.kind}`)
+    if (!CHANNEL_KIND.test(channel.kind) || channel.kind === 'email') throw new Error(`invalid channel kind: ${channel.kind}`)
     if (channel.apiVersion !== CHANNEL_API_VERSION) {
       this.refused.set(channel.kind, { kind: channel.kind, label: channel.label, upgrade: channel.apiVersion < CHANNEL_API_VERSION ? 'channel' : 'workbench' })
       return () => { this.refused.delete(channel.kind) }

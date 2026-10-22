@@ -851,6 +851,8 @@ Web 实现：
 
 阶段 2 已完成（分支 `feat/core-p2-channels`）：渠道接口 `src/channels/types.ts`、注册表、微信移入 `src/channels/wechat/`，核心不再按微信分支。阶段 3 已完成（同一分支）：前端渠道插槽与 `client/channels/wechat/`，核心前端只剩已知来源名称表和临时的静态注册。
 
+阶段 4 已完成（分支 `feat/core-p4-weixin-split`，叠在阶段 2/3 之上；插件仓库 `zq-ai-labs/workbench-weixin` 的 `feat/initial` 分支）：工作台提供 `workbenchChannels` 服务，不再含微信代码；渠道错误按 `status` 字段识别（插件用自己的错误类）；渠道随快照下发自己后端消息的英文（`systemEnglish`）；插槽 props 带 `kit`（工作台的组件与 `api`）；方案来源接受任何合法的渠道类型名。插件保留接口副本（`src/contract.ts`、`client/contract.ts`），版本号必须一致。已在真实 DSH 中验证：两插件一起安装时各插槽、设置、按会话正常；卸载微信插件后微信事项按通用方式显示、设置页无微信卡片、无错误。
+
 阶段 1 完成后，本地的读写放大问题解决，数据已在 SQLite；阶段 2 完成后，工作台（内置邮件）在 DSH 内已能独立成立，微信只是一个可不启用的渠道；阶段 4 才是物理拆分。
 
 ## 8. 问题状态

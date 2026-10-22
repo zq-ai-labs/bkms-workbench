@@ -143,7 +143,7 @@ test('workflow fields validate and legacy workflows keep their exact persisted s
   const full = validateRule({ ...quoteRule, id: 'y', autonomy: 'low_risk', sources: ['email', 'feishu'], semantic: '客户的报价请求', exclude: ['notification'] })
   assert.equal(full.autonomy, 'low_risk'); assert.deepEqual(full.sources, ['email', 'feishu']); assert.deepEqual(full.exclude, ['notification'])
   assert.equal(validateRule({ ...quoteRule, output: 'report', autonomy: 'auto' }).autonomy, undefined, 'reports never send')
-  for (const bad of [{ autonomy: 'yolo' }, { exclude: ['spam'] }, { sources: [] }, { sources: ['fax'] }, { semantic: 'x'.repeat(1001) }]) assert.throws(() => validateRule({ ...quoteRule, ...bad }))
+  for (const bad of [{ autonomy: 'yolo' }, { exclude: ['spam'] }, { sources: [] }, { sources: ['Fax!'] }, { sources: [7] }, { semantic: 'x'.repeat(1001) }]) assert.throws(() => validateRule({ ...quoteRule, ...bad }))
 })
 
 test('low-risk automatic replies wait for the withdrawal window, then send once through preview', async t => {

@@ -5,6 +5,8 @@ export const AUTONOMY: readonly Autonomy[] = ['draft', 'low_risk', 'auto']
 /** Information sources. Email and WeChat (read-only) have adapters; the others are declared so workflows and UI stay source-neutral. */
 export type SourceKind = 'email' | 'feishu' | 'wecom' | 'wechat' | 'meeting'
 export const SOURCE_KINDS: readonly SourceKind[] = ['email', 'feishu', 'wecom', 'wechat', 'meeting']
+/** A channel kind (`source.kind`, `Rule.sources`): lower-case letters, digits and dashes. */
+export const CHANNEL_KIND = /^[a-z][a-z0-9-]{0,30}$/
 /** AI triage result of one incoming message. */
 export type TriageCategory = 'request' | 'reply_needed' | 'fyi' | 'notification' | 'marketing' | 'other'
 export const TRIAGE_CATEGORIES: readonly TriageCategory[] = ['request', 'reply_needed', 'fyi', 'notification', 'marketing', 'other']
@@ -21,7 +23,8 @@ export interface Rule {
   /** Triage categories this workflow never handles. Undefined keeps the safe default (notifications and marketing). */
   exclude?: TriageCategory[]
   autonomy?: Autonomy
-  sources?: SourceKind[]
+  /** `email` and channel kinds; a channel that is not installed simply brings no items. */
+  sources?: string[]
   /**
    * How a message is assigned. `ai` (default): only when AI confirms the workflow fits; uncertain cases are
    * suggested to you and nothing is assigned without a model. `literal`: every message meeting the literal

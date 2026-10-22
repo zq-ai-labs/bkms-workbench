@@ -20,8 +20,6 @@
   },
   "files": [
     "lib",
-    "wechat/bridge.py",
-    "wechat/wxread",
     "src/mail/LICENSE",
     "src/mail/NOTICE.md",
     "cordis.patch.yml",

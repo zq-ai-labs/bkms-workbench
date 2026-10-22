@@ -9,8 +9,7 @@ import { createInstructionOptimizer } from './instruction-optimizer.js'
 import { createTriageRunner } from './triage.js'
 import { createWriter } from './writer.js'
 import { ChannelRegistry } from './channels/registry.js'
-import { WechatConnector } from './channels/wechat/reader.js'
-import { createWechatChannel } from './channels/wechat/channel.js'
+import { CHANNEL_API_VERSION, type WorkbenchChannels } from './channels/types.js'
 import { MailService } from './mail/service.js'
 import { EMAIL_DRAFT_ROUTE } from './mail/drafts.js'
 
@@ -30,9 +29,9 @@ export function apply(ctx: any): void {
   })
   // Read-only mail access for other plugins (e.g. contract agents). Sending stays in the workbench review.
   if (typeof ctx.provide === 'function') ctx.provide('workbenchMail', mail.external())
-  // Channels besides mail. WeChat is read through a local read-only bridge process, started only when enabled in settings.
+  // Channels besides mail come from their own plugins (e.g. workbench-weixin), which register through this service.
   const channels = new ChannelRegistry()
-  channels.register(createWechatChannel(new WechatConnector(join(store.root, 'wechat-cache'))))
+  if (typeof ctx.provide === 'function') ctx.provide('workbenchChannels', { apiVersion: CHANNEL_API_VERSION, register: channel => channels.register(channel) } satisfies WorkbenchChannels)
   const engine = new Engine(store, () => mail.configured() ? email : undefined, createAgentRunner(ctx, join(store.root, 'tasks')), () => getCapabilities(ctx), createTriageRunner(ctx), createWriter(ctx), channels)
   const api = new WorkbenchApi(engine, createRuleAssistant(ctx), createInstructionOptimizer(ctx), mail)
   // Drafts written by the old dsh-email plugin are copied in once, so earlier tasks keep their draft.

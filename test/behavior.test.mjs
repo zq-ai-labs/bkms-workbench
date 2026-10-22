@@ -7,7 +7,7 @@ import { WorkbenchRepository } from '../lib/storage/repository.js'
 import { Engine } from '../lib/engine.js'
 import { WorkbenchApi } from '../lib/api.js'
 import { ChannelRegistry } from '../lib/channels/registry.js'
-import { createWechatChannel } from '../lib/channels/wechat/channel.js'
+import { CHANNEL_API_VERSION } from '../lib/channels/types.js'
 
 /**
  * Behaviour through the public surface only: `WorkbenchApi` actions and snapshots, and the engine's driving
@@ -18,7 +18,7 @@ import { createWechatChannel } from '../lib/channels/wechat/channel.js'
 const openStorage = root => new WorkbenchRepository(root)
 
 const quoteRule = { name: '询价回复', enabled: true, priority: 100, account: '', folder: 'INBOX', match: { from: '', subject: '', hasAttachments: false, mode: 'all' }, instructions: '根据客户来信生成报价回复草稿。', tools: [], output: 'reply', maxRetries: 0 }
-const wechatRule = { ...quoteRule, name: '微信客户答复', instructions: '根据对话起草简短的微信回复。', sources: ['wechat'] }
+const demoRule = { ...quoteRule, name: '演示渠道答复', instructions: '根据对话起草简短的回复。', sources: ['demo'] }
 const minutesAgo = m => new Date(Date.now() - m * 60000).toISOString()
 
 function fakeEmail() {
@@ -46,29 +46,49 @@ function fakeEmail() {
   return { email, deliver, get sends() { return sends } }
 }
 
-function fakeWechat() {
-  const chats = [{ id: 'wxid_li', name: '李明', kind: 'person' }, { id: 'wxid_mom', name: '妈妈', kind: 'person' }]
-  const messages = { wxid_li: [], wxid_mom: [] }
-  let seq = 100
-  const service = {
-    async status() { return { ready: true, wxid: 'wxid_me', name: '我', library: 'test' } },
-    async chats() { return chats.map(chat => ({ ...chat })) },
-    async search(q) { return chats.filter(chat => chat.name.includes(q)) },
-    async latest(ids) { return Object.fromEntries(ids.map(id => [id, Math.max(0, ...messages[id].map(m => m.seq))])) },
-    async poll(marks) { return Object.fromEntries(Object.entries(marks).map(([id, from]) => [id, messages[id].filter(m => m.seq > from)])) },
-    async history(chat, offset, limit) { return { messages: messages[chat].slice(-limit), more: false } },
+/**
+ * A channel the way a channel plugin builds one: the core knows nothing about it beyond the channel contract. Messages
+ * arrive per conversation; replies are copied by hand. Errors use a class of their own with an HTTP status.
+ */
+function demoChannel({ apiVersion = CHANNEL_API_VERSION } = {}) {
+  const inbox = [], polls = []
+  let closed = 0
+  class DemoError extends Error { constructor(message, code, status) { super(message); this.code = code; this.status = status } }
+  const channel = {
+    apiVersion, kind: 'demo', label: { zh: '演示', en: 'Demo' }, capabilities: { reply: 'copy', archive: false }, readonlyCode: 'demo-readonly',
+    text: { readonly: '演示渠道只读。', notClassified: '演示渠道不参与业务分类。', replyNotEditable: '只有待审核的演示事项可以修改建议回复。', replyReady: '已生成建议回复。', handled: '已在演示渠道中处理。', handledLog: '演示事项已处理。', created: count => `演示渠道新增 ${count} 个事项。` },
+    systemEnglish: { '演示渠道只读。': 'The demo channel is read-only.' },
+    settings: { defaults: () => ({ enabled: false }), validate(input) { if (typeof input?.enabled !== 'boolean') throw new DemoError('演示设置无效。', 'demo-settings', 400); return { enabled: input.enabled } }, enabled: value => value?.enabled === true },
+    health: () => ({ ready: true, name: '演示账号' }),
+    async poll(settings, saved) {
+      polls.push(structuredClone(saved))
+      const fresh = inbox.filter(item => item.seq > (saved.cursors[item.chat] ?? 0))
+      if (!fresh.length) return undefined
+      return { commit(current) {
+        const cursors = { ...current.cursors }, items = []
+        for (const item of fresh) if (item.seq > (cursors[item.chat] ?? 0)) { cursors[item.chat] = item.seq; items.push({ scope: item.chat, position: item.seq, title: `${item.from}：${item.text}`, from: item.from, subject: item.chat, body: item.text, receivedAt: new Date().toISOString(), data: { chat: item.chat } }) }
+        return { state: { cursors, entries: current.entries }, items, logs: [] }
+      } }
+    },
+    ai: { agentInput: task => ({ conversation: { chat: task.subject, transcript: task.body } }), writingGuide: '简短回复。', exampleLabel: task => '演示 ' + task.subject },
+    actions: {
+      async demoEcho(body, { settings }) { return { echo: body.value, enabled: settings?.enabled === true } },
+      async demoForbidden() { throw new DemoError('不允许。', 'demo-forbidden', 403) },
+    },
+    snapshot: (settings, saved) => ({ watching: Object.keys(saved.cursors).length }),
+    close() { closed++ },
   }
-  const say = (chat, text) => { chats.find(c => c.id === chat).lastAt = new Date(Date.now() + seq).toISOString(); messages[chat].push({ seq: ++seq, at: minutesAgo(10), sender: chat, senderName: chats.find(c => c.id === chat).name, self: false, type: '文本', text }) }
-  return { connector: { service: s => s?.enabled ? service : undefined, async clear() {} }, say }
+  let seq = 0
+  return { channel, polls, say: (chat, from, text) => inbox.push({ chat, from, text, seq: ++seq }), get closed() { return closed } }
 }
 
-async function fixture(t, { triage, email = true, wechat = false } = {}) {
+async function fixture(t, { triage, email = true, channel } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'bkms-behavior-'))
-  const mail = fakeEmail(), chat = fakeWechat(), received = []
+  const mail = fakeEmail(), received = []
   let output = { summary: '已整理客户需求。', subject: 'Re: 报价', text: '您好，报价如下。' }, failure
   const agent = { available: () => true, async run(task, rule, signal) { signal.throwIfAborted(); received.push(task); if (failure) throw new Error(failure); return { output: structuredClone(output), sessionId: 's' } } }
   const channels = new ChannelRegistry()
-  if (wechat) channels.register(createWechatChannel(chat.connector))
+  const unregister = channel ? channels.register(channel) : undefined
   const engine = new Engine(openStorage(root), () => email ? mail.email : undefined, agent, undefined, triage, undefined, channels)
   const api = new WorkbenchApi(engine)
   await engine.start()
@@ -80,7 +100,7 @@ async function fixture(t, { triage, email = true, wechat = false } = {}) {
   const saveSettings = async settings => { const { revision } = await snapshot(); return api.action({ action: 'saveSettings', revision, settings }) }
   /** Deliver one mail and receive it; the first poll only sets the baseline. */
   const receive = async (subject, address = 'buyer@example.test', text = '请报 100 件的价格。') => { await engine.poll(); mail.deliver(subject, address, text); await engine.poll() }
-  return { api, engine, mail, chat, received, snapshot, task, drain, saveRule, saveSettings, receive, output: value => { output = value }, fail: value => { failure = value } }
+  return { api, engine, mail, channels, unregister, received, snapshot, task, drain, saveRule, saveSettings, receive, output: value => { output = value }, fail: value => { failure = value } }
 }
 const verdict = fn => ({ available: () => true, async run(input) { return { category: 'request', urgency: 'normal', reason: '客户来信。', nextStep: '', ruleId: '', ...fn(input) } } })
 const rejectsWith = (promise, code) => assert.rejects(promise, error => error.code === code)
@@ -293,29 +313,69 @@ test('baseline: rebuilding it needs confirmation and skips mail already in the f
   assert.deepEqual((await f.snapshot()).tasks.map(task => task.subject), ['新邮件'])
 })
 
-test('wechat: a conversation segment gets a suggested reply; it is read-only and copied by hand', async t => {
-  const f = await fixture(t, { email: false, wechat: true })
-  await f.saveRule(wechatRule)
-  await f.saveSettings({ channels: { wechat: { enabled: true, people: { mode: 'allow', list: ['wxid_li'] }, groups: { mode: 'allow', list: [], scope: 'mention' } } } })
-  await f.engine.pollChannel(f.engine.channels.get('wechat'))
-  f.chat.say('wxid_li', '报价单今天能发吗？')
-  f.chat.say('wxid_mom', '晚上回家吃饭吗？')
-  await f.engine.pollChannel(f.engine.channels.get('wechat'))
-  const tasks = (await f.snapshot()).tasks
-  assert.equal(tasks.length, 1, 'only allowed conversations are read')
-  assert.equal(tasks[0].channelData.chatName, '李明')
+test('a channel from another plugin: items queue, the reply is copied by hand, mail actions are refused', async t => {
+  const demo = demoChannel()
+  const f = await fixture(t, { email: false, channel: demo.channel })
+  await f.saveRule(demoRule)
+  await rejectsWith(f.saveSettings({ channels: { demo: { enabled: 'yes' } } }), 'demo-settings')
+  await rejectsWith(f.saveSettings({ channels: { other: { enabled: true } } }), 'channel-unavailable')
+  await f.saveSettings({ channels: { demo: { enabled: true } } })
+  demo.say('chat-1', '李明', '报价单今天能发吗？')
+  assert.equal(await f.engine.pollChannel(demo.channel), 1)
+  assert.equal(await f.engine.pollChannel(demo.channel), 0, 'the saved cursor keeps an item from being queued twice')
+  let snapshot = await f.snapshot()
+  assert.deepEqual(snapshot.channelInfo, [{ kind: 'demo', label: { zh: '演示', en: 'Demo' }, reply: 'copy', enabled: true, systemEnglish: { '演示渠道只读。': 'The demo channel is read-only.' } }])
+  assert.deepEqual(snapshot.channels.demo, { watching: 1 })
+  assert.deepEqual(snapshot.sources.find(source => source.kind === 'demo'), { kind: 'demo', connected: true, detail: '演示账号' })
+  assert.equal(snapshot.tasks[0].source.kind, 'demo'); assert.deepEqual(snapshot.tasks[0].channelData, { chat: 'chat-1' })
   await f.drain()
   const task = await f.task()
-  assert.equal(task.status, 'review')
-  assert.equal(task.reply.text, '您好，报价如下。')
-  await rejectsWith(f.api.action({ action: 'saveDraft', id: task.id, revision: task.revision, draftRevision: 1, draft: {} }), 'wechat-readonly')
-  await rejectsWith(f.api.action({ action: 'send', id: task.id, revision: task.revision, draftRevision: 1, planId: 'x', confirmed: true }), 'wechat-readonly')
+  assert.equal(task.status, 'review'); assert.deepEqual(task.reply, { text: '您好，报价如下。', revision: 1 })
+  assert.equal(f.received[0].source.kind, 'demo')
+  await rejectsWith(f.api.action({ action: 'saveDraft', id: task.id, revision: task.revision, draftRevision: 1, draft: {} }), 'demo-readonly')
+  await rejectsWith(f.api.action({ action: 'send', id: task.id, revision: task.revision, draftRevision: 1, planId: 'x', confirmed: true }), 'demo-readonly')
   await f.api.action({ action: 'saveReply', id: task.id, revision: task.revision, replyRevision: task.reply.revision, text: '好的，下午发您。' })
   const edited = await f.task()
-  assert.equal(edited.reply.text, '好的，下午发您。')
-  await rejectsWith(f.api.action({ action: 'saveReply', id: edited.id, revision: edited.revision, replyRevision: task.reply.revision, text: '旧版本' }), 'conflict')
-  await rejectsWith(f.api.action({ action: 'wechatHistory', chat: 'wxid_mom' }), 'wechat-blocked')
-  assert.equal((await f.api.action({ action: 'wechatHistory', chat: 'wxid_li' })).messages.length, 1)
+  assert.deepEqual(edited.reply, { text: '好的，下午发您。', revision: 2 })
+  await rejectsWith(f.api.action({ action: 'saveReply', id: edited.id, revision: edited.revision, replyRevision: 1, text: '旧版本' }), 'conflict')
+  // Channel actions get the channel's own saved settings.
+  assert.deepEqual(await f.api.action({ action: 'demoEcho', value: 7 }), { echo: 7, enabled: true })
   await f.api.action({ action: 'markHandled', id: edited.id, revision: edited.revision })
-  assert.equal((await f.task()).status, 'completed')
+  const done = await f.task()
+  assert.equal(done.status, 'completed'); assert.match(done.history.at(-1).message, /已在演示渠道中处理/)
+})
+
+test('an error from a channel keeps its HTTP status and code, whatever its class', async t => {
+  const demo = demoChannel()
+  const f = await fixture(t, { email: false, channel: demo.channel })
+  const response = await f.api.fetch(new Request('http://127.0.0.1/api/bkms-workbench', { method: 'POST', headers: { 'content-type': 'application/json', 'x-bkms-workbench': '1' }, body: JSON.stringify({ action: 'demoForbidden' }) }))
+  assert.equal(response.status, 403)
+  assert.equal((await response.json()).code, 'demo-forbidden')
+})
+
+test('an uninstalled channel: its items stay visible and read-only; a channel for another version asks for an upgrade', async t => {
+  const demo = demoChannel()
+  const f = await fixture(t, { email: false, channel: demo.channel })
+  await f.saveRule(demoRule)
+  await f.saveSettings({ channels: { demo: { enabled: true } } })
+  demo.say('chat-1', '李明', '在吗？')
+  await f.engine.pollChannel(demo.channel)
+  f.unregister()
+  assert.equal(demo.closed, 1, 'removing the channel closes it')
+  const snapshot = await f.snapshot()
+  assert.deepEqual(snapshot.channelInfo, [])
+  assert.equal(snapshot.tasks.length, 1, 'items from the channel are kept')
+  await f.drain()
+  const task = await f.task()
+  assert.equal(task.status, 'queued', 'not processed without its channel')
+  await rejectsWith(f.api.action({ action: 'saveDraft', id: task.id, revision: task.revision, draftRevision: 1, draft: {} }), 'channel-unavailable')
+  await rejectsWith(f.api.action({ action: 'demoEcho' }), 'invalid')
+  await rejectsWith(f.saveSettings({ channels: { demo: { enabled: false } } }), 'channel-unavailable')
+  // Version mismatch: the channel is refused and the page is told which side to upgrade (D10).
+  const remove = f.channels.register(demoChannel({ apiVersion: CHANNEL_API_VERSION + 1 }).channel)
+  assert.deepEqual((await f.snapshot()).rejectedChannels, [{ kind: 'demo', label: { zh: '演示', en: 'Demo' }, upgrade: 'workbench' }])
+  assert.deepEqual((await f.api.action({ action: 'preferences' })).rejectedChannels, [{ kind: 'demo', label: { zh: '演示', en: 'Demo' }, upgrade: 'workbench' }])
+  remove()
+  f.channels.register(demoChannel({ apiVersion: CHANNEL_API_VERSION - 1 }).channel)
+  assert.equal((await f.snapshot()).rejectedChannels[0].upgrade, 'channel')
 })

@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { connectLocale, systemMessage, t, useWorkbenchLocale, type LocaleService } from "./i18n";
+import { addSystemEnglish, connectLocale, systemMessage, t, useWorkbenchLocale, type LocaleService } from "./i18n";
 import { Context, type Route, type View, type WorkbenchContext } from "./context";
 import { EMPTY, api, errorMessage, time, type Snapshot } from "./lib";
 import { dismissReminder, preferences, refreshPreferences, resetPreferences, subscribePreferences, usePreferences, useReminder } from "./store";
@@ -10,7 +10,6 @@ import { TopicsView } from "./topics";
 import { PlansView } from "./plans";
 import { WorkbenchSettings } from "./settings";
 import { PAGE_CHILDREN, SETTINGS_CHILDREN, SlotProvider, type RenderSlot } from "./slots";
-import { registerWechatParts } from "./channels/wechat";
 // @ts-ignore CSS is bundled as a text module by scripts/build-client.mjs.
 import stylesheet from "./styles.css";
 
@@ -30,7 +29,7 @@ export function Workbench({ renderSlot }: { renderSlot?: RenderSlot }) {
   const refresh = useCallback(async () => {
     const request = ++sequence.current;
     const snapshot = await api<Snapshot>("snapshot");
-    if (mounted.current && request === sequence.current) { version.current = snapshot.version; setData(snapshot); setLoaded(true); }
+    if (mounted.current && request === sequence.current) { addSystemEnglish((snapshot.channelInfo ?? []).map(item => item.systemEnglish)); version.current = snapshot.version; setData(snapshot); setLoaded(true); }
     return snapshot;
   }, []);
   useEffect(() => {
@@ -40,6 +39,7 @@ export function Workbench({ renderSlot }: { renderSlot?: RenderSlot }) {
       const request = ++sequence.current;
       const snapshot = await api<Snapshot>("snapshot", { since: version.current });
       if (!mounted.current || request !== sequence.current || snapshot.unchanged) return;
+      addSystemEnglish((snapshot.channelInfo ?? []).map(item => item.systemEnglish));
       version.current = snapshot.version; setData(snapshot); setLoaded(true);
     };
     const load = () => check().catch(failure => setError(errorMessage(failure)));
@@ -171,6 +171,4 @@ export function apply(ctx: ClientContext) {
   } }, TodoReminder));
   ctx.slots.inject("settings.section", () => ctx.slots.register({ name: "settings.section", id: "bkms-workbench", order: 44, label: () => t("工作台设置"), inject: () => ({}), children: SETTINGS_CHILDREN },
     ({ renderSlot }: { renderSlot?: RenderSlot }) => <SlotProvider render={renderSlot} settingsPage><WorkbenchSettings /></SlotProvider>));
-  // Built in for now; the WeChat plugin registers the same parts from its own client (docs/DESIGN-CORE-CHANNELS.md, phase 4).
-  registerWechatParts(ctx);
 }
