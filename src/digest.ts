@@ -67,6 +67,13 @@ const brief = (task: Task) => ({
 })
 
 /** Data handed to the writer (or the template) for today's brief. Contains no full mail bodies. */
+/** Business categories of the given items: how many each, and how many still wait for you. */
+export function categoryCounts(tasks: Task[]): { categories: { name: string; count: number }[]; unclassified: number } {
+  const counts = new Map<string, number>()
+  for (const task of tasks) if (task.classification?.state === 'applied' && task.classification.categoryName) counts.set(task.classification.categoryName, (counts.get(task.classification.categoryName) ?? 0) + 1)
+  return { categories: [...counts].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count), unclassified: tasks.filter(task => task.classification?.state === 'pending').length }
+}
+const countLine = (data: ReturnType<typeof categoryCounts>, en: boolean) => data.categories.map(item => en ? `${item.name} ${item.count}` : `${item.name} ${item.count}`).join(en ? ', ' : '、') + (data.unclassified ? (en ? `; ${data.unclassified} waiting for a category` : `；待人工分类 ${data.unclassified}`) : '')
 export function briefData(state: State, at = new Date()) {
   const since = new Date(at.getTime() - 24 * 3600e3).toISOString()
   const decisions = state.tasks.filter(needsAttention).sort((a, b) => urgencyRank(a) - urgencyRank(b) || b.receivedAt.localeCompare(a.receivedAt))
@@ -79,6 +86,7 @@ export function briefData(state: State, at = new Date()) {
     archivedCount: activity.filter(item => item.kind === 'archive').length,
     notable: notable.slice(0, 5).map(brief),
     received: state.tasks.filter(task => task.receivedAt >= since).length,
+    business: categoryCounts(state.tasks.filter(task => task.receivedAt >= since)),
   }
 }
 const urgencyRank = (task: Task) => task.triage?.urgency === 'high' ? 0 : task.status === 'uncertain' || task.status === 'failed' ? 1 : 2
@@ -89,11 +97,13 @@ export function briefTemplate(data: ReturnType<typeof briefData>, en: boolean): 
     data.decisionCount ? `${data.decisionCount} item(s) need your decision${top ? `; start with “${top.title}”` : ''}.` : 'Nothing needs your decision right now.',
     data.activityCount ? `Since yesterday the assistant handled ${data.activityCount} item(s), including ${data.archivedCount} archived notification(s).` : '',
     data.notable.length ? `${data.notable.length} message(s) are worth a look but need no action.` : '',
+    data.business.categories.length || data.business.unclassified ? `By business category: ${countLine(data.business, true)}.` : '',
   ].filter(Boolean).join(' ')
   return [
     data.decisionCount ? `今天有 ${data.decisionCount} 件事需要你决策${top ? `，建议先处理「${top.title}」` : ''}。` : '目前没有需要你决策的事。',
     data.activityCount ? `过去 24 小时 AI 替你处理了 ${data.activityCount} 件事，其中归档 ${data.archivedCount} 条通知。` : '',
     data.notable.length ? `另有 ${data.notable.length} 条信息值得关注，无需处理。` : '',
+    data.business.categories.length || data.business.unclassified ? `按业务分类：${countLine(data.business, false)}。` : '',
   ].join('')
 }
 
@@ -110,13 +120,14 @@ export function weeklyData(state: State, start: Date, end: Date) {
     open: open.slice(0, 20).map(brief), openCount: open.length,
     received: tasks.filter(task => inRange(task.receivedAt)).length,
     automated: activity.length,
+    business: categoryCounts(tasks.filter(task => inRange(task.receivedAt))),
     workflows: Object.entries(tasks.reduce<Record<string, number>>((acc, task) => { if (task.ruleName) acc[task.ruleName] = (acc[task.ruleName] || 0) + 1; return acc }, {})).map(([name, count]) => ({ name, count })),
   }
 }
 export function weeklyTemplate(data: ReturnType<typeof weeklyData>, en: boolean): { title: string; text: string } {
   const lines = (items: ReturnType<typeof brief>[]) => items.map(item => `- ${item.title}${item.workflow ? `（${item.workflow}）` : ''}`).join('\n')
-  if (en) return { title: `Weekly report ${data.periodStart} – ${data.periodEnd}`, text: `## Completed (${data.doneCount})\n${lines(data.done) || '- None'}\n\n## Still open (${data.openCount})\n${lines(data.open) || '- None'}\n\n## Volume\n- ${data.received} messages received; the assistant completed ${data.automated} actions.\n\n## Next week\n- [Add your plan]` }
-  return { title: `周报 ${data.periodStart} 至 ${data.periodEnd}`, text: `## 本周完成（${data.doneCount}）\n${lines(data.done) || '- 无'}\n\n## 仍在处理（${data.openCount}）\n${lines(data.open) || '- 无'}\n\n## 工作量\n- 收到 ${data.received} 条信息，AI 代办 ${data.automated} 件。\n\n## 下周计划\n- [请补充]` }
+  if (en) return { title: `Weekly report ${data.periodStart} – ${data.periodEnd}`, text: `## Completed (${data.doneCount})\n${lines(data.done) || '- None'}\n\n## Still open (${data.openCount})\n${lines(data.open) || '- None'}\n\n## Volume\n- ${data.received} messages received; the assistant completed ${data.automated} actions.${data.business.categories.length || data.business.unclassified ? `\n- By business category: ${countLine(data.business, true)}` : ''}\n\n## Next week\n- [Add your plan]` }
+  return { title: `周报 ${data.periodStart} 至 ${data.periodEnd}`, text: `## 本周完成（${data.doneCount}）\n${lines(data.done) || '- 无'}\n\n## 仍在处理（${data.openCount}）\n${lines(data.open) || '- 无'}\n\n## 工作量\n- 收到 ${data.received} 条信息，AI 代办 ${data.automated} 件。${data.business.categories.length || data.business.unclassified ? `\n- 按业务分类：${countLine(data.business, false)}` : ''}\n\n## 下周计划\n- [请补充]` }
 }
 
 export function topicData(state: State, topic: Topic) {

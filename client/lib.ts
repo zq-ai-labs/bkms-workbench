@@ -29,7 +29,12 @@ export type Task = {
   source?: { kind?: "wechat"; folder: string };
   match?: { ruleId: string; ruleName: string; by: "ai" | "literal" | "manual"; state: "applied" | "suggested" | "rejected"; confidence?: Confidence; reason?: string; at: string };
   wechat?: { chat: string; chatName: string; group: boolean; messages: WechatMessage[]; fromSeq: number; toSeq: number; mentioned?: boolean; reply?: string; replyRevision?: number };
+  classification?: Classification;
 };
+export type CategoryAction = "label" | "move";
+export type ClassifierCategory = { id: string; name: string; include: string; exclude?: string; action: CategoryAction; folder?: string; fallback?: true };
+export type Classifier = { id: string; name: string; enabled: boolean; account: string; folder: string; guidance?: string; includeNotices?: boolean; categories: ClassifierCategory[] };
+export type Classification = { classifierId: string; categoryId?: string; categoryName?: string; state: "applied" | "pending"; by: "ai" | "manual"; confidence?: Confidence; reason?: string; candidates?: string[]; at: string };
 export type Rule = {
   id: string; name: string; enabled: boolean; priority: number; account: string; folder: string;
   match: { from: string; subject: string; hasAttachments: boolean; mode: "all" | "any" };
@@ -52,6 +57,7 @@ export type Snapshot = {
   health: { email: boolean; agent?: boolean; running?: boolean; lastPoll?: string; error?: string; triage?: boolean; writer?: boolean; wechat?: { ready: boolean; name?: string; library?: string; error?: string } };
   wechat?: { settings: WechatSettings & { quietMinutes: number }; pending: number; watching: number };
   ruleExamples?: Record<string, RuleExample[]>;
+  classifiers?: Classifier[]; categoryExamples?: Record<string, RuleExample[]>;
   activity: Activity[]; topics: Topic[]; reports: Report[]; brief?: { date: string; text: string; generatedAt: string; by: string }; today: string;
   sources: { kind: SourceKind; connected: boolean; detail: string }[]; meetings: unknown[];
 };
@@ -73,9 +79,10 @@ export const LABELS: Record<Status, string> = {
   queued: "等待处理", running: "正在处理", review: "待审核", needs_info: "待补充", failed: "处理失败", sending: "正在发送",
   sent: "已发送", uncertain: "发送待核实", ignored: "已忽略", unmatched: "未匹配", completed: "已完成",
 };
-export const statusLabel = (task: Pick<Task, "status" | "triage">): string =>
-  task.status === "ignored" && task.triage?.archived ? t("已归档") : task.status === "queued" && task.triage?.state === "pending" ? t("等待分拣") : t(LABELS[task.status] || task.status);
-export const statusTone = (task: Pick<Task, "status" | "triage" | "draft">): "warn" | "good" | "danger" | "accent" | "muted" => {
+export const statusLabel = (task: Pick<Task, "status" | "triage" | "classification">): string =>
+  task.status === "unmatched" && task.classification?.state === "pending" ? t("待人工分类") : task.status === "ignored" && task.triage?.archived ? t("已归档") : task.status === "queued" && task.triage?.state === "pending" ? t("等待分拣") : t(LABELS[task.status] || task.status);
+export const statusTone = (task: Pick<Task, "status" | "triage" | "draft" | "classification">): "warn" | "good" | "danger" | "accent" | "muted" => {
+  if (task.status === "unmatched" && task.classification?.state === "pending") return "warn";
   if (task.status === "sent" && task.draft?.receipt?.rejected?.length) return "danger";
   if (["review", "needs_info"].includes(task.status) || (task.status === "unmatched" && ["request", "reply_needed"].includes(task.triage?.category || ""))) return "warn";
   if (["failed", "uncertain"].includes(task.status)) return "danger";
@@ -92,6 +99,7 @@ export const AUTONOMY_LABEL: Record<Autonomy, string> = { draft: "仅起草", lo
 export function nextStep(task: Task): string {
   if (task.autoSend && !task.autoSend.canceledAt && task.status === "review") return t("将于 {0} 自动发送，可撤回", time(task.autoSend.at));
   if (task.status === "needs_info" && task.error) return firstLine(task.error);
+  if (task.status === "unmatched" && task.classification?.state === "pending") return t("选择业务分类");
   if (task.status === "unmatched" && task.match?.state === "suggested") return t("确认是否交给「{0}」处理", task.match.ruleName);
   if (task.triage?.nextStep && ["review", "unmatched", "needs_info"].includes(task.status)) return task.triage.nextStep;
   switch (task.status) {
@@ -191,4 +199,10 @@ export async function uploadDraftAttachment(draft: Draft, file: File): Promise<D
   const result = await response.json();
   if (!response.ok || result.ok !== true) throw new Error(typeof result.error === "string" ? result.error : result.error?.message || t("附件上传失败，请刷新草稿后重试。"));
   return result.value as Draft;
+}
+
+/** The scheme a task belongs to: the one that classified it, else the enabled one covering its folder. */
+export function classifierOf(task: Task, classifiers: Classifier[] | undefined): Classifier | undefined {
+  if (task.source?.kind === "wechat") return undefined;
+  return classifiers?.find(item => item.id === task.classification?.classifierId) ?? classifiers?.find(item => item.enabled && (!item.account || item.account === task.account) && item.folder === task.source?.folder);
 }

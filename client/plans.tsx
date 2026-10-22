@@ -4,6 +4,7 @@ import { systemMessage, t } from "./i18n";
 import { useWorkbench } from "./context";
 import { AUTONOMY_LABEL, CATEGORY, SOURCE, api, errorMessage, when, type Autonomy, type Capabilities, type Category, type MatchMode, type Rule, type SourceKind } from "./lib";
 import { Alert, AutoTextarea, Empty, Field, Icon, Switch, Tag } from "./ui";
+import { ClassifierEditor, blankClassifier } from "./classifiers";
 
 const DEFAULT_EXCLUDE: Category[] = ["notification", "marketing"];
 const CATEGORY_HINT: Record<Category, string> = { request: "对方需要你做事，例如询价、申请、安排", reply_needed: "需要回复，但不涉及业务请求", fyi: "值得知道，无需行动；进入每日简报", notification: "系统通知、提醒、账单、验证码；自动归档", marketing: "营销推广、订阅资讯；自动归档", other: "无法归类，交你判断" };
@@ -21,7 +22,11 @@ export function PlansView({ ruleId }: { ruleId?: string }) {
   const hits = (id: string) => data.tasks.filter(task => task.ruleId === id && Date.parse(task.receivedAt) >= week).length;
   const corrections = (id: string) => (data.ruleExamples?.[id] ?? []).filter(example => !example.match).length;
   const open = (route: string) => go({ view: "plans", rule: route });
-  const selected = ruleId === "new" ? undefined : ruleId === "triage" ? undefined : data.rules.find(rule => rule.id === ruleId) ?? (ruleId ? undefined : sorted[0]);
+  // Classification schemes live under "c:<id>" (or "c:new") in the same page.
+  const classifierId = ruleId?.startsWith("c:") ? ruleId.slice(2) : undefined;
+  const classifiers = data.classifiers ?? [];
+  const classifier = classifierId && classifierId !== "new" ? classifiers.find(item => item.id === classifierId) : undefined;
+  const selected = ruleId === "new" || classifierId ? undefined : ruleId === "triage" ? undefined : data.rules.find(rule => rule.id === ruleId) ?? (ruleId ? undefined : sorted[0]);
   const showTriage = ruleId === "triage" || (!ruleId && !sorted.length);
   return <div className="bkw-plans">
     <div className="bkw-pipeline" aria-label={t("每条信息的处理路径")}>
@@ -33,6 +38,13 @@ export function PlansView({ ruleId }: { ruleId?: string }) {
         <div className="bkw-nav-group"><h4>{t("分拣（所有信息先经过）")}</h4>
           <button type="button" className={`bkw-nav-item tall ${showTriage ? "on" : ""}`} onClick={() => open("triage")}><span><strong>{t("AI 分拣")}</strong><small>{t("通知归档 · 识别请求 · 选择方案")}</small></span><Tag tone={data.defaults.triage ? "good" : "muted"}>{data.defaults.triage ? t("已开启") : t("已关闭")}</Tag></button>
         </div>
+        <div className="bkw-nav-group"><h4>{t("业务分类")}</h4>
+          {classifiers.map(item => <button type="button" key={item.id} className={`bkw-nav-item tall ${classifierId === item.id ? "on" : ""} ${item.enabled ? "" : "paused"}`} onClick={() => open("c:" + item.id)}>
+            <span><strong>{item.name}</strong><small>{t("{0} 个分类 · 待人工 {1}", item.categories.length, data.tasks.filter(task => task.classification?.classifierId === item.id && task.classification.state === "pending").length)}</small></span>
+            {!item.enabled && <Tag>{t("已停用")}</Tag>}
+          </button>)}
+          <button type="button" className={`bkw-nav-item ${classifierId === "new" ? "on" : ""}`} onClick={() => open("c:new")}><span><strong><Icon name="plus" size={13} /> {t("新建分类方案")}</strong><small>{t("投诉、查询、咨询…每封邮件归入一类")}</small></span></button>
+        </div>
         <div className="bkw-nav-group"><h4>{t("处理方案")}</h4>
           {sorted.map(rule => <button type="button" key={rule.id} className={`bkw-nav-item tall ${selected?.id === rule.id && !showTriage ? "on" : ""} ${rule.enabled ? "" : "paused"}`} onClick={() => open(rule.id)}>
             <span><strong>{rule.name}</strong><small>{rule.enabled ? corrections(rule.id) ? t("本周命中 {0} 次 · 纠正 {1} 次", hits(rule.id), corrections(rule.id)) : t("本周命中 {0} 次 · {1}", hits(rule.id), rule.output === "reply" ? t("回复草稿") : rule.output === "dispatch" ? t("分派到 {0}", rule.dispatchFolder || "") : t("分析报告")) : t("已停用")}</small></span>
@@ -42,7 +54,7 @@ export function PlansView({ ruleId }: { ruleId?: string }) {
         </div>
       </nav>
       <div className="bkw-plan-main">
-        {showTriage ? <TriagePanel /> : ruleId === "new" ? <RuleEditor key="new" rule={blank(data.accounts)} /> : selected ? <RuleEditor key={selected.id} rule={selected} /> :
+        {classifierId === "new" ? <ClassifierEditor key="c:new" classifier={blankClassifier(data.accounts)} /> : classifier ? <ClassifierEditor key={classifier.id} classifier={classifier} /> : classifierId ? <Empty icon="rules" title={t("分类方案不存在")} text={t("它可能已被删除。")} /> : showTriage ? <TriagePanel /> : ruleId === "new" ? <RuleEditor key="new" rule={blank(data.accounts)} /> : selected ? <RuleEditor key={selected.id} rule={selected} /> :
           <Empty icon="rules" title={t("让信息自动进入你的工作流程")} text={t("用一句话说清处理哪些信息、怎么处理。AI 生成方案，你核对后保存。")}><button type="button" className="bkw-btn primary" onClick={() => open("new")}>{t("创建第一个方案")}</button></Empty>}
       </div>
     </div>
@@ -214,13 +226,14 @@ function RuleEditor({ rule }: { rule: Rule }) {
         <div className="bkw-stack">
           <div className="bkw-grid2">
             <Field label={t("方案名称")}><input required maxLength={100} value={value.name} onChange={event => patch({ name: event.target.value })} placeholder={t("例如：客户询价回复")} /></Field>
-            <Field label={t("生成内容")}><select value={value.output} onChange={event => { const output = event.target.value as Rule["output"]; patch({ output, ...(output !== "reply" ? { autonomy: "draft" as Autonomy } : {}), ...(output === "dispatch" ? { sources: ["email"] as SourceKind[], tools: [], skills: [], dispatchFolder: value.dispatchFolder || (value.name.trim() ? `分派/${value.name.trim()}` : "") } : {}) }); }}><option value="reply">{t("处理摘要 + 回复草稿")}</option><option value="report">{t("分析报告")}</option><option value="dispatch">{t("分派到文件夹（交给其他人处理）")}</option></select></Field>
+            <Field label={t("生成内容")}><select value={value.output} onChange={event => { const output = event.target.value as Rule["output"]; patch({ output, ...(output !== "reply" ? { autonomy: "draft" as Autonomy } : {}), ...(output === "dispatch" ? { sources: ["email"] as SourceKind[], tools: [], skills: [], dispatchFolder: value.dispatchFolder || (value.name.trim() ? `分派/${value.name.trim()}` : "") } : {}) }); }}><option value="reply">{t("处理摘要 + 回复草稿")}</option><option value="report">{t("分析报告")}</option>{rule.output === "dispatch" && <option value="dispatch">{t("分派到文件夹（交给其他人处理）")}</option>}</select></Field>
           </div>
           {dispatch ? <>
             <Field label={t("目标文件夹")} hint={t("匹配的邮件会移到这个文件夹，不存在时自动创建。负责的人或小组在自己的工作台上，用这个文件夹建处理方案；也可以直接在邮箱里查看。")}>
               <input required maxLength={200} list="bkw-dispatch-folders" value={value.dispatchFolder || ""} onChange={event => patch({ dispatchFolder: event.target.value })} placeholder={t("例如：分派/华东销售")} />
               <datalist id="bkw-dispatch-folders">{dispatchFolders.map(path => <option key={path} value={path} />)}</datalist>
             </Field>
+            <Alert tone="warn">{t("新建的方案不再提供“分派”：要把邮件按业务分给不同的人，请用“业务分类”，为分类选择“移到文件夹”。这个方案仍会照常运行。")}</Alert>
             <Alert>{t("分派只移动邮件，不生成或发送回复。同一个公共邮箱的收件箱只应由一台工作台负责分派，其他人的工作台只读取自己的文件夹，否则同一封信会被处理两次。")}</Alert>
           </> : <div className="bkw-field">
             <span className="bkw-field-row"><span>{t("处理要求")}</span><button type="button" className="bkw-btn small" disabled={!aiReady || value.instructions.trim().length < 5} onClick={() => void optimize()}><Icon name="sparkle" size={13} />{optimizing ? t("正在优化…") : t("AI 优化")}</button></span>
