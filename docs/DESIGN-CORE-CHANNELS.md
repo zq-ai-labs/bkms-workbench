@@ -1,6 +1,6 @@
 # 设计：核心与渠道拆分、存储接口与数据库解耦
 
-> 状态：设计稿，尚未实现；§0.1 的决策已于 2026-10-22 分两轮与用户确认。对照代码：`main` @ `d53151b`。本文只写设计，不含代码改动；用户确认之前不进入开发。
+> 状态：设计稿，尚未实现；§0.1 的决策已于 2026-10-22 分三轮与用户确认。对照代码：`main` @ `d53151b`。本文只写设计，不含代码改动；用户确认之前不进入开发。
 > 行号均指该提交；后续代码变化后以函数名为准。
 
 ## 0. 结论摘要
@@ -10,13 +10,13 @@
 | # | 决策 | 说明 | 详见 |
 | --- | --- | --- | --- |
 | D1 | **本地数据库用 SQLite** | 性能优先：SQLite 在进程内直接调用 C 库，比 PGlite（PostgreSQL 编译成 WASM、单连接）更快、启动更快、内存更少，也更成熟。兼容由仓储接口 + Kysely + 契约测试保证，以后服务器版换 PostgreSQL 或 MySQL 只是新增一个实现。PGlite 不采用 | §5.7、§5.8 |
-| D2 | **驱动优先 `better-sqlite3`，退路 `node:sqlite`** | `better-sqlite3` 最常用、最快，但是原生模块，需先确认 DSH 能加载；不行则用 Node 自带的 `node:sqlite`（不用打包，但仍标为实验性）。驱动在公共基础包里统一选定（D8） | §5.7、§5.8 |
+| D2 | **驱动用 Node 自带的 `node:sqlite`，不用 `better-sqlite3`**（第三轮修订） | DSH 核心自己的三个 SQLite 后端全部用 `node:sqlite`，并明确否决了 `better-sqlite3`：原生模块会让 DSH 的单文件可执行包更难打包。`node:sqlite` 零依赖、不用编译、没有安装脚本问题；本机实测功能齐全，性能瓶颈在磁盘同步而不在驱动（§5.7）。驱动只在公共基础包里使用（D8） | §5.7、§5.8 |
 | D3 | **Web 版暂缓，后续再考虑** | §6 与 Web 阶段全部暂缓。只保留每张表的 `user_id` 列（本地固定为 `'local'`，几乎没有成本），以后做 Web 版不用改表 | §6、§7 |
 | D4 | **不兼容旧 JSON 数据**（第二轮修订） | 去掉 `workbench-v1.json` 的全部逻辑：不导入、不导出、不冻结，也不写过渡用的 JSON 实现，仓储接口直接配 SQLite。新版本首次启动为空库，旧数据由用户清理 | §5.9、§7 |
 | D5 | **每个渠道一个小插件，邮件例外、内置** | 微信、以后的飞书/企微各是一个渠道插件，挂到工作台核心上，装上即多一个来源，卸载不影响核心。邮件内置在工作台里（主产品；发送、审核、自动发送与核心联系最紧；刚把 dsh-email 合进来，不再拆出），代码上同样按渠道接口实现 | §3、§4 |
 | D6 | **渠道数据存在工作台的数据库里** | 按渠道区分，渠道插件不自建数据库；卸载渠道插件不丢数据 | §3、§5.5 |
-| D7 | **拆插件前先在真实 DSH 验证跨插件挂接** | 后端 `ctx.provide` / `inject` 与前端由另一插件扩展界面都要先用最小示例验证；前端扩展不了时，微信界面暂留工作台前端、装了微信插件才显示 | §4.6、§7 |
-| D8 | **每个插件各用一个 SQLite 库文件，共用一个公共基础包** | SQLite 同一文件同一时刻只有一个写入者，分开后互不阻塞；各插件独立升级、卸载、备份，出问题不连坐；插件间用服务接口取数据（如 `ctx.workbenchMail`），不直接读别人的表。基础包（暂称 `zq-sqlite`）统一负责打开数据库、WAL、等锁超时、迁移、备份、Windows 占用重试与驱动选择 | §5.10 |
+| D7 | **界面能拆就拆：用 DSH 插槽让微信插件扩展工作台界面**（第三轮修订） | 查了 DSH 源码：客户端插槽支持插件声明自己的子插槽（`children`，按键分派的 `keyed` 等四种），其他插件用 `ctx.slots.inject` 往里注册，DSH 自带的右侧栏就是这样做的。工作台声明按渠道分派的插槽，微信界面随插件拆出（§4.6）。拆之前仍用最小示例在真实 DSH 里确认一次；万一不行，退路是微信界面暂留工作台前端 | §4.6、§7 |
+| D8 | **每个插件各用一个 SQLite 库文件，共用一个公共基础包；基础包放独立仓库** | SQLite 同一文件同一时刻只有一个写入者，分开后互不阻塞；各插件独立升级、卸载、备份，出问题不连坐；插件间用服务接口取数据（如 `ctx.workbenchMail`），不直接读别人的表。基础包（暂称 `zq-sqlite`，单独一个仓库）统一负责打开数据库、WAL、等锁超时、事务、迁移、备份、Windows 占用重试 | §5.10 |
 | D9 | **微信插件放独立仓库** | `bkms-workbench-wechat` 单独建仓库；工作台导出渠道接口类型（`bkms-workbench/channel`），微信仓库依赖并固定版本 | §3、§4.1 |
 | D10 | **版本不匹配只提示升级，不做兼容** | 渠道注册时只比较 `CHANNEL_API_VERSION` 是否相等；不相等即拒绝加载，并在设置页提示升级落后的一方（微信插件或工作台） | §3、§4.1 |
 | D11 | **从 SQLite 版本开始，升级靠迁移脚本保留数据，不支持降级** | 表结构变化一律写迁移脚本；旧版本插件遇到更新的数据库只提示升级。实施时 `CLAUDE.md` 的“数据兼容”约定改为这条规则 | §5.9 |
@@ -185,7 +185,7 @@
 | `bkms-workbench`（工作台） | 现仓库 | 核心、存储、AI 端口、**内置邮件渠道**（`src/mail/` 不拆出）；数据库 `<数据目录>/bkms-workbench/workbench.sqlite` | `zq-sqlite`；无渠道插件依赖，只装它就是完整的邮件工作台 |
 | `bkms-workbench-wechat` | **独立仓库**（D9） | 微信渠道：`src/wechat.ts`、`wechat/` Python 桥与 `wxread/`、`client/wechat.tsx`、自己的中英文字典 | 运行时依赖工作台提供的 `workbenchChannels`；开发时依赖工作台导出的渠道接口类型 `bkms-workbench/channel`（固定版本）；工作台不依赖它 |
 | 以后的 `bkms-workbench-feishu` 等 | 各自仓库 | 各自的渠道实现 | 同上 |
-| `zq-sqlite`（公共基础包，暂名） | 待定（独立仓库或 `zq-plugins` 下） | 打开数据库、驱动、WAL、迁移、备份、Windows 占用重试（§5.10） | `kysely` 与 SQLite 驱动 |
+| `zq-sqlite`（公共基础包，暂名） | **独立仓库**（D8） | 打开数据库、事务、WAL、迁移、备份、Windows 占用重试（§5.10） | 只依赖 `kysely`；驱动用 Node 自带的 `node:sqlite`（D2） |
 | 其他功能插件（如合同编写、合同评审） | 各自仓库 | 各自的业务与各自的 SQLite 库文件 | `zq-sqlite`；要用邮件数据时调用 `ctx.workbenchMail`，不读工作台的库 |
 
 渠道插件不自建数据库：任务、游标、渠道状态都通过渠道接口交给工作台，存在工作台的数据库里并按渠道区分；卸载渠道插件不丢数据。渠道插件自己的缓存（如微信解密副本 `wechat-cache/`）仍放在自己的目录。
@@ -390,25 +390,42 @@ export interface ReplyCapability {
 
 ### 4.6 前端扩展点
 
+**用 DSH 客户端插槽实现（D7）**。查 DSH 源码（`packages/client/ui-slots`）可知：
+- 插件注册组件时可以用 `children` **声明自己的子插槽**，组件用注入的 `renderSlot` 渲染它们；其他插件用 `ctx.slots.inject(名称, …)` 往里注册——插槽声明出现后才执行，两个插件的加载先后顺序无所谓。
+- 插槽有四种：`single`（单个占位）、`list`（有序条目）、`keyed`（按键分派）、`chain`（条目自行提名）；作用范围有 `root`（全局）与 `session`。
+- 声明即认领：同一插槽只能由一个条目声明；注册条目卸载时，它声明的子插槽和别人注册进来的内容一起移除。
+- DSH 自带的右侧栏（`ui-sidebar-right`）正是这样让其他插件添加页签的；工作台现在也已经用同一套 `ctx.slots` 注册主界面、侧栏和设置页。
+
+工作台主界面注册时声明按渠道分派的子插槽，键就是渠道类型：
+
+| 插槽 | 种类 | 内容（现有代码位置） |
+| --- | --- | --- |
+| `bkms-workbench.channel.settings` | `keyed` | 渠道设置卡片（现 `WechatSettingsCard`，`settings.tsx:59`） |
+| `bkms-workbench.task.tags` | `keyed` | 任务标题旁的标签（现 @我、群聊/私聊，`workspace.tsx:134-138`） |
+| `bkms-workbench.task.body` | `keyed` | 任务正文区（现 `SegmentConversation`，`workspace.tsx:226`） |
+| `bkms-workbench.task.reply` | `keyed` | 复制模式的回复区（现建议回复 + 复制 + 已在微信处理，`workspace.tsx:219-224、292-295`） |
+| `bkms-workbench.task.source` | `keyed` | 原文页签（现 `ChatHistory`，`workspace.tsx:331-335`） |
+| `bkms-workbench.items.mode` | `list` | “全部事项”的其他查看方式（现“按会话”的 `ChatsView`，`views.tsx:205-210`） |
+
 ```ts
-// client/channels.ts（草案）
-export interface ClientChannel {
-  kind: string
-  label: () => string                                   // 经 t()
-  titleOf?(task: Task): string                          // 现 lib.ts taskTitle
-  counterpartOf?(task: Task): string                    // 现 lib.ts counterpart
-  SettingsPanel?: Component<{ value: unknown; disabled: boolean; save(value: unknown, message?: string): Promise<void> }>  // 现 WechatSettingsCard，settings.tsx:59
-  TaskTags?: Component<{ task: Task }>                  // 现 workspace.tsx:134-138（@我、群聊/私聊）
-  TaskBody?: Component<{ task: Task }>                  // 现 SegmentConversation，workspace.tsx:226
-  ReplyPanel?: Component<{ task: Task }>                // 现 workspace.tsx:219-224 建议回复 + 复制 + 已处理
-  SourceTab?: { label: () => string; Component: Component<{ task: Task }> }  // 现 ChatHistory，workspace.tsx:331-335
-  ViewMode?: { label: () => string; Component: Component }                   // 现 ChatsView，views.tsx:205-210
-  ruleSourceAvailable?(data: Snapshot): boolean         // 现 plans.tsx:155
-}
+// 工作台前端（草案）
+ctx.slots.inject('main', () => ctx.slots.register({
+  name: 'main', key: 'bkms-workbench',
+  children: {
+    'bkms-workbench.channel.settings': { kind: 'keyed', scope: 'root' },
+    'bkms-workbench.task.body': { kind: 'keyed', scope: 'root' },
+    // …其余同上表
+  },
+}, Workbench))   // Workbench 经 React context 把 renderSlot 交给深层组件
+
+// 微信插件前端（草案）
+ctx.slots.inject('bkms-workbench.channel.settings', () =>
+  ctx.slots.register({ name: 'bkms-workbench.channel.settings', key: 'wechat' }, WechatSettingsCard))
 ```
 
-- **注册**：单插件阶段用静态注册表；拆插件后，核心前端提供客户端注册服务（`ctx.provide` 或插件自定义插槽，如 `bkms-workbench.channel`），微信插件前端注册自己的 `ClientChannel`。**DSH 客户端运行时是否支持插件间 provide/自定义插槽需在真实 DSH 验证**（D7）；不支持时的退路：微信界面代码暂留工作台前端，只在微信渠道已注册时显示——后端拆开、前端暂不完全拆开。
-- **渠道前端缺席**：任务按通用方式显示，只保留“忽略、重新处理、选择方案”等核心动作。
+- **非组件逻辑放到后端**：列表标题、对方名称（现 `lib.ts` 的 `taskTitle` / `counterpart`）由渠道在后端算好放进快照，前端不再按渠道判断；方案来源是否可选（现 `plans.tsx:155`）看快照里的渠道状态。
+- **渠道前端缺席**（插件未装，或某个键没人注册）：`keyed` 插槽对没人认领的键什么也不渲染，工作台在该位置显示通用内容（标题、对方、正文），只保留“忽略、重新处理、选择方案”等核心动作。
+- **仍需确认**：外部安装的插件（与工作台一样以 tgz 安装）声明和使用子插槽，在真实 DSH 里用最小示例试一次（§7 阶段 0）。万一不行，退路是微信界面代码暂留工作台前端，只在微信渠道已注册时显示。
 - **i18n 与样式**：渠道插件自带 `en.json` / `system-en.json`，在自己的命名空间注册；`test/i18n.test.mjs` 的规则同样适用；只用核心 `styles.css` 的颜色变量，深色模式与 ≤1000px 单栏要求不变。
 
 ## 5. 存储接口
@@ -652,30 +669,56 @@ export interface SearchDoc { taskId: string; title: string; counterpart: string;
 
 以后若服务器版选 MySQL 8，额外差异：upsert 用 `ON DUPLICATE KEY UPDATE`（Kysely `onDuplicateKeyUpdate`）；没有 `RETURNING`，`claimNext` 等改为“条件更新后按 id 再读”；`SKIP LOCKED` 8.0 起支持；`JSON` 类型由映射函数处理；全文搜索见 §5.6。这些都封装在仓储实现里，契约测试保证行为一致。
 
-**本地驱动（D2）**：本插件目前**没有任何原生模块**依赖（`package.json`：imapflow、mailparser、nodemailer、proper-lockfile、yaml）。
-- 首选 `better-sqlite3`：最常用、最快，同步 API 与现在“同步事务”的写法最接近；但它是原生模块，需要按平台和 DSH 内置 Node 的 ABI 提供预编译文件。
-- 退路 `node:sqlite`：Node 自带（22.13 起无需参数），底层同样是 SQLite C 库，性能相近，不用打包；但仍标为实验性（会打印一条警告），需要社区 Kysely 方言。
-- 驱动只在公共基础包里选定（D8，§5.10），各插件不各自处理；选定方法见 §5.8 第 1 项。
+**本地驱动（D2）：`node:sqlite`**
+
+| 方面 | `node:sqlite`（采用） | `better-sqlite3`（不采用） |
+| --- | --- | --- |
+| 安装与打包 | Node 自带，零依赖、不用编译、没有安装脚本 | 原生模块，需按平台和 Node ABI 准备预编译文件；pnpm 10 起默认不执行依赖的安装脚本，还要额外放行 |
+| 与 DSH 的一致性 | DSH 核心的 `storage-sqlite`、`session-query-sqlite` 等三个 SQLite 后端都用它；DSH 的 Node 版本下限（`^22.19 \|\| >=24`）正是按它定的；DSH 单文件可执行包里实测可用 | DSH 在依赖评审中明确否决（“原生 addon 会让打包复杂化”，见 DSH 源码 `.agents/notes/rejected/simplification/2026-07-26-dependency-swaps-rejected-by-nih-audit`） |
+| 性能 | 公开测试里语句吞吐比 `better-sqlite3` 低约 10–40%；但在本插件规模下，单次操作是亚毫秒级，写入耗时主要花在磁盘同步上（见下方实测） | 驱动层更快，这里体现不出来 |
+| 功能 | 本机 Node 22.23.1 自带 SQLite 3.51.3，实测可用：WAL、FTS5（含 trigram）、JSON/JSONB、`RETURNING`、`STRICT` 表、部分索引、保存点、`VACUUM INTO` 与 `backup()` 在线备份、自定义函数、`timeout` 等锁 | 更成熟；有 `db.transaction()` 辅助 |
+| 缺点与对策 | 没有事务辅助方法 → 基础包自写（`BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`，嵌套用保存点）；仍标为实验性，进程首次使用时打印一条 `ExperimentalWarning`，API 可能随 Node 版本变化 → 只在基础包里使用，DSH 自己也依赖它；SQLite 版本跟随 Node → 基础包启动时检查 `sqlite_version()` 与 FTS5 是否可用，不满足就明确报错 | |
+
+**Kysely 接入**：Kysely 自带的 SQLite 方言按 `better-sqlite3` 的接口编写，不直接支持 `node:sqlite`（[Kysely 方言列表](https://kysely.dev/docs/dialects)）。可选社区方言 [`kysely-node-native-sqlite`](https://github.com/wolfie/kysely-node-native-sqlite)，MikroORM 也提供了 [`NodeSqliteDialect`](https://mikro-orm.io/api/sql/class/NodeSqliteDialect)。建议在基础包里自写一层约 30 行的适配：把 `DatabaseSync` 包装成 Kysely `SqliteDialect` 需要的 `prepare` / `all` / `run` / `iterate` / `reader` 接口（`reader` 可由 `StatementSync.columns()` 判断，本机已确认可用）。这样不多一个依赖，问题也在自己掌控之内；由契约测试覆盖。
+
+**本机实测**（2026-10-22，Windows 11、Node 22.23.1，`journal_mode=wal`、`synchronous=full`；1 万个任务、每个约 13 KB 正文，带二元切分全文索引，库文件 161 MB）：
+
+| 操作 | p50 | p95 |
+| --- | --- | --- |
+| 摘要分页（50 条，不含正文） | 0.16 ms | 0.29 ms |
+| 读单个任务（含正文） | 0.03 ms | 0.06 ms |
+| 没有排队任务时的 `claimNext`（只读） | 0.002 ms | 0.002 ms |
+| `claimNext`（更新 + `RETURNING`，单独提交） | 1.5 ms | 1.8 ms |
+| 带 revision 校验的单任务更新（单独提交） | 1.5 ms | 1.8 ms |
+| 需关注列表（返回约 1700 条） | 4.9 ms | 6.5 ms |
+| 搜索两字词“报价” | 0.12 ms | 0.23 ms |
+| 搜索四字词“付款确认” | 0.02 ms | 0.03 ms |
+| 关闭后重新打开数据库 | 24 ms | |
+| 一个事务写入 1 万个任务及索引 | 3.1 s | |
+
+带提交的写入约 1.5 ms，几乎全是磁盘同步（`synchronous=full`）；驱动快 10–40% 只影响其中很小一部分。对照现状：现在每次写入都要整体重写并同步 1.4 MB 的文件，后台空闲时也每 5 秒写一次。
 
 **仓储契约测试（关键）**：一套测试函数 `repositoryContract(makeRepo)`，覆盖每个仓储方法的结果、409/404 错误码、游标比对、去重、`claimNext` 互斥、保留上限、搜索命中。`pnpm test` 跑 SQLite 实现（临时库）；以后有服务器数据库实现时，设置 `DATABASE_URL` 再跑同一套测试。各实现行为一致由这套测试保证，而不是靠人工对照。
+
+**为什么不用 DSH 自带的 `ctx.storage`**：DSH 的存储枢纽（`packages/storage`，其 SQLite 后端也用 `node:sqlite`）只提供按键读写的 KV 形式，版本不符时直接报错、不做迁移；工作台需要索引查询、分页、全文搜索和迁移，因此自管 SQLite 库。
 
 ### 5.8 SQLite 落地前需实测（PGlite 不采用）
 
 **不采用 PGlite 的原因（D1）**：PGlite 是把 PostgreSQL 编译成 WebAssembly 在进程内运行，好处是与服务器 PostgreSQL 同一方言；但多一层 WASM、只有一个连接，查询更慢、启动更慢、常驻内存几十 MB 起，项目也较新（2024 年起），数据目录还绑定 PostgreSQL 大版本。性能优先时 SQLite 更合适；方言差异由 Kysely 与契约测试吸收。
 
-**需实测**（在用户的 Windows 机器与 DSH 内运行；第 1、9 项在阶段 0 先做，其余在阶段 1 开始时做）：
+**已在本机实测**：功能齐全、性能（见 §5.7），中文两字词搜索可用。
+
+**还需在真实 DSH 中确认**（第 1 项在阶段 0 做，其余在阶段 1 做）：
 
 | # | 项目 | 通过标准 |
 | --- | --- | --- |
-| 1 | `better-sqlite3` 预编译文件能否随插件安装（`pnpm run pack:plugin` 的 tgz 与 `启动工作台.cmd`），并在 DSH 内置 Node 中加载；Windows x64 必测，macOS 可在有设备时测 | 能加载即用 `better-sqlite3`；不能则改用 `node:sqlite`，并确认 DSH 的 Node 版本（`^22.19 \|\| >=24`）可用 |
-| 2 | 1 万任务（约 150 MB）下：摘要分页、`claimNext`、单任务更新 | p95 分别 < 10、10、20 毫秒 |
-| 3 | 冷启动打开上述数据库 | < 1 秒 |
-| 4 | 处理中强杀 DSH 进程 100 次（WAL 模式） | 每次都能打开，数据完整 |
-| 5 | Windows Defender 实时扫描下连续写入 | 无失败，或短暂重试后恢复（`WinError 5/32`） |
-| 6 | 第二个进程打开同一数据库并尝试写入 | 等待或明确报错，不损坏数据；后台单实例仍由 `ownWorker` 锁保证 |
-| 7 | 中文搜索（方案 A）：固定语料的两字、三字、英文查询 | 搜索契约测试通过 |
-| 8 | 备份恢复：用 SQLite 在线备份接口导出，再从备份打开 | 能恢复 |
-| 9 | 两个插件各自依赖 `zq-sqlite`、同时加载驱动，各写自己的库 | 都能加载，互不阻塞 |
+| 1 | 插件在用户实际使用的 DSH（含打包版）里调用 `node:sqlite`：Node 版本、`sqlite_version()`、FTS5 可用 | 都可用；`ExperimentalWarning` 只出现一次、不影响运行 |
+| 2 | 处理中强杀 DSH 进程 100 次（WAL 模式） | 每次都能打开，数据完整 |
+| 3 | Windows Defender 实时扫描下连续写入 | 无失败，或短暂重试后恢复（`WinError 5/32`、`SQLITE_BUSY`） |
+| 4 | 第二个进程打开同一数据库并尝试写入 | 等待或明确报错，不损坏数据；后台单实例仍由 `ownWorker` 锁保证 |
+| 5 | 备份恢复：迁移前自动备份，再从备份打开 | 能恢复 |
+| 6 | 两个插件各自依赖 `zq-sqlite`，各写自己的库 | 互不阻塞 |
+| 7 | Kysely 适配层 | 契约测试全部通过 |
 
 ### 5.9 旧数据与升级规则
 
@@ -697,7 +740,7 @@ export interface SearchDoc { taskId: string; title: string; counterpart: string;
 - 出问题不连坐：一个插件的迁移失败或文件损坏只影响它自己；备份恢复也按插件进行。
 - 保持解耦：插件间需要对方的数据时调用对方的服务接口（现有 `ctx.workbenchMail`，以后按需增加只读接口），不直接打开别人的库文件，也不用 SQLite `ATTACH` 跨库查询。
 
-**公共基础包 `zq-sqlite`（暂名）**，各插件依赖它，基础设施只写一遍：
+**公共基础包 `zq-sqlite`（暂名，单独一个仓库）**，各插件依赖它，基础设施只写一遍：
 
 ```ts
 // zq-sqlite（草案）
@@ -710,19 +753,20 @@ export interface OpenOptions<DB> {
 }
 export function openDatabase<DB>(options: OpenOptions<DB>): Promise<{
   db: Kysely<DB>
+  transaction<T>(work: (tx: Kysely<DB>) => Promise<T>): Promise<T>   // BEGIN IMMEDIATE…COMMIT/ROLLBACK，嵌套用保存点
   backup(target: string): Promise<void>         // SQLite 在线备份
   check(): Promise<{ ok: boolean; detail?: string }>   // quick_check
   close(): Promise<void>
 }>
 ```
 
-- 打开时：WAL、`busy_timeout`、`foreign_keys = ON`、`synchronous` 按 `durability` 设置。
+- 驱动：`node:sqlite`（D2），外加约 30 行的 Kysely 适配（§5.7）；只在这里使用，对外只暴露 Kysely 实例。
+- 打开时：检查 `sqlite_version()` 与 FTS5 是否可用，不满足就明确报错；WAL、`busy_timeout`、`foreign_keys = ON`、`synchronous` 按 `durability` 设置。
 - 迁移：执行前自动备份（保留最近几份）；失败整体回滚并拒绝启动；数据库版本比插件新时报“请升级插件”（D11）。
 - Windows 文件被占用（`WinError 5/32`、`SQLITE_BUSY`）时短暂重试，超出后给出明确错误。
-- 驱动选择（D2）只在这里实现；对外只暴露 Kysely 实例。
 - 测试辅助：临时库、契约测试工具。
-- 打包：每个插件把 `zq-sqlite` 作为依赖安装；若用 `better-sqlite3`，每个插件各带一份原生文件，体积有重复，但互不影响（§5.8 第 9 项验证）。
-- 放在哪里（独立仓库，或 `zq-plugins` 下的共享包）待定（§8）；工作台是第一个使用者，阶段 1 开始时决定。
+- 打包：每个插件把 `zq-sqlite` 作为普通依赖安装；它只依赖 `kysely`，没有原生模块。
+- 仓库：单独一个仓库（D8）；工作台是第一个使用者，在阶段 1 里建立。发布方式（私有 npm 源，或各插件以 Git 依赖固定版本）在建仓库时定。
 
 ## 6. Web 版额外问题（暂缓）
 
@@ -785,10 +829,10 @@ Web 实现：
 
 | 阶段 | 目标与主要改动 | 验证方式 | 主要风险 |
 | --- | --- | --- | --- |
-| **0 护栏与小验证** | 行为测试：补充经 `WorkbenchApi` / `Engine` 的测试（不直接操作 `Store`），阶段 1 换存储后原样复用，作为“行为不变”的依据；性能基线脚本（读写耗时、快照大小）；“核心不得引用微信”的检查（先以白名单记录现状）。在真实 DSH 中的小验证：① `better-sqlite3` 能否随插件安装并加载，两个插件同时加载是否正常（§5.8 第 1、9 项，决定驱动，D2）；② 用最小示例插件验证跨插件挂接——后端 `ctx.provide` / `inject`，前端由另一插件扩展工作台界面（D7） | `pnpm test`；基线数据与验证结果记录在 PR | 低；验证结论可能改变阶段 3、4 的做法（见各自退路） |
-| **1 公共基础包 + 仓储接口 + SQLite** | 确定 `zq-sqlite` 放在哪并实现（§5.10）；65 处调用换成 §5.3 的方法，实现直接是 SQLite（Kysely）；表结构按 §5.5；搜索（方案 A）；快照拆为摘要列表 + 详情，`changeSeq` 不变时返回 `unchanged`；`claimNext` 无任务时不写入；删除 `workbench-v1.json` 逻辑（§5.9）；同步修改 `CLAUDE.md` | 阶段 0 的行为测试与现有测试通过（测试里 83 处直接用 `Store` 的改为走仓储接口）；契约测试；§5.8 其余实测（性能、强杀、Defender、搜索、备份）；用户清理旧数据后在真实邮箱上收信、分拣、起草、发送一轮 | 一次改动较大（不做 JSON 过渡）：靠阶段 0 的行为测试与附录 A 逐处对照；原生模块打包（退路 `node:sqlite`） |
+| **0 护栏与小验证** | 行为测试：补充经 `WorkbenchApi` / `Engine` 的测试（不直接操作 `Store`），阶段 1 换存储后原样复用，作为“行为不变”的依据；性能基线脚本（读写耗时、快照大小）；“核心不得引用微信”的检查（先以白名单记录现状）。在真实 DSH 中的小验证：① 插件内调用 `node:sqlite` 正常，Node 版本、SQLite 版本与 FTS5 可用（§5.8 第 1 项）；② 用最小示例插件验证跨插件挂接——后端 `ctx.provide` / `inject`，前端声明子插槽、由另一插件往里注册（§4.6，D7） | `pnpm test`；基线数据与验证结果记录在 PR | 低；若 ② 不通过，阶段 3、4 按 §4.6 的退路做 |
+| **1 公共基础包 + 仓储接口 + SQLite** | 新建 `zq-sqlite` 仓库并实现（§5.10）；65 处调用换成 §5.3 的方法，实现直接是 SQLite（Kysely）；表结构按 §5.5；搜索（方案 A）；快照拆为摘要列表 + 详情，`changeSeq` 不变时返回 `unchanged`；`claimNext` 无任务时不写入；删除 `workbench-v1.json` 逻辑（§5.9）；同步修改 `CLAUDE.md` | 阶段 0 的行为测试与现有测试通过（测试里 83 处直接用 `Store` 的改为走仓储接口）；契约测试；§5.8 其余实测（强杀、Defender、第二进程、备份、两个插件并用）；用户清理旧数据后在真实邮箱上收信、分拣、起草、发送一轮 | 一次改动较大（不做 JSON 过渡）：靠阶段 0 的行为测试与附录 A 逐处对照；`node:sqlite` 仍标为实验性，接口变化只影响基础包 |
 | **2 渠道接口（单插件内）** | `Channel` 接口与注册表；内置邮件、微信两个实现；核心去掉 kind 分支；`Task` 类型改为通用字段（只改映射函数，不迁移数据，§4.2）；导出 `bkms-workbench/channel` | 现有 `wechat`、`workbench`、`redesign` 等测试通过；新增“假渠道”测试证明核心不改就能接第三个渠道；静态检查 `src/core` 不含微信 | 分拣/准备分支合并引入回归：先原样搬迁，再合并重复逻辑 |
-| **3 前端扩展点** | `ClientChannel` 注册；微信界面迁入 `client/channels/wechat/` | `test/i18n.test.mjs`；`scripts/seed-visual-qa.mjs` 生成数据后截图检查中英文、深色、≤1000px | 本阶段先用静态注册；若阶段 0 验证出前端不能跨插件扩展，微信界面按退路暂留工作台前端 |
+| **3 前端扩展点** | 工作台主界面声明 §4.6 的渠道子插槽；标题、对方名称改由后端算好；微信界面改为往插槽注册（先放在 `client/channels/wechat/`，阶段 4 随插件迁走） | `test/i18n.test.mjs`；`scripts/seed-visual-qa.mjs` 生成数据后截图检查中英文、深色、≤1000px | 若阶段 0 验证出外部插件不能使用子插槽，微信界面按退路暂留工作台前端 |
 | **4 微信渠道插件（独立仓库）** | 新建 `bkms-workbench-wechat` 仓库（D9）：渠道实现、Python 桥与 `wxread/`（`NOTICE.md` 随迁）、前端注册、自己的中英文字典；工作台提供 `workbenchChannels` 服务并做版本检查（D10） | 真实 DSH 中安装/卸载微信插件；卸载后微信任务仍可查看；版本不相等时设置页提示升级正确的一方；只装工作台时邮件功能完整 | 两个仓库协同发布：渠道接口一变就要两边同时升级（D10 不做兼容） |
 | ~~Web 版~~ | **暂缓（D3）**，内容见 §6 | | |
 
@@ -797,18 +841,18 @@ Web 实现：
 ## 8. 问题状态
 
 **已决（2026-10-22，见 §0.1）**
-- 本地数据库：SQLite（D1）；驱动 `better-sqlite3` 优先、`node:sqlite` 退路，阶段 0 验证后定（D2）。
+- 本地数据库：SQLite（D1）；驱动用 Node 自带的 `node:sqlite`，不用 `better-sqlite3`（D2）。
 - Web 版：暂缓（D3）；随之暂缓的问题——用哪家模型服务、准备阶段是否需要工具与技能（§6.4）、是否支持多人共用邮箱（需要的话表上加 `workspace_id`）。
 - 旧 JSON 数据：不兼容、不迁移，也不写过渡用的 JSON 实现（D4）。
-- 渠道形态：每个渠道一个插件，邮件内置（D5）；渠道数据存在工作台数据库（D6）；拆分前先验证跨插件挂接（D7）。
-- 多插件用 SQLite：各插件各自一个库文件，共用公共基础包（D8）。
+- 渠道形态：每个渠道一个插件，邮件内置（D5）；渠道数据存在工作台数据库（D6）；界面用 DSH 插槽随插件拆分，拆分前用最小示例确认（D7）。
+- 多插件用 SQLite：各插件各自一个库文件，共用公共基础包，基础包放独立仓库（D8）。
 - 微信插件：独立仓库（D9）。
 - 渠道接口版本：不相等即拒绝加载并提示升级，不做兼容（D10）。
 - 升级：从 SQLite 版开始靠迁移脚本保留数据，不支持降级（D11）。
 
-**仍待决定**
-1. **公共基础包 `zq-sqlite` 放在哪**：独立仓库，还是 `zq-plugins` 下的共享包；包名。阶段 1 开始时决定。
-2. **阶段 0 验证的结论**：决定 SQLite 驱动，以及微信界面能否随插件一起拆出。
+**仍待决定**（都不影响现在的设计，实施到对应阶段再定）
+1. **`zq-sqlite` 的正式包名与发布方式**：私有 npm 源，或各插件以 Git 依赖固定版本；阶段 1 建仓库时定。
+2. **阶段 0 两项验证的结果**：确认 DSH 实际运行环境里的 `node:sqlite`，以及外部插件能否使用子插槽。
 
 ## 附录 A：65 处整文档读写的对照
 
