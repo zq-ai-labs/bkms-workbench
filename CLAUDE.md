@@ -36,6 +36,7 @@ pnpm test               # 构建后运行 test/*.test.mjs 与 test/mail/*.test.m
 pnpm run check          # 只做类型检查
 pnpm run pack:plugin    # 生成 dist/bkms-workbench-<版本>.tgz（Mac 等环境直接安装）
 python -m unittest wechat/test_bridge.py wechat/test_wxread.py
+node scripts/seed-demo.mjs --home <…/runtime/poc/bkms-workbench-demo-xx> --lang zh|en   # 演示数据，见 docs/DEMO.md
 ```
 
 - `DSH_SOURCE_ROOT=<已构建的 DSH 核心>` 时会多跑真实 DSH 的集成测试，否则跳过。

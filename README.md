@@ -179,3 +179,5 @@ pnpm run pack:plugin
 ```
 
 指定 `DSH_SOURCE_ROOT` 时额外执行真实 Cordis/DSH Agent 与 Connection 集成测试，模型和邮箱使用测试替身，不连接真实邮箱或发送真实邮件。详见 `docs/VALIDATION.md`。
+
+客户演示（投诉 / 查询 / 咨询分类及分类回复，中英文两套合成数据）：见 `docs/DEMO.md`，用 `node scripts/seed-demo.mjs --home <新目录> --lang zh|en` 生成。
