@@ -35,8 +35,8 @@ export function PlansView({ ruleId }: { ruleId?: string }) {
         </div>
         <div className="bkw-nav-group"><h4>{t("处理方案")}</h4>
           {sorted.map(rule => <button type="button" key={rule.id} className={`bkw-nav-item tall ${selected?.id === rule.id && !showTriage ? "on" : ""} ${rule.enabled ? "" : "paused"}`} onClick={() => open(rule.id)}>
-            <span><strong>{rule.name}</strong><small>{rule.enabled ? corrections(rule.id) ? t("本周命中 {0} 次 · 纠正 {1} 次", hits(rule.id), corrections(rule.id)) : t("本周命中 {0} 次 · {1}", hits(rule.id), rule.output === "reply" ? t("回复草稿") : t("分析报告")) : t("已停用")}</small></span>
-            <Tag tone={rule.autonomy === "auto" ? "warn" : rule.autonomy === "low_risk" ? "accent" : "muted"}>{t(AUTONOMY_LABEL[rule.autonomy || "draft"])}</Tag>
+            <span><strong>{rule.name}</strong><small>{rule.enabled ? corrections(rule.id) ? t("本周命中 {0} 次 · 纠正 {1} 次", hits(rule.id), corrections(rule.id)) : t("本周命中 {0} 次 · {1}", hits(rule.id), rule.output === "reply" ? t("回复草稿") : rule.output === "dispatch" ? t("分派到 {0}", rule.dispatchFolder || "") : t("分析报告")) : t("已停用")}</small></span>
+            {rule.output === "dispatch" ? <Tag tone="accent">{t("分派")}</Tag> : <Tag tone={rule.autonomy === "auto" ? "warn" : rule.autonomy === "low_risk" ? "accent" : "muted"}>{t(AUTONOMY_LABEL[rule.autonomy || "draft"])}</Tag>}
           </button>)}
           {!sorted.length && <p className="bkw-card-empty">{t("还没有处理方案。")}</p>}
         </div>
@@ -80,9 +80,20 @@ const MATCH_MODES: [MatchMode, string, string][] = [
   ["literal", "字面命中就处理", "符合来源、文件夹和字面条件的信息都交给这个方案，不经 AI 判断。适合专用文件夹，例如“招聘简历”。"],
 ];
 
+/** A Date as the value of a datetime-local input, in local time. */
+export const localInput = (date: Date) => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 function RuleEditor({ rule }: { rule: Rule }) {
   const { data, busy, perform, refresh, notify, go, leave } = useWorkbench();
   const [value, setValue] = useState<Rule>({ ...rule, match: { ...rule.match }, tools: [...rule.tools] });
+  const dispatch = value.output === "dispatch";
+  // Existing folders as suggestions for the dispatch target; a new name is created on the first dispatch.
+  const [dispatchFolders, setDispatchFolders] = useState<string[]>([]);
+  useEffect(() => {
+    if (!dispatch || !data.accounts.length) return;
+    let active = true;
+    api<{ folders: { path: string }[] }>("folders", { account: value.account }).then(result => { if (active) setDispatchFolders(result.folders.map(folder => folder.path).filter(path => path !== value.folder)); }).catch(() => {});
+    return () => { active = false; };
+  }, [dispatch, value.account, value.folder]);
   const [saved, setSaved] = useState(JSON.stringify(rule));
   const [description, setDescription] = useState(""), [generating, setGenerating] = useState(false), [warnings, setWarnings] = useState<string[]>([]), [aiError, setAiError] = useState("");
   const [optimizing, setOptimizing] = useState(false), [optimization, setOptimization] = useState<string>(), [optimizeError, setOptimizeError] = useState("");
@@ -115,9 +126,12 @@ function RuleEditor({ rule }: { rule: Rule }) {
     try { setOptimization((await api<{ instructions: string }>("optimizeInstructions", { instructions: value.instructions })).instructions); }
     catch (error) { setOptimizeError(errorMessage(error)); } finally { setOptimizing(false); }
   };
+  // Trial over recent items, or over mail received in a time range read straight from the mailbox (history included).
+  const [trialRange, setTrialRange] = useState(false), [trialSince, setTrialSince] = useState(""), [trialUntil, setTrialUntil] = useState("");
   const runTrial = async () => {
     setTrialing(true); setTrialError(""); setTrial(undefined);
-    try { setTrial(await api("trialRule", { rule: value })); } catch (error) { setTrialError(errorMessage(error)); } finally { setTrialing(false); }
+    const range = trialRange && trialSince ? { since: new Date(trialSince).toISOString(), ...(trialUntil ? { until: new Date(trialUntil).toISOString() } : {}), ...(data.accounts[0] ? { account: data.accounts[0].id } : {}) } : undefined;
+    try { setTrial(await api("trialRule", { rule: value, ...(range ? { range } : {}) })); } catch (error) { setTrialError(errorMessage(error)); } finally { setTrialing(false); }
   };
   const save = () => {
     const form = formRef.current!;
@@ -152,7 +166,7 @@ function RuleEditor({ rule }: { rule: Rule }) {
           <div className="bkw-chips">{(Object.keys(SOURCE) as SourceKind[]).filter(kind => kind !== "meeting").map(kind => {
             // Email and WeChat (read-only) can feed a workflow; a workflow keeps at least one source.
             const selected = value.sources ?? ["email"], on = selected.includes(kind);
-            const available = kind === "email" || (kind === "wechat" && (on || !!data.sources.find(source => source.kind === "wechat")?.connected || !!data.wechat?.settings.enabled));
+            const available = kind === "email" || (kind === "wechat" && !dispatch && (on || !!data.sources.find(source => source.kind === "wechat")?.connected || !!data.wechat?.settings.enabled));
             const toggle = () => { const next = on ? selected.filter(item => item !== kind) : [...selected, kind]; if (next.length) patch({ sources: next }); };
             return <button type="button" key={kind} className={`bkw-chip ${on ? "on" : ""}`} disabled={!available} aria-pressed={on} title={available ? undefined : t("尚未接入")} onClick={toggle}>{t(SOURCE[kind])}{!available && <small>{t("未接入")}</small>}</button>;
           })}</div>
@@ -186,7 +200,7 @@ function RuleEditor({ rule }: { rule: Rule }) {
           </div>)}</div> : <p className="bkw-muted">{t("还没有例子。在事项上确认 AI 的建议、手动选择这个方案，或点“不是这个方案”时会自动记录。")}</p>}
         </div>
       </div>}
-      <div className="bkw-sec"><div><b>{t("自主级别")}</b><span>{t("AI 做完以后，哪些动作可以不经你确认")}</span></div>
+      {!dispatch && <div className="bkw-sec"><div><b>{t("自主级别")}</b><span>{t("AI 做完以后，哪些动作可以不经你确认")}</span></div>
         <div className="bkw-stack">
           <div className="bkw-levels" role="radiogroup" aria-label={t("自主级别")}>
             {(["draft", "low_risk", "auto"] as Autonomy[]).map(level => <button type="button" role="radio" aria-checked={autonomy === level} key={level} className={`bkw-level ${autonomy === level ? "on" : ""}`} disabled={value.output !== "reply" && level !== "draft"} onClick={() => patch({ autonomy: level })}>
@@ -195,19 +209,24 @@ function RuleEditor({ rule }: { rule: Rule }) {
           </div>
           {value.output !== "reply" ? <small className="bkw-muted">{t("分析报告不对外发送，始终为仅起草。")}</small> : autonomy !== "draft" && <Alert tone="warn">{t("自动发送前会等待 {0} 分钟，期间可在“AI 已代办”中撤回。存在待核实事项、包含链接或其他邮箱地址、收件人被策略禁止，或你曾撤回发给该联系人的回复时，一律转为人工审核。", data.defaults.undoMinutes)}</Alert>}
         </div>
-      </div>
+      </div>}
       <div className="bkw-sec"><div><b>{t("处理要求")}</b><span>{t("业务资料、步骤与约束")}</span></div>
         <div className="bkw-stack">
           <div className="bkw-grid2">
             <Field label={t("方案名称")}><input required maxLength={100} value={value.name} onChange={event => patch({ name: event.target.value })} placeholder={t("例如：客户询价回复")} /></Field>
-            <Field label={t("生成内容")}><select value={value.output} onChange={event => patch({ output: event.target.value as Rule["output"], ...(event.target.value === "report" ? { autonomy: "draft" as Autonomy } : {}) })}><option value="reply">{t("处理摘要 + 回复草稿")}</option><option value="report">{t("分析报告")}</option></select></Field>
+            <Field label={t("生成内容")}><select value={value.output} onChange={event => { const output = event.target.value as Rule["output"]; patch({ output, ...(output !== "reply" ? { autonomy: "draft" as Autonomy } : {}), ...(output === "dispatch" ? { sources: ["email"] as SourceKind[], tools: [], skills: [], dispatchFolder: value.dispatchFolder || (value.name.trim() ? `分派/${value.name.trim()}` : "") } : {}) }); }}><option value="reply">{t("处理摘要 + 回复草稿")}</option><option value="report">{t("分析报告")}</option><option value="dispatch">{t("分派到文件夹（交给其他人处理）")}</option></select></Field>
           </div>
-          <div className="bkw-field">
+          {dispatch ? <>
+            <Field label={t("目标文件夹")} hint={t("匹配的邮件会移到这个文件夹，不存在时自动创建。负责的人或小组在自己的工作台上，用这个文件夹建处理方案；也可以直接在邮箱里查看。")}>
+              <input required maxLength={200} list="bkw-dispatch-folders" value={value.dispatchFolder || ""} onChange={event => patch({ dispatchFolder: event.target.value })} placeholder={t("例如：分派/华东销售")} />
+              <datalist id="bkw-dispatch-folders">{dispatchFolders.map(path => <option key={path} value={path} />)}</datalist>
+            </Field>
+            <Alert>{t("分派只移动邮件，不生成或发送回复。同一个公共邮箱的收件箱只应由一台工作台负责分派，其他人的工作台只读取自己的文件夹，否则同一封信会被处理两次。")}</Alert>
+          </> : <div className="bkw-field">
             <span className="bkw-field-row"><span>{t("处理要求")}</span><button type="button" className="bkw-btn small" disabled={!aiReady || value.instructions.trim().length < 5} onClick={() => void optimize()}><Icon name="sparkle" size={13} />{optimizing ? t("正在优化…") : t("AI 优化")}</button></span>
             <AutoTextarea aria-label={t("处理要求")} required minLength={5} maxLength={16000} className="bkw-instructions" value={value.instructions} onChange={event => patch({ instructions: event.target.value })} placeholder={t("说明收到信息后需要做什么，以及缺少信息时如何处理。可写明语言、语气与署名。")} />
             {optimizeError && <Alert tone="danger">{systemMessage(optimizeError)}</Alert>}
-            {optimization && <div className="bkw-suggestion"><strong>{t("优化后的处理要求")}</strong><div className="bkw-prose">{optimization}</div><div className="bkw-actions"><small className="bkw-muted">{t("核对原有条件与限制，采用后仍需保存方案。")}</small><button type="button" className="bkw-btn small" onClick={() => setOptimization(undefined)}>{t("保留原文")}</button><button type="button" className="bkw-btn small primary" onClick={() => patch({ instructions: optimization })}>{t("采用优化")}</button></div></div>}
-          </div>
+            {optimization && <div className="bkw-suggestion"><strong>{t("优化后的处理要求")}</strong><div className="bkw-prose">{optimization}</div><div className="bkw-actions"><small className="bkw-muted">{t("核对原有条件与限制，采用后仍需保存方案。")}</small><button type="button" className="bkw-btn small" onClick={() => setOptimization(undefined)}>{t("保留原文")}</button><button type="button" className="bkw-btn small primary" onClick={() => patch({ instructions: optimization })}>{t("采用优化")}</button></div></div>}</div>}
           <details className="bkw-details"><summary>{t("执行选项")}<small>{t("优先级 {0} · 失败重试 {1} 次", value.priority, value.maxRetries)}</small></summary>
             <div className="bkw-grid2">
               <Field label={t("优先级")} hint={t("数值越高越先匹配")}><input required type="number" min={-10000} max={10000} value={value.priority} onChange={event => patch({ priority: Number(event.target.value) })} /></Field>
@@ -216,16 +235,27 @@ function RuleEditor({ rule }: { rule: Rule }) {
           </details>
         </div>
       </div>
-      <div className="bkw-sec"><div><b>{t("技能与工具")}</b><span>{t("AI 处理时可以使用的技能和读取工具")}</span></div>
+      {!dispatch && <div className="bkw-sec"><div><b>{t("技能与工具")}</b><span>{t("AI 处理时可以使用的技能和读取工具")}</span></div>
         <div className="bkw-stack">
           <details className="bkw-details bkw-capability-section"><summary><Icon name="rules" size={14} />{t("选择技能与工具")}<small>{(value.skills?.length || value.tools.length) ? t("已选 {0} 个技能、{1} 个工具：{2}", value.skills?.length ?? 0, value.tools.length, [...(value.skills || []), ...value.tools].join("、")) : t("未选择：只根据收到的信息和处理要求处理")}</small></summary>
             <CapabilityPicker capabilities={data.capabilities} value={value} onChange={patch} />
           </details>
         </div>
-      </div>
-      <div className="bkw-sec"><div><b>{t("先试运行")}</b><span>{t("用最近 30 条信息检验，保存前看效果")}</span></div>
+      </div>}
+      <div className="bkw-sec"><div><b>{t("先试运行")}</b><span>{t("用最近收到的或某段时间的邮件检验，保存前看效果")}</span></div>
         <div className="bkw-stack">
-          <div className="bkw-actions"><button type="button" className="bkw-btn" disabled={!value.name.trim() || value.instructions.trim().length < 5} onClick={() => void runTrial()}><Icon name="play" size={13} />{trialing ? t("正在试运行…") : t("试运行")}</button><small className="bkw-muted">{t("只预览匹配结果，不处理、不发送。")}</small></div>
+          <div className="bkw-trial-scope">
+            <div className="bkw-seg" role="radiogroup" aria-label={t("试运行范围")}>
+              <button type="button" role="radio" aria-checked={!trialRange} className={!trialRange ? "on" : ""} onClick={() => { setTrialRange(false); setTrial(undefined); }}>{t("最近收到的 30 条")}</button>
+              <button type="button" role="radio" aria-checked={trialRange} className={trialRange ? "on" : ""} disabled={(value.sources ?? ["email"]).every(kind => kind !== "email")} onClick={() => { setTrialRange(true); setTrial(undefined); }}>{t("指定时间段")}</button>
+            </div>
+            {trialRange && <span className="bkw-trial-range">
+              <label>{t("从")}<input type="datetime-local" value={trialSince} max={localInput(new Date())} onChange={event => { setTrialSince(event.target.value); setTrial(undefined); }} /></label>
+              <label>{t("到")}<input type="datetime-local" value={trialUntil} onChange={event => { setTrialUntil(event.target.value); setTrial(undefined); }} /></label>
+            </span>}
+          </div>
+          {trialRange && <small className="bkw-muted">{t("直接读取邮箱「{0}」中这段时间的邮件（最多 30 封，包括工作台开始处理之前的历史邮件），只判断，不建事项、不移动、不发送。", value.folder)}</small>}
+          <div className="bkw-actions"><button type="button" className="bkw-btn" disabled={!value.name.trim() || (!dispatch && value.instructions.trim().length < 5) || (trialRange && !trialSince)} onClick={() => void runTrial()}><Icon name="play" size={13} />{trialing ? t("正在试运行…") : t("试运行")}</button><small className="bkw-muted">{t("只预览匹配结果，不处理、不发送。")}</small></div>
           {trialError && <Alert tone="danger">{systemMessage(trialError)}</Alert>}
           {trial && <div className="bkw-trial">
             <strong>{t("命中 {0} 条 · 跳过 {1} 条", trial.items.filter(item => item.matched).length, trial.items.filter(item => !item.matched).length)}<small className="bkw-muted">{trial.by === "ai" ? t("含 AI 语义判断") : t("仅按条件判断")}</small></strong>

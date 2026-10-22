@@ -19,7 +19,7 @@ export type Task = {
   id: string; title: string; account: string; status: Status; from: string; replyTo?: string; subject: string; body: string;
   bodyHtml?: string; to?: string; cc?: string; mailDate?: string; mailSize?: number; receivedAt: string; updatedAt: string;
   ruleId?: string; ruleName?: string; summary?: string; informationGaps?: string; needsInfoKind?: "information" | "attachments";
-  outputKind?: "reply" | "report"; ruleUpdated?: boolean; canResolveSend?: boolean; error?: string; draftId?: string; draft?: Draft;
+  outputKind?: RuleOutput; dispatch?: { folder: string; uid?: number; at: string }; backfill?: boolean; ruleUpdated?: boolean; canResolveSend?: boolean; error?: string; draftId?: string; draft?: Draft;
   revision: number; history: { at: string; message: string }[]; attachments?: { filename: string; size: number }[];
   hasAttachments?: boolean; mailLoaded?: boolean; sessionId?: string;
   triage?: { state: "pending" | "done"; category?: Category; urgency?: "high" | "normal" | "low"; reason?: string; nextStep?: string; by?: string; archived?: boolean };
@@ -33,10 +33,11 @@ export type Task = {
 export type Rule = {
   id: string; name: string; enabled: boolean; priority: number; account: string; folder: string;
   match: { from: string; subject: string; hasAttachments: boolean; mode: "all" | "any" };
-  instructions: string; tools: string[]; skills?: string[]; output: "reply" | "report"; maxRetries: number;
+  instructions: string; tools: string[]; skills?: string[]; output: RuleOutput; maxRetries: number; dispatchFolder?: string;
   semantic?: string; exclude?: Category[]; autonomy?: Autonomy; sources?: SourceKind[]; revision?: number; matchMode?: MatchMode;
 };
 export type MatchMode = "ai" | "literal";
+export type RuleOutput = "reply" | "report" | "dispatch";
 export type Confidence = "high" | "medium" | "low";
 export type RuleExample = { id: string; match: boolean; text: string; at: string; taskId?: string };
 export type Capabilities = { tools: { name: string; description: string }[]; skills: { id: string; name: string; description: string }[] };

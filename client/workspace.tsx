@@ -209,7 +209,7 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
     {["queued", "running"].includes(task.status) && <div className="bkw-progress"><span className="bkw-spinner" aria-hidden="true" /><div><strong>{task.triage?.state === "pending" ? t("AI 正在分拣") : task.status === "running" ? t("正在准备处理结果") : t("任务已加入队列")}</strong><span>{t("你可以继续处理其他任务，结果会自动更新。")}</span></div></div>}
 
     {task.summary && (task.outputKind === "report" || !task.draft) && <section className="bkw-block bkw-report">
-      <h3>{task.outputKind === "report" ? t("分析报告") : t("处理摘要")}</h3>
+      <h3>{task.outputKind === "report" ? t("分析报告") : task.outputKind === "dispatch" ? t("分派结果") : t("处理摘要")}</h3>
       <div className="bkw-prose">{task.summary}</div>
       {task.informationGaps && task.status !== "review" && <div className="bkw-gaps"><strong>{t("待人工核实")}</strong><p>{task.informationGaps}</p><small>{t("以下事项不影响本次报告完成，可按需补充核实。")}</small></div>}
     </section>}

@@ -706,3 +706,6 @@ body[data-ds-dark-theme] .bkw-check-no { color: #1d1606; }
 .bkw-mail-form .bkw-spacer { flex: 1; }
 @media (max-width: 560px) { .bkw-mail-server { grid-template-columns: minmax(0, 1fr) 80px; } .bkw-mail-account { flex-wrap: wrap; } }
 .bkw-mail-preset { margin: -8px 0 0; font-size: 12px; color: var(--ink3); overflow-wrap: anywhere; }
+.bkw-trial-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.bkw-trial-range { display: flex; flex-wrap: wrap; gap: 10px; }
+.bkw-trial-range label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink2); }

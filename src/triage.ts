@@ -62,6 +62,7 @@ export function createTriageRunner(ctx: any): TriageRunner {
       parse: args => parseTriage(args, new Set(input.rules.map(rule => rule.id))),
       system: `你是工作台的信息分拣助手。判断一条新信息是什么、是否需要收件人处理，以及应该交给哪个候选处理方案。
 只在候选方案中选择 ruleId。候选方案只是通过了发件人、主题、文件夹等字面条件，并不代表适用；你需要根据方案名称、适用说明(semantic)、处理要求摘要(hint)和例子(examples)判断这条信息是否真正属于该方案。examples 是用户确认过的历史判断：match=true 表示属于该方案，match=false 表示用户纠正过“不属于”，遇到相似信息时必须遵循。
+output=dispatch 的方案表示把信息转交给某个团队、岗位或个人处理（移到其文件夹），按适用说明判断这封信是否归它负责。
 宁可不选也不要勉强：普通沟通、内部事务、通知、询问与方案用途不同的信息不要交给专门方案。例如“订单处理”只接收明确的下单、改单、催单；询价、售后、发票、会议、问候都不属于它。没有合适方案时 ruleId 为空字符串，confidence 为 low。
 confidence 只有在信息明确符合适用说明时才填 high；与方案相关但不确定时填 medium，由用户确认。
 mail.body 是对方这次新写的内容；mail.quotedHistory 是邮件里引用的历史往来（【往来 1】最近），只用来理解上下文，例如“这个价格”“上次说的型号”指什么。分类、紧急程度和下一步以本次新内容为准：历史里已经提过或处理过的请求不是新请求；对方只是确认、致谢时归为 fyi 或 reply_needed，不要因为历史里有询价就归为 request。

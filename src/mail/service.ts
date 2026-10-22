@@ -13,6 +13,7 @@ import { DraftStore, DraftError } from './draft-store.js'
 import { EmailDraftBackend } from './drafts.js'
 import { EmailPool, messageOf, redactCredentials, smtpAuthOf } from './mail-client.js'
 import type { EmailService } from '../types.js'
+import { splitQuoted } from '../quoted.js'
 
 /** What other plugins (e.g. contract agents) may do with mail through the workbench. Read-only by design. */
 export interface WorkbenchMailApi {
@@ -37,6 +38,9 @@ export function createEmailWorkbenchService(runtime: { getEffectiveSettings?(): 
     async folders(account, signal) { const result = await runtime.getPool().folders(account, false, signal); return { ...result, folders: result.folders.filter((folder: { selectable?: boolean }) => folder.selectable !== false) } },
     read: (account, folder, uid, signal) => runtime.getPool().readForWorkbench(account, folder, uid, signal),
     downloadAttachment: (account, folder, uid, index, workspaceHint, signal, expectedUidValidity) => runtime.getPool().downloadAttachment(account, folder, uid, index, workspaceHint, signal, expectedUidValidity),
+    move: (account, folder, uid, target, signal, expectedUidValidity) => moveMessage(runtime.getPool(), account, folder, uid, target, signal, expectedUidValidity),
+    window: (account, folder, since, signal) => mailWindow(runtime.getPool(), account, folder, since, signal),
+    listRange: (account, folder, since, until, limit, signal) => listRange(runtime.getPool(), account, folder, since, until, limit, signal),
     drafts: {
       async list(signal) { return (await drafts.action({ action: 'list' }, signal) as { drafts: unknown[] }).drafts },
       create: (input, signal) => drafts.create(input, signal),
@@ -57,6 +61,87 @@ export function createEmailWorkbenchService(runtime: { getEffectiveSettings?(): 
       },
     },
   }
+}
+
+/** Same rule as mail-client's structureHasAttachment: any node with an attachment disposition. */
+const hasAttachment = (node: any): boolean => !!node && typeof node === 'object' && (node.disposition === 'attachment' || (Array.isArray(node.childNodes) && node.childNodes.some(hasAttachment)))
+const uidValidityOf = (client: any): number => client.mailbox === false || !client.mailbox ? 0 : Number(client.mailbox.uidValidity ?? 0)
+
+/**
+ * Move one message for a dispatch workflow. The target folder is created when missing (`分派/华东销售`; `/` is
+ * converted to the server's hierarchy delimiter). Checks the source generation first, so a renumbered mailbox
+ * never moves the wrong mail. Returns the new location so the original can still be shown afterwards.
+ */
+export async function moveMessage(pool: EmailPool, account: string, folder: string, uid: number, target: string, signal?: AbortSignal, expectedUidValidity?: number): Promise<{ folder: string; uid?: number; uidValidity?: number }> {
+  return pool.withImap(account, folder, async (client: any) => {
+    if (expectedUidValidity && uidValidityOf(client) !== expectedUidValidity) throw new MailAccountError('邮箱文件夹已重新编号，无法确认是同一封邮件；请核对后手动移动。', 'mail-moved')
+    const found = await client.fetchOne(uid, { uid: true }, { uid: true })
+    signal?.throwIfAborted()
+    if (!found) throw new MailAccountError('原邮件已不在这个文件夹，可能已被移动或删除。', 'mail-missing')
+    const list: { path: string; delimiter?: string }[] = await client.list()
+    const delimiter = list.find(row => row.delimiter)?.delimiter || '/'
+    const path = target.split('/').map(part => part.trim()).filter(Boolean).join(delimiter)
+    if (!path) throw new MailAccountError('目标文件夹无效。')
+    if (path === folder) throw new MailAccountError('邮件已在目标文件夹中。')
+    if (!list.some(row => row.path === path)) { await client.mailboxCreate(path); signal?.throwIfAborted() }
+    const moved = await client.messageMove(String(uid), path, { uid: true })
+    signal?.throwIfAborted()
+    if (!moved) throw new MailAccountError(`移动到「${target}」失败：服务器拒绝了操作。`)
+    const newUid = moved.uidMap instanceof Map ? moved.uidMap.get(uid) : undefined
+    return { folder: path, ...(typeof newUid === 'number' ? { uid: newUid } : {}), ...(moved.uidValidity ? { uidValidity: Number(moved.uidValidity) } : {}) }
+  }, false, signal)
+}
+
+/** Messages in `folder` received at or after `since` (server receive time), and which of them were already answered. */
+export async function mailWindow(pool: EmailPool, account: string, folder: string, since: Date, signal?: AbortSignal) {
+  return pool.withImap(account, folder, async (client: any) => {
+    const uidValidity = uidValidityOf(client)
+    if (!uidValidity) throw new MailAccountError('邮箱服务器未返回 UIDVALIDITY，不能按时间处理历史邮件。')
+    // SEARCH SINCE has day granularity (server time zone): ask a day early, then filter on the exact receive time.
+    const day = new Date(since.getTime() - 86400000)
+    const found = await client.search({ since: day }, { uid: true })
+    signal?.throwIfAborted()
+    const uids = (Array.isArray(found) ? found : []).sort((a: number, b: number) => a - b)
+    const rows: { uid: number; at: number; answered: boolean }[] = []
+    for (let start = 0; start < uids.length; start += 500) {
+      const part = uids.slice(start, start + 500)
+      for (const message of await client.fetchAll(part, { uid: true, internalDate: true, flags: true }, { uid: true })) {
+        const at = message.internalDate ? new Date(message.internalDate).getTime() : NaN
+        rows.push({ uid: message.uid, at, answered: message.flags?.has('\\Answered') === true })
+      }
+      signal?.throwIfAborted()
+    }
+    const inside = rows.filter(row => row.at >= since.getTime()).sort((a, b) => a.uid - b.uid)
+    return { uidValidity, count: inside.length, ...(inside.length ? { firstUid: inside[0].uid, lastUid: inside.at(-1)!.uid } : {}), answered: inside.filter(row => row.answered).map(row => row.uid) }
+  }, true, signal)
+}
+
+/** Read-only sample of mail received in [since, until) for a trial run: envelope plus a short excerpt of the new text. */
+export async function listRange(pool: EmailPool, account: string, folder: string, since: Date, until: Date, limit: number, signal?: AbortSignal) {
+  const picked = await pool.withImap(account, folder, async (client: any) => {
+    const found = await client.search({ since: new Date(since.getTime() - 86400000), before: new Date(until.getTime() + 86400000) }, { uid: true })
+    signal?.throwIfAborted()
+    const uids = (Array.isArray(found) ? found : []).sort((a: number, b: number) => b - a)
+    const out: { uid: number; from: string; subject: string; date: string; hasAttachments: boolean }[] = []
+    for (let start = 0; start < uids.length && out.length < limit; start += 200) {
+      for (const message of (await client.fetchAll(uids.slice(start, start + 200), { uid: true, envelope: true, internalDate: true, bodyStructure: true }, { uid: true })).sort((a: any, b: any) => b.uid - a.uid)) {
+        const at = message.internalDate ? new Date(message.internalDate).getTime() : NaN
+        if (!(at >= since.getTime() && at < until.getTime())) continue
+        const sender = message.envelope?.from?.[0]
+        out.push({ uid: message.uid, from: sender ? (sender.name ? `${sender.name} <${sender.address}>` : sender.address || '') : '', subject: message.envelope?.subject || '', date: new Date(at).toISOString(), hasAttachments: hasAttachment(message.bodyStructure) })
+        if (out.length >= limit) break
+      }
+      signal?.throwIfAborted()
+    }
+    return out
+  }, true, signal)
+  const result = []
+  for (const item of picked) {
+    let excerpt = ''
+    try { const read = await pool.readForWorkbench(account, folder, item.uid, signal); excerpt = splitQuoted(String(read.text || '')).latest.slice(0, 300) } catch { if (signal?.aborted) throw signal.reason }
+    result.push({ ...item, excerpt })
+  }
+  return result
 }
 
 function fingerprint(settings: ResolvedEmailSettings): string {

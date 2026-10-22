@@ -19,6 +19,7 @@
 | `src/api.ts` | 页面调用的所有 action（snapshot、saveRule、previewSend、send、mailAccounts…） |
 | `src/store.ts` `src/types.ts` | `workbench-v1.json` 的校验、文件锁、原子写入；所有数据类型 |
 | `src/triage.ts` `src/rules.ts` | AI 分拣与方案匹配（`matchMode` ai/literal、`confidence`、学习例子 `ruleExamples`） |
+| 分派与补处理 | 方案 `output: 'dispatch'` + `dispatchFolder`：引擎 `dispatch()` 移动邮件（`src/mail/service.ts` 的 `moveMessage`），不跑 Agent；`state.backfills` 记录“从指定时间开始”的补处理，`task.backfill` 的邮件从不自动发送 |
 | `src/agent.ts` | 后台 Agent：提示词、结果工具 schema、工具白名单；审核类文字的语言由 `reviewLanguage()` 控制 |
 | `src/quoted.ts` | 把邮件拆成“本次新内容 + 历史引用” |
 | `src/mail/` | 内置邮件模块（移植自 dsh-email，见 `src/mail/NOTICE.md`）：`accounts.ts` 账号、`service.ts` 服务与连接池、`drafts.ts` 草稿 |
@@ -52,6 +53,7 @@ python -m unittest wechat/test_bridge.py wechat/test_wxread.py
 **数据兼容**
 - `workbench-v1.json` 保持 `version: 1`：新字段一律可选，并在 `src/store.ts` 里校验；旧版本插件要能读新数据。
 - 学习例子、界面语言等不应增加 `configRevision` 的数据放在 `rules` 之外。
+- 分派方案保存时若处理要求为空会自动填一句说明：旧版本要求处理要求非空，这样旧版本仍能读取（会把它当分析报告，不会发信）。
 
 **中英文**
 - 页面里的中文都要经过 `t("…")`，或放在全大写常量表里（`const LABELS = {...}`），并在 `client/en.json` 写英文；占位符 `{0}` 两边一致。
@@ -74,6 +76,7 @@ python -m unittest wechat/test_bridge.py wechat/test_wxread.py
 
 - 真实邮箱的 IMAP/SMTP 收发（内置邮件模块只用替身连接池测试过）。
 - 真实微信 4.x 的读取，以及 Windows CNG 解密路径。
+- 腾讯企业邮箱上的 IMAP 移动邮件、新建中文文件夹（分派），以及按时间检索（补处理、按时间段试运行）。
 - 模型对方案匹配“把握度”的实际校准。
 - 真实 DSH 中 `ctx.provide('workbenchMail')` 的注入，以及与旧 dsh-email 插件并存时的提示。
 

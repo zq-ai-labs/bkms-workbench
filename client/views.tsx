@@ -11,12 +11,13 @@ import { setSourceExpanded, useSourceLayout } from "./layout";
 const DAY = 864e5;
 const greeting = () => { const hour = new Date().getHours(); return hour < 11 ? t("早上好") : hour < 14 ? t("中午好") : hour < 18 ? t("下午好") : t("晚上好"); };
 const ACTIVITY: Record<string, { label: string; tone: "good" | "accent" | "muted" | "danger" | "warn" }> = {
-  archive: { label: "归档", tone: "muted" }, auto_send_scheduled: { label: "待发送", tone: "accent" }, auto_sent: { label: "已回复", tone: "good" },
+  dispatch: { label: "分派", tone: "accent" }, archive: { label: "归档", tone: "muted" }, auto_send_scheduled: { label: "待发送", tone: "accent" }, auto_sent: { label: "已回复", tone: "good" },
   auto_send_canceled: { label: "已撤回", tone: "muted" }, auto_send_blocked: { label: "未发送", tone: "danger" }, report: { label: "报告", tone: "good" },
   brief: { label: "简报", tone: "accent" }, weekly: { label: "周报", tone: "accent" }, topic: { label: "主题", tone: "accent" },
 };
 const activityText = (item: Activity): string => {
   switch (item.kind) {
+    case "dispatch": return t("分派到「{0}」：{1}", item.detail || "", item.title);
     case "archive": return t("归档：{0}", item.title);
     case "auto_send_scheduled": return t("已起草回复，等待自动发送：{0}", item.title);
     case "auto_sent": return t("自动回复：{0}", item.title);
@@ -154,7 +155,7 @@ export function DecideView({ selected }: { selected?: string }) {
   </div>;
 }
 
-const KINDS: [string, string, (item: Activity) => boolean][] = [["all", "全部", () => true], ["reply", "回复", item => item.kind.startsWith("auto_send") || item.kind === "auto_sent"], ["archive", "归档", item => item.kind === "archive"], ["report", "报告与简报", item => ["report", "brief", "weekly", "topic"].includes(item.kind)]];
+const KINDS: [string, string, (item: Activity) => boolean][] = [["all", "全部", () => true], ["reply", "回复", item => item.kind.startsWith("auto_send") || item.kind === "auto_sent"], ["dispatch", "分派", item => item.kind === "dispatch"], ["archive", "归档", item => item.kind === "archive"], ["report", "报告与简报", item => ["report", "brief", "weekly", "topic"].includes(item.kind)]];
 export function DoneView() {
   const { data, go } = useWorkbench();
   const [kind, setKind] = useState("all");
@@ -162,7 +163,7 @@ export function DoneView() {
   const items = data.activity.filter(filter).sort((a, b) => b.at.localeCompare(a.at));
   const days = items.reduce<[string, Activity[]][]>((acc, item) => { const key = new Date(item.at).toDateString(); const last = acc.at(-1); if (last && last[0] === key) last[1].push(item); else acc.push([key, [item]]); return acc; }, []);
   const week = data.activity.filter(item => Date.parse(item.at) >= Date.now() - 7 * DAY);
-  const countBy = (autonomy: string) => data.rules.filter(rule => (rule.autonomy || "draft") === autonomy).length;
+  const countBy = (autonomy: string) => data.rules.filter(rule => rule.output !== "dispatch" && (rule.autonomy || "draft") === autonomy).length;
   return <div className="bkw-split">
     <div className="bkw-split-main">
       <div className="bkw-toolbar">
@@ -184,7 +185,7 @@ export function DoneView() {
         <p className="bkw-card-lead">{t("AI 能自己做什么，由每个方案的自主级别决定。")}</p>
         <div className="bkw-kv-rows">
           <div><span>{t("AI 分拣 · 通知归档")}</span><Tag tone={data.defaults.triage ? "good" : "muted"}>{data.defaults.triage ? t("已开启") : t("已关闭")}</Tag></div>
-          {data.rules.map(rule => <div key={rule.id}><span>{rule.name}</span><Tag tone={rule.autonomy === "auto" ? "warn" : rule.autonomy === "low_risk" ? "accent" : "muted"}>{t(AUTONOMY_LABEL[rule.autonomy || "draft"])}</Tag></div>)}
+          {data.rules.map(rule => <div key={rule.id}><span>{rule.name}</span>{rule.output === "dispatch" ? <Tag tone="accent">{t("分派")}</Tag> : <Tag tone={rule.autonomy === "auto" ? "warn" : rule.autonomy === "low_risk" ? "accent" : "muted"}>{t(AUTONOMY_LABEL[rule.autonomy || "draft"])}</Tag>}</div>)}
         </div>
         <p className="bkw-footnote">{t("仅起草 {0} · 低风险自动 {1} · 全自动 {2}", countBy("draft"), countBy("low_risk"), countBy("auto"))}</p>
       </Section>

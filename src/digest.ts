@@ -133,10 +133,11 @@ export function topicTemplate(data: ReturnType<typeof topicData>, en: boolean): 
   }
 }
 
-export function trialData(state: State, rule: { id?: string; name: string; semantic?: string; instructions: string; exclude?: string[] }, taskIds?: string[]) {
+/** Trial-run input. `mails` replaces received items, e.g. history read straight from the mailbox for a chosen time range. */
+export function trialData(state: State, rule: { id?: string; name: string; semantic?: string; instructions: string; exclude?: string[] }, taskIds?: string[], mails?: { id: string; from: string; subject: string; excerpt: string }[]) {
   const pool = state.tasks.slice().sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)).filter(task => !taskIds || taskIds.includes(task.id)).slice(0, 30)
   const examples = (rule.id ? state.ruleExamples?.[rule.id] ?? [] : []).slice(-8).map(({ match, text }) => ({ match, text }))
-  return { rule: { name: rule.name, semantic: rule.semantic || '', hint: rule.instructions.slice(0, 600), exclude: rule.exclude, examples }, mails: pool.map(task => ({ id: task.id, from: task.from, subject: task.subject, category: task.triage?.category, excerpt: (task.summary || splitQuoted(task.body || '').latest).slice(0, 300) })) }
+  return { rule: { name: rule.name, semantic: rule.semantic || '', hint: rule.instructions.slice(0, 600), exclude: rule.exclude, examples }, mails: mails ? mails.slice(0, 30) : pool.map(task => ({ id: task.id, from: task.from, subject: task.subject, category: task.triage?.category, excerpt: (task.summary || splitQuoted(task.body || '').latest).slice(0, 300) })) }
 }
 
 export const activityEntry = (input: Omit<Activity, 'id' | 'at'> & { at?: string }, id: string): Activity => ({ ...input, id, at: input.at ?? new Date().toISOString() })

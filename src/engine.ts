@@ -29,6 +29,7 @@ const EXAMPLES_IN_PROMPT = 8
 export function autoSendDecision(rule: Rule, task: Task, output: AgentOutput, checks: Check[], prefs: State['senders']): { ok: true } | { ok: false; reason: string } {
   const autonomy = rule.autonomy ?? 'draft'
   if (autonomy === 'draft' || rule.output !== 'reply') return { ok: false, reason: '' }
+  if (task.backfill) return { ok: false, reason: '历史邮件补处理不会自动发送，转为人工审核。' }
   const text = output.text || '', to = (task.replyTo || '').trim().toLowerCase()
   if (output.needsInfo || output.informationGaps?.trim() || checks.length) return { ok: false, reason: '存在待核实事项，转为人工审核。' }
   if (!to || to.includes(',') || !/^[\w.+-]+@[\w-]+(\.[\w-]+)+$/.test(to)) return { ok: false, reason: '回复对象不是单一邮箱地址，转为人工审核。' }
@@ -119,17 +120,25 @@ export class Engine {
     const value = error instanceof Error ? error.message : '处理失败，请查看任务记录。'
     return value.replace(/(?:Bearer\s+)[^\s]+/gi, 'Bearer [隐藏]').replace(/((?:password|token|api.?key|authorization)\s*[=:]\s*)[^\s,;]+/gi, '$1[隐藏]').slice(0, 1200)
   }
+  /** Where the original mail is now: after a dispatch it lives in the target folder. */
+  location(task: Task): { account: string; folder: string; uid: number; uidValidity?: number } {
+    const moved = task.dispatch
+    if (moved?.uid) return { account: task.source.account, folder: moved.folder, uid: moved.uid, uidValidity: moved.uidValidity }
+    return task.source
+  }
   async readOriginal(task: Task, signal: AbortSignal): Promise<any> {
-    const email = this.email(), source = task.source
-    await email.scan({ account: source.account, folder: source.folder, cursor: { uidValidity: source.uidValidity, lastUid: source.uid }, limit: 1 }, signal)
+    const email = this.email(), source = this.location(task)
+    if (task.dispatch && !task.dispatch.uid) throw new WorkbenchError(`原邮件已分派到「${task.dispatch.folder}」，请在该文件夹中查看。`, 'dispatched', 409)
+    if (source.uidValidity) await email.scan({ account: source.account, folder: source.folder, cursor: { uidValidity: source.uidValidity, lastUid: source.uid }, limit: 1 }, signal)
     const read = await email.read(source.account, source.folder, source.uid, signal)
-    if (read.uidValidity !== undefined && read.uidValidity !== source.uidValidity) throw new WorkbenchError('邮箱邮件编号已变化，停止处理以避免读取其他邮件。', 'email-cursor-reset', 409)
+    if (source.uidValidity && read.uidValidity !== undefined && read.uidValidity !== source.uidValidity) throw new WorkbenchError('邮箱邮件编号已变化，停止处理以避免读取其他邮件。', 'email-cursor-reset', 409)
     return read
   }
   async attachment(task: Task, index: number, signal: AbortSignal): Promise<{ path: string; filename: string }> {
     const workspace = join(this.store.root, 'tasks', task.id)
     await mkdir(workspace, { recursive: true, mode: 0o700 })
-    const result = await this.email().downloadAttachment(task.account, task.source.folder, task.source.uid, index, workspace, signal, task.source.uidValidity)
+    const at = this.location(task)
+    const result = await this.email().downloadAttachment(task.account, at.folder, at.uid, index, workspace, signal, at.uidValidity)
     const maximum = 20 * 1024 * 1024
     const sourceStat = await stat(result.path)
     if (!sourceStat.isFile()) throw new WorkbenchError('附件来源不是普通文件。')
@@ -170,13 +179,17 @@ export class Engine {
             if (batch.reset) throw new WorkbenchError('邮箱 UIDVALIDITY 已改变，请在确认邮箱后重建基线。', 'email-cursor-reset', 409)
             added += await this.store.mutate(doc => {
               if (JSON.stringify(doc.cursors[key]) !== JSON.stringify(before)) return 0
-              let count = 0
+              let count = 0, skipped = 0
               const triage = this.triageOn(doc)
+              // History processed from a chosen start time: marked, never auto-sent; mail already answered then is skipped.
+              const backfill = doc.backfills?.[key], inBackfill = (uid: number) => !!backfill && backfill.uidValidity === batch.cursor.uidValidity && uid <= backfill.untilUid
               for (const mail of batch.messages) {
+                if (inBackfill(mail.uid) && backfill!.skip.includes(mail.uid)) { skipped++; continue }
                 if (doc.tasks.some(t => t.source.account === source.account && t.source.folder === source.folder && t.source.uidValidity === batch.cursor.uidValidity && t.source.uid === mail.uid)) continue
                 const from = readableFrom(mail.from), meta = { ...source, from, subject: mail.subject || '', hasAttachments: !!mail.hasAttachments }
                 const timestamp = now(), task: Task = { id: randomUUID(), revision: 1, title: mail.subject || '无主题邮件', account: source.account, status: 'queued', from, subject: mail.subject || '', body: '', receivedAt: mail.date || timestamp, updatedAt: timestamp, source: { ...source, uid: mail.uid, uidValidity: batch.cursor.uidValidity }, attachments: [], history: [], attempts: 0 }
                 task.hasAttachments = !!mail.hasAttachments
+                if (inBackfill(mail.uid)) { task.backfill = true; task.history.push({ at: timestamp, message: '历史邮件补处理：只生成草稿，不会自动发送。' }) }
                 if (triage) { task.triage = { state: 'pending' }; task.history.push({ at: timestamp, message: '等待 AI 分拣。' }) }
                 else {
                   const rule = chooseRule(doc.rules, meta)
@@ -187,6 +200,12 @@ export class Engine {
                 doc.tasks.push(task); count++
               }
               doc.cursors[key] = batch.cursor
+              if (skipped) log(doc, `${source.account} / ${source.folder} 补处理时跳过 ${skipped} 封已回复的邮件。`)
+              if (backfill && (backfill.uidValidity !== batch.cursor.uidValidity || batch.cursor.lastUid >= backfill.untilUid)) {
+                delete doc.backfills![key]
+                if (!Object.keys(doc.backfills!).length) delete doc.backfills
+                log(doc, `${source.account} / ${source.folder} 历史邮件已全部收取，之后按新邮件处理。`)
+              }
               if (batch.firstRun) log(doc, `${source.account} / ${source.folder} 已建立基线，后续新增邮件开始处理。`)
               if (count) log(doc, `${source.account} / ${source.folder} 接收 ${count} 封新邮件。`)
               return count
@@ -341,6 +360,24 @@ export class Engine {
       if (status === 'completed') state.activity = [...(state.activity || []), activityEntry({ kind: 'report', title: item.title, detail: item.ruleName, taskId: item.id, ruleName: item.ruleName, source: 'wechat' }, randomUUID())]
     })
   }
+  /** A dispatch workflow hands the mail to another team: move it to the target folder. No agent runs, nothing is sent. */
+  private async dispatch(task: Task, signal: AbortSignal): Promise<void> {
+    const rule = task.rule!, target = rule.dispatchFolder
+    if (!target) throw new WorkbenchError('分派方案缺少目标文件夹。')
+    const email = this.email()
+    if (!email.move) throw new WorkbenchError('当前邮件服务不支持移动邮件。', 'provider', 503)
+    // Already where it should be (e.g. reprocessed): nothing to move. Re-dispatched to another team: move from where it is now.
+    const here = task.dispatch
+    if (here && !here.uid && here.folder !== target) throw new WorkbenchError(`邮件已在「${here.folder}」，服务器没有返回它的新编号，无法再次移动；请在邮箱中手动移到「${target}」。`)
+    const from = this.location(task)
+    const moved = here && [target, target.split('/').join('.')].includes(here.folder) ? here : { ...(await email.move(task.account, from.folder, from.uid, target, signal, from.uidValidity)), at: now() }
+    await this.store.mutate(state => {
+      const item = findTask(state, task.id)
+      item.dispatch = moved; item.status = 'completed'; item.summary = `已分派到「${target}」。`
+      touch(item, `已移到文件夹「${target}」，由该文件夹的负责人处理。`); log(state, `邮件已分派到「${target}」。`, item.id)
+      state.activity = [...(state.activity || []), activityEntry({ kind: 'dispatch', title: item.subject || item.title, detail: target, taskId: item.id, ruleName: item.ruleName, source: 'email' }, randomUUID())]
+    })
+  }
   /** Decide what the message is and which workflow, if any, should handle it. */
   private async runTriage(task: Task, signal: AbortSignal): Promise<void> {
     const wechat = task.source.kind === 'wechat'
@@ -406,7 +443,7 @@ export class Engine {
       const agentReady = this.agent.available()
       task = await this.store.mutate(state => {
         // Triage needs no workflow agent; preparation does. Pick accordingly so triage keeps working without a preparation model.
-        const item = state.tasks.find(t => t.status === 'queued' && (!t.nextAttemptAt || t.nextAttemptAt <= now()) && (t.triage?.state === 'pending' || agentReady) && (t.source.kind === 'wechat' || emailReady))
+        const item = state.tasks.find(t => t.status === 'queued' && (!t.nextAttemptAt || t.nextAttemptAt <= now()) && (t.triage?.state === 'pending' || agentReady || t.rule?.output === 'dispatch') && (t.source.kind === 'wechat' || emailReady))
         if (!item) return undefined
         item.status = 'running'; item.attempts++; item.prepareKey ??= randomUUID(); delete item.error
         touch(item, item.triage?.state === 'pending' ? '开始读取邮件并分拣。' : '开始读取资料并调用 DSH。'); log(state, '任务开始处理。', item.id)
@@ -416,6 +453,7 @@ export class Engine {
       if (task.triage?.state === 'pending') { await this.runTriage(task, signal); this.error = undefined; return }
       if (!task.rule) throw new WorkbenchError('任务缺少规则快照。')
       if (task.source.kind === 'wechat') { await this.prepareWechat(task, signal); this.error = undefined; return }
+      if (task.rule.output === 'dispatch') { await this.dispatch(task, signal); this.error = undefined; return }
       const email = this.email(), read = await this.loadForProcessing(task, signal)
       const workspace = join(this.store.root, 'tasks', task.id)
       await mkdir(workspace, { recursive: true, mode: 0o700 })
