@@ -4,6 +4,8 @@ export type Preferences = {
   stateRevision?: number;
   settings: { enabled: boolean; pollSeconds: number; showWorkbench?: boolean; notifyNewTodo?: boolean; hiddenViews?: ("today" | "meetings" | "topics")[] };
   attention: Attention[];
+  /** Installed channels, and channels that need an upgrade. */
+  channelInfo?: import("./lib").ChannelInfo[]; rejectedChannels?: import("./lib").RejectedChannel[];
 };
 
 /** Establish a baseline on connection or enabling; only subsequent arrivals alert. */

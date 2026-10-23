@@ -16,7 +16,8 @@ const module = { exports: {} }
 vm.runInNewContext(bundle.outputFiles[0].text, { module, exports: module.exports, require })
 const i18n = module.exports
 
-const clientFiles = readdirSync(new URL('../client/', import.meta.url)).filter(name => /\.tsx?$/.test(name) && !name.endsWith('.d.ts') && name !== 'i18n.ts')
+// Channel parts in client/channels/ are checked like the rest of the page.
+const clientFiles = readdirSync(new URL('../client/', import.meta.url), { recursive: true }).map(name => String(name).replaceAll('\\', '/')).filter(name => /\.tsx?$/.test(name) && !name.endsWith('.d.ts') && name !== 'i18n.ts')
 test('every workbench UI label has English text and matching placeholders', () => {
   const placeholders = text => (text.match(/\{\d+\}/g) || []).sort()
   for (const [key, value] of Object.entries(en)) {
@@ -26,7 +27,7 @@ test('every workbench UI label has English text and matching placeholders', () =
     // System messages are recognized by pattern: a text that is only placeholders would match every message.
     assert.doesNotMatch(value, /^\s*(\{\d+\}\s*)+$/, `${key}: English text is only placeholders`)
   }
-  assert.ok(clientFiles.includes('index.tsx') && clientFiles.length > 5)
+  assert.ok(clientFiles.includes('index.tsx') && clientFiles.includes('channels/wechat/index.tsx') && clientFiles.length > 5)
   for (const file of clientFiles) check(file)
 })
 function check(file) {

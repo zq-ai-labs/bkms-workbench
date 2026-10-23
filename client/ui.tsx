@@ -1,7 +1,8 @@
 import * as React from "react";
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { t } from "./i18n";
-import { SOURCE, statusLabel, statusTone, type SourceKind, type Task } from "./lib";
+import { sourceName, statusLabel, statusTone, type SourceKind, type Task } from "./lib";
+import { useWorkbench } from "./context";
 
 const ICONS: Record<string, React.ReactNode> = {
   inbox: <><path d="M4 4h16v16H4z" /><path d="M4 13h5l2 3h2l2-3h5" /></>,
@@ -52,7 +53,7 @@ export function StatusTag({ task, label }: { task: Pick<Task, "status" | "triage
 export function Tag({ tone = "muted", children }: { tone?: "warn" | "good" | "danger" | "accent" | "muted"; children: React.ReactNode }) {
   return <span className={`bkw-tag ${tone}`}>{children}</span>;
 }
-export function SourceTag({ kind }: { kind: SourceKind }) { return <span className="bkw-src">{t(SOURCE[kind])}</span>; }
+export function SourceTag({ kind }: { kind: SourceKind }) { const { data } = useWorkbench(); return <span className="bkw-src">{sourceName(kind, data.channelInfo)}</span>; }
 export function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
   return <label className="bkw-field"><span>{label}</span>{children}{hint && <small>{hint}</small>}</label>;
 }

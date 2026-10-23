@@ -1,9 +1,23 @@
 import * as React from "react";
 import { useEffect, useMemo, useState } from "react";
-import { systemMessage, t } from "./i18n";
-import { useWorkbench } from "./context";
-import { api, errorMessage, fullDate, statusLabel, time, when, type Task, type WechatChat, type WechatList, type WechatMessage, type WechatSettings } from "./lib";
-import { Alert, Empty, Icon, Modal, StatusTag, Switch, Tag } from "./ui";
+import { systemMessage, t } from "../../i18n";
+import { api, errorMessage, fullDate, statusLabel, time, when, type Task } from "../../lib";
+import { Alert, Empty, Icon, Modal, StatusTag, Switch, Tag } from "../../ui";
+import { SETTINGS_PAGE_SLOT, SLOTS, type ConversationsProps, type SettingsCardProps, type SourcePartProps, type TaskPartProps } from "../../slots";
+
+/**
+ * The WeChat channel's parts of the workbench page, registered into the slots the workbench declares
+ * (client/slots.tsx). Read-only: nothing here sends a message or operates WeChat.
+ */
+export type WechatMessage = { seq: number; at: string; sender: string; senderName: string; self: boolean; type: string; text: string; quote?: { sender: string; text: string }; mentionsMe?: boolean };
+export type WechatList = { mode: "allow" | "block"; list: string[] };
+export type WechatSettings = { enabled: boolean; python?: string; library?: string; people: WechatList; groups: WechatList & { scope: "mention" | "all" }; quietMinutes?: number; names?: Record<string, string> };
+export type WechatChat = { id: string; name: string; kind: "person" | "group"; lastAt?: string };
+/** One task's messages, kept with the task as `channelData`. */
+type WechatSegment = { chat: string; chatName: string; group: boolean; messages: WechatMessage[]; fromSeq: number; toSeq: number; mentioned?: boolean };
+/** What the server shows the page for this channel (`snapshot.channels.wechat`). */
+type WechatPage = { settings: WechatSettings & { quietMinutes: number }; pending: number; watching: number };
+const segmentOf = (task: Task) => task.source?.kind === "wechat" ? task.channelData as WechatSegment | undefined : undefined;
 
 export const DEFAULT_WECHAT: WechatSettings = { enabled: false, people: { mode: "allow", list: [] }, groups: { mode: "allow", list: [], scope: "mention" } };
 const SYSTEM_TYPE = "系统消息";
@@ -62,8 +76,9 @@ export function Bubbles({ messages, group, highlight, after }: { messages: Wecha
 }
 
 /** The messages that make up one WeChat task. */
-export function SegmentConversation({ task }: { task: Task }) {
-  const segment = task.wechat!;
+export function SegmentConversation({ task }: TaskPartProps) {
+  const segment = segmentOf(task);
+  if (!segment) return null;
   return <section className="bkw-block bkw-chat-block" aria-label={t("对话")}>
     <h3>{segment.group ? t("群聊 · {0}", segment.chatName) : t("与 {0} 的对话", segment.chatName)}<small>{t("{0} 条消息", segment.messages.length)}</small></h3>
     <Bubbles messages={segment.messages} group={segment.group} highlight={message => !!message.mentionsMe} />
@@ -71,25 +86,24 @@ export function SegmentConversation({ task }: { task: Task }) {
 }
 
 /** Full chat history of an allowed conversation, read page by page, with the tasks found in it marked inline. */
-export function ChatHistory({ chat, group, current }: { chat: string; group: boolean; current?: string }) {
-  const { data, go } = useWorkbench();
+export function ChatHistory({ chat, group, current, tasks: all, open }: { chat: string; group: boolean; current?: string; tasks: Task[]; open(taskId: string): void }) {
   const [pages, setPages] = useState(1), [state, setState] = useState(() => historyCache.get(chat)), [error, setError] = useState(""), [loading, setLoading] = useState(false);
-  const tasks = useMemo(() => data.tasks.filter(task => task.wechat?.chat === chat), [data.tasks, chat]);
+  const tasks = useMemo(() => all.filter(task => segmentOf(task)?.chat === chat), [all, chat]);
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true); setError("");
     api<{ messages: WechatMessage[]; more: boolean }>("wechatHistory", { chat, offset: 0, limit: 50 * pages }, controller.signal)
       .then(value => { if (pages === 1) remember(chat, value); setState(value); setError(""); }).catch(failure => { if (!controller.signal.aborted) setError(errorMessage(failure)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [chat, pages, data.tasks.length]);
+  }, [chat, pages, all.length]);
   if (!state) return error ? <Alert tone="danger">{systemMessage(error)}</Alert> : <p className="bkw-muted">{t("正在读取聊天记录…")}</p>;
   return <div className="bkw-history">
     {error && <Alert tone="warn">{systemMessage(error)}</Alert>}
     {state.more && <button type="button" className="bkw-btn small ghost bkw-history-more" disabled={loading} onClick={() => setPages(pages + 1)}>{loading ? t("读取中…") : t("加载更早的消息")}</button>}
     {!state.messages.length && <p className="bkw-muted">{t("这个会话还没有消息。")}</p>}
     <Bubbles messages={state.messages} group={group}
-      highlight={message => tasks.some(task => task.id === current && message.seq >= task.wechat!.fromSeq && message.seq <= task.wechat!.toSeq)}
-      after={message => tasks.filter(task => task.wechat!.toSeq === message.seq).map(task => <button key={task.id} type="button" className={`bkw-chat-marker ${task.id === current ? "on" : ""}`} onClick={() => go({ view: "items", task: task.id })}>
+      highlight={message => tasks.some(task => task.id === current && message.seq >= segmentOf(task)!.fromSeq && message.seq <= segmentOf(task)!.toSeq)}
+      after={message => tasks.filter(task => segmentOf(task)!.toSeq === message.seq).map(task => <button key={task.id} type="button" className={`bkw-chat-marker ${task.id === current ? "on" : ""}`} onClick={() => open(task.id)}>
         <span className="bkw-chat-marker-icon"><Icon name="sparkle" size={14} /></span>
         <span><strong>{t("事项 · {0}", task.title)}</strong><small>{task.triage?.nextStep || task.summary?.split("\n")[0] || statusLabel(task)}</small></span>
         <StatusTag task={task} />
@@ -98,25 +112,23 @@ export function ChatHistory({ chat, group, current }: { chat: string; group: boo
 }
 
 /** Conversations view: read allowed chats like WeChat, with AI findings inline. */
-export function ChatsView() {
-  const { data, go, perform, refresh, notify } = useWorkbench();
-  const settings = data.wechat?.settings;
-  const { chats, error } = useWechatChats(!!settings?.enabled, data.revision);
+export function ChatsView({ page, tasks: all, revision, open: openTask, openSettings, saveSettings }: ConversationsProps) {
+  const settings = (page as WechatPage | undefined)?.settings;
+  const { chats, error } = useWechatChats(!!settings?.enabled, revision);
   const [selected, setSelected] = useState<string>(), [search, setSearch] = useState("");
-  if (!settings?.enabled) return <div className="bkw-pad"><Empty icon="chat" title={t("微信读取未开启")} text={t("在设置中开启微信读取，并选择要处理的联系人和群聊。工作台只读，不会代你发送。")}><button type="button" className="bkw-btn primary" onClick={() => go({ view: "settings" })}>{t("前往设置")}</button></Empty></div>;
+  if (!settings?.enabled) return <div className="bkw-pad"><Empty icon="chat" title={t("微信读取未开启")} text={t("在设置中开启微信读取，并选择要处理的联系人和群聊。工作台只读，不会代你发送。")}><button type="button" className="bkw-btn primary" onClick={openSettings}>{t("前往设置")}</button></Empty></div>;
   const visible = (chats || []).filter(chat => chatAllowed(settings, chat.id));
   // Listed chats that are not among recent sessions still appear.
   for (const id of [...(settings.people.mode === "allow" ? settings.people.list : []), ...(settings.groups.mode === "allow" ? settings.groups.list : [])]) if (!visible.some(chat => chat.id === id)) visible.push({ id, name: settings.names?.[id] || id, kind: isGroup(id) ? "group" : "person" });
   const list = visible.filter(chat => chat.name.toLowerCase().includes(search.trim().toLowerCase()));
   const current = list.find(chat => chat.id === selected) || list[0];
-  const tasks = (id: string) => data.tasks.filter(task => task.wechat?.chat === id);
+  const tasks = (id: string) => all.filter(task => segmentOf(task)?.chat === id);
   const open = (id: string) => tasks(id).filter(task => task.attention).length;
-  const stop = (chat: WechatChat) => perform("wechatStop", async () => {
+  const stop = (chat: WechatChat) => {
     const key = chat.kind === "group" ? "groups" : "people", target = settings[key];
-    const next = { ...settings, [key]: { ...target, list: target.mode === "allow" ? target.list.filter(id => id !== chat.id) : [...target.list, chat.id] }, names: { ...(settings.names || {}), [chat.id]: chat.name } };
-    await api("saveSettings", { revision: data.revision, settings: { wechat: next } });
-    await refresh(); notify(t("已停止处理“{0}”", chat.name));
-  });
+    const next: WechatSettings = { ...settings, [key]: { ...target, list: target.mode === "allow" ? target.list.filter(id => id !== chat.id) : [...target.list, chat.id] }, names: { ...(settings.names || {}), [chat.id]: chat.name } };
+    void saveSettings(next, t("已停止处理“{0}”", chat.name));
+  };
   return <div className="bkw-chats">
     <section className="bkw-chat-list" aria-label={t("会话列表")}>
       <label className="bkw-search"><Icon name="search" size={15} /><input placeholder={t("搜索会话")} aria-label={t("搜索会话")} value={search} onChange={event => setSearch(event.target.value)} /></label>
@@ -133,16 +145,16 @@ export function ChatsView() {
     <section className="bkw-chat-main" aria-label={t("聊天记录")}>
       {current ? <>
         <header className="bkw-chat-head"><strong>{current.name}</strong><small>{current.kind === "group" ? t("微信群聊") : t("微信私聊")} · {t("只读")}</small></header>
-        <div className="bkw-chat-scroll"><ChatHistory key={current.id} chat={current.id} group={current.kind === "group"} /></div>
+        <div className="bkw-chat-scroll"><ChatHistory key={current.id} chat={current.id} group={current.kind === "group"} tasks={all} open={openTask} /></div>
       </> : <Empty icon="chat" title={t("选择一个会话")} text={t("左侧列出名单允许读取的联系人和群聊。")} />}
     </section>
     {current && <aside className="bkw-chat-side" aria-label={t("会话信息")}>
       <div className="bkw-chat-profile"><span className="bkw-avatar large" style={{ background: avatarColor(current.id) }} aria-hidden="true">{current.kind === "group" ? t("群") : initial(current.name)}</span><div><strong>{current.name}</strong><small>{current.kind === "group" ? (settings.groups.scope === "mention" ? t("群聊 · 只处理 @我 的消息") : t("群聊 · 处理所有消息")) : t("私聊 · 处理所有消息")}</small></div></div>
       <h4>{t("本会话事项")}</h4>
-      {tasks(current.id).length ? tasks(current.id).map(task => <button type="button" key={task.id} className="bkw-chat-task" onClick={() => go({ view: "items", task: task.id })}><span>{task.title}</span><StatusTag task={task} /></button>) : <p className="bkw-muted">{t("还没有从这个会话识别出事项。")}</p>}
+      {tasks(current.id).length ? tasks(current.id).map(task => <button type="button" key={task.id} className="bkw-chat-task" onClick={() => openTask(task.id)}><span>{task.title}</span><StatusTag task={task} /></button>) : <p className="bkw-muted">{t("还没有从这个会话识别出事项。")}</p>}
       <h4>{t("处理范围")}</h4>
       <p className="bkw-muted">{t("对方停顿 {0} 分钟后，连发的几条消息算作一件事处理。你已在微信里回复过的不会再提醒。", settings.quietMinutes)}</p>
-      <div className="bkw-actions"><button type="button" className="bkw-btn small" onClick={() => stop(current)}>{t("不再处理这个会话")}</button><button type="button" className="bkw-btn small ghost" onClick={() => go({ view: "settings" })}>{t("名单设置")}</button></div>
+      <div className="bkw-actions"><button type="button" className="bkw-btn small" onClick={() => stop(current)}>{t("不再处理这个会话")}</button><button type="button" className="bkw-btn small ghost" onClick={openSettings}>{t("名单设置")}</button></div>
     </aside>}
   </div>;
 }
@@ -152,8 +164,8 @@ const EMPTY_HINT: Record<string, string> = { "people-allow": "名单为空：不
 const MODE_HINT: Record<string, string> = { allow: "白名单：只处理名单里的会话", block: "黑名单：处理名单以外的全部会话" };
 
 /** WeChat source settings: enable, allow/block lists for people and groups, timing and local cache. */
-export function WechatSettingsCard({ value, disabled, save }: { value?: WechatSettings; disabled: boolean; save: (wechat: WechatSettings, message?: string) => Promise<void> }) {
-  const settings: WechatSettings = value ? { ...DEFAULT_WECHAT, ...value } : DEFAULT_WECHAT;
+export function WechatSettingsCard({ value, disabled, save }: SettingsCardProps) {
+  const settings: WechatSettings = value ? { ...DEFAULT_WECHAT, ...(value as WechatSettings) } : DEFAULT_WECHAT;
   const [status, setStatus] = useState<{ ready: boolean; name?: string; library?: string; error?: string }>(), [checking, setChecking] = useState(false);
   const [picker, setPicker] = useState<ListKey>(), [clearing, setClearing] = useState(false), [python, setPython] = useState(settings.python || ""), [library, setLibrary] = useState(settings.library || "");
   const check = (signal?: AbortSignal) => { setChecking(true); return api<typeof status>("wechatStatus", {}, signal).then(setStatus).catch(failure => { if (!signal?.aborted) setStatus({ ready: false, error: errorMessage(failure) }); }).finally(() => setChecking(false)); };
@@ -228,4 +240,29 @@ function ChatPicker({ kind, existing, onClose, onAdd }: { kind: ListKey; existin
     </div>
     <div className="bkw-dialog-actions"><button type="button" className="bkw-btn" onClick={onClose}>{t("取消")}</button><button type="button" className="bkw-btn primary" disabled={!chosen.length} onClick={() => onAdd(chosen)}>{t("添加 {0} 个", chosen.length)}</button></div>
   </Modal>;
+}
+
+/** Header tag for a segment that mentions you. */
+function WechatTags({ task }: TaskPartProps) {
+  return segmentOf(task)?.mentioned ? <Tag tone="accent">{t("@我")}</Tag> : null;
+}
+/** Header line: the group or the person the conversation is with. */
+function WechatCounterpart({ task }: TaskPartProps) {
+  const segment = segmentOf(task);
+  return <>{segment?.group ? t("群聊 · {0}", segment.chatName) : t("私聊 · {0}", segment?.chatName || task.subject)}</>;
+}
+/** The source pane: the whole conversation around the task. */
+function WechatSource({ task, tasks, open }: SourcePartProps) {
+  const segment = segmentOf(task);
+  return segment ? <ChatHistory key={segment.chat} chat={segment.chat} group={segment.group} current={task.id} tasks={tasks} open={open} /> : null;
+}
+
+interface SlotsHost { slots: { inject(name: string, callback: () => unknown): unknown; register(meta: Record<string, unknown>, component: React.ComponentType<any>): () => void } }
+/** Fill the workbench's channel slots for WeChat. Each part waits until the workbench has declared its slot. */
+export function registerWechatParts(ctx: SlotsHost): void {
+  const parts: [string, React.ComponentType<any>][] = [
+    [SLOTS.tags, WechatTags], [SLOTS.counterpart, WechatCounterpart], [SLOTS.body, SegmentConversation], [SLOTS.source, WechatSource],
+    [SLOTS.conversations, ChatsView], [SLOTS.settings, WechatSettingsCard], [SETTINGS_PAGE_SLOT, WechatSettingsCard],
+  ];
+  for (const [name, component] of parts) ctx.slots.inject(name, () => ctx.slots.register({ name, key: "wechat" }, component));
 }

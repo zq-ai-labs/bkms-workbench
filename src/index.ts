@@ -8,7 +8,9 @@ import { createRuleAssistant } from './rule-assistant.js'
 import { createInstructionOptimizer } from './instruction-optimizer.js'
 import { createTriageRunner } from './triage.js'
 import { createWriter } from './writer.js'
-import { WechatConnector } from './wechat.js'
+import { ChannelRegistry } from './channels/registry.js'
+import { WechatConnector } from './channels/wechat/reader.js'
+import { createWechatChannel } from './channels/wechat/channel.js'
 import { MailService } from './mail/service.js'
 import { EMAIL_DRAFT_ROUTE } from './mail/drafts.js'
 
@@ -28,9 +30,10 @@ export function apply(ctx: any): void {
   })
   // Read-only mail access for other plugins (e.g. contract agents). Sending stays in the workbench review.
   if (typeof ctx.provide === 'function') ctx.provide('workbenchMail', mail.external())
-  // WeChat is read through a local read-only bridge process, started only when enabled in settings.
-  const wechat = new WechatConnector(join(store.root, 'wechat-cache'))
-  const engine = new Engine(store, () => mail.configured() ? email : undefined, createAgentRunner(ctx, join(store.root, 'tasks')), () => getCapabilities(ctx), createTriageRunner(ctx), createWriter(ctx), wechat)
+  // Channels besides mail. WeChat is read through a local read-only bridge process, started only when enabled in settings.
+  const channels = new ChannelRegistry()
+  channels.register(createWechatChannel(new WechatConnector(join(store.root, 'wechat-cache'))))
+  const engine = new Engine(store, () => mail.configured() ? email : undefined, createAgentRunner(ctx, join(store.root, 'tasks')), () => getCapabilities(ctx), createTriageRunner(ctx), createWriter(ctx), channels)
   const api = new WorkbenchApi(engine, createRuleAssistant(ctx), createInstructionOptimizer(ctx), mail)
   // Drafts written by the old dsh-email plugin are copied in once, so earlier tasks keep their draft.
   const legacyDrafts = mail.importLegacyDrafts(join(home, 'data', 'dsh-email', 'drafts-v1.json')).then(count => { if (count) ctx.logger?.info?.('bkms-workbench: imported %d drafts from dsh-email', count) }, () => {})
@@ -43,7 +46,7 @@ export function apply(ctx: any): void {
     await ready.catch(() => {})
     await engine.stop()
     mail.close()
-    wechat.close()
+    await channels.close()
   }, 'bkms-workbench: background worker')
   const draftRoute = (request: Request) => ready.then(() => mail.drafts.fetch(request), error => new Response(JSON.stringify({ ok: false, error: { code: 'unavailable', message: engine.safe(error) } }), { status: 503, headers: { 'content-type': 'application/json' } }))
   // Draft attachments: upload from the review panel, download from the send preview.

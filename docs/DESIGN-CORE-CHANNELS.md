@@ -426,6 +426,13 @@ ctx.slots.inject('bkms-workbench.channel.settings', () =>
 - **非组件逻辑放到后端**：列表标题、对方名称（现 `lib.ts` 的 `taskTitle` / `counterpart`）由渠道在后端算好放进快照，前端不再按渠道判断；方案来源是否可选（现 `plans.tsx:155`）看快照里的渠道状态。
 - **渠道前端缺席**（插件未装，或某个键没人注册）：`keyed` 插槽对没人认领的键什么也不渲染，工作台在该位置显示通用内容（标题、对方、正文），只保留“忽略、重新处理、选择方案”等核心动作。
 - **阶段 0 已验证机制**：`scripts/dsh-checks/cross-plugin-slots.client.spec.tsx` 在 DSH 正式的插槽注册表与渲染器上通过——两种加载顺序、未认领键的通用内容、卸载后回退都正常。**仍需确认**：以 tgz 安装的外部插件在真实 DSH 页面中同样可用（阶段 4 拆出微信插件时验证）。万一不行，退路是微信界面代码暂留工作台前端，只在微信渠道已注册时显示。
+**阶段 3 实际做法**（与上表的差异）：
+- 实际的插槽见 `client/slots.tsx`：`task.tags`、`task.counterpart`、`task.body`、`task.source`、`items.conversations`、`channel.settings`，全部为 `keyed`、按渠道类型分派。DSH 设置页是另一个注册条目，不能渲染主界面声明的子插槽，所以它另外声明 `bkms-workbench.settings.channel`，渠道把同一张设置卡注册到两处。
+- 建议回复、复制、“已在×处理”没有做成插槽：服务端快照新增 `channelInfo`（名称、`reply: 'copy'`、是否开启），核心按它显示通用的回复区，文字里代入渠道名。“按会话”也按 `channelInfo` 中已开启的渠道显示，不用 `list` 插槽。
+- 插槽组件需要的数据和回调都经 owner props 传入（`TaskPartProps`、`SourcePartProps`、`ConversationsProps`、`SettingsCardProps`），不读工作台的 React Context——阶段 4 拆到独立插件后照样可用。
+- 列表标题、对方名称没有移到后端：渠道条目的 `subject` 就是会话名，`counterpart` 通用地取它。
+- 已在真实 DSH（隔离数据目录、测试夹具微信数据）中检查：各插槽渲染、保存回调、DSH 设置页的卡片，中英文、深色与窄屏。
+
 - **i18n 与样式**：渠道插件自带 `en.json` / `system-en.json`，在自己的命名空间注册；`test/i18n.test.mjs` 的规则同样适用；只用核心 `styles.css` 的颜色变量，深色模式与 ≤1000px 单栏要求不变。
 
 ## 5. 存储接口
@@ -841,6 +848,8 @@ Web 实现：
 | ~~Web 版~~ | **暂缓（D3）**，内容见 §6 | | |
 
 **进度**（2026-10-22）：阶段 0 已完成（分支 `feat/core-p0-guardrails`）；阶段 1 已完成（分支 `feat/core-p1-sqlite`，叠在阶段 0 之上；`zq-sqlite` v0.1.0 在其仓库的 `feat/initial` 分支与标签 `v0.1.0`）。阶段 1 实测见 `docs/VALIDATION.md`：写入与空闲开销不再随任务数增长，但完整快照仍要连正文取出全部任务，任务很多时比原来慢。**阶段 1 的后续**：快照只发列表摘要（不含正文、HTML、历史），打开任务时再取完整内容；需要同时改前端详情页，单独一个 PR。
+
+阶段 2 已完成（分支 `feat/core-p2-channels`）：渠道接口 `src/channels/types.ts`、注册表、微信移入 `src/channels/wechat/`，核心不再按微信分支。阶段 3 已完成（同一分支）：前端渠道插槽与 `client/channels/wechat/`，核心前端只剩已知来源名称表和临时的静态注册。
 
 阶段 1 完成后，本地的读写放大问题解决，数据已在 SQLite；阶段 2 完成后，工作台（内置邮件）在 DSH 内已能独立成立，微信只是一个可不启用的渠道；阶段 4 才是物理拆分。
 

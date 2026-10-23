@@ -9,6 +9,8 @@ import { DecideView, DoneView, ItemsView, LogsView, MeetingsView, TodayView } fr
 import { TopicsView } from "./topics";
 import { PlansView } from "./plans";
 import { WorkbenchSettings } from "./settings";
+import { PAGE_CHILDREN, SETTINGS_CHILDREN, SlotProvider, type RenderSlot } from "./slots";
+import { registerWechatParts } from "./channels/wechat";
 // @ts-ignore CSS is bundled as a text module by scripts/build-client.mjs.
 import stylesheet from "./styles.css";
 
@@ -16,7 +18,8 @@ export { WorkbenchSettings };
 let lastRoute: Route = { view: "today" };
 const TABS: [View, string, string][] = [["today", "今日", "sun"], ["decide", "待我决策", "inbox"], ["done", "AI 已代办", "done"], ["items", "全部事项", "grid"], ["meetings", "会议", "calendar"], ["topics", "主题与报告", "topic"], ["plans", "处理方案", "rules"]];
 
-export function Workbench() {
+/** The workbench page. `renderSlot` comes from DSH for the channel parts this entry declares. */
+export function Workbench({ renderSlot }: { renderSlot?: RenderSlot }) {
   useWorkbenchLocale();
   const [data, setData] = useState<Snapshot>(EMPTY), [loaded, setLoaded] = useState(false);
   const [route, setRoute] = useState<Route>(lastRoute);
@@ -57,7 +60,7 @@ export function Workbench() {
   const go = useCallback((next: Route) => {
     if (op.current) return;
     const current = routeRef.current;
-    if (current.view === next.view && current.task === next.task && current.rule === next.rule && current.topic === next.topic && current.report === next.report && !!current.chats === !!next.chats) return;
+    if (current.view === next.view && current.task === next.task && current.rule === next.rule && current.topic === next.topic && current.report === next.report && current.channel === next.channel) return;
     if (leave.current && !leave.current()) return;
     leave.current = undefined;
     setRoute(next);
@@ -77,10 +80,10 @@ export function Workbench() {
   // Hidden pages leave the tab bar; they stay reachable from links inside the workbench.
   const view = route.view === "today" && hidden.has("today") && loaded ? "decide" : route.view;
   const page = !loaded ? <div className="bkw-pad"><Empty title={error ? t("暂时无法加载工作台") : t("正在加载工作台")} text={error ? t("请检查服务连接后刷新重试。") : t("正在获取你的任务与方案。")}><button type="button" className="bkw-btn" onClick={() => void perform("refresh", refresh)}>{t("重新加载")}</button></Empty></div>
-    : view === "today" ? <TodayView /> : view === "decide" ? <DecideView selected={route.task} /> : view === "done" ? <DoneView /> : view === "items" ? <ItemsView selected={route.task} chats={route.chats} />
+    : view === "today" ? <TodayView /> : view === "decide" ? <DecideView selected={route.task} /> : view === "done" ? <DoneView /> : view === "items" ? <ItemsView selected={route.task} channel={route.channel} />
     : view === "meetings" ? <MeetingsView /> : view === "topics" ? <TopicsView topicId={route.topic} reportId={route.report} /> : view === "plans" ? <PlansView ruleId={route.rule} />
     : view === "logs" ? <LogsView /> : <div className="bkw-pad"><WorkbenchSettings embedded /></div>;
-  return <Context.Provider value={context}>
+  return <Context.Provider value={context}><SlotProvider render={renderSlot}>
     <div className={`bkw bkw-workbench view-${view}`} data-testid="bkms-workbench">
       <header className="bkw-top">
         <div className="bkw-top-row">
@@ -109,7 +112,7 @@ export function Workbench() {
       </div>}
       <main className="bkw-content">{page}</main>
     </div>
-  </Context.Provider>;
+  </SlotProvider></Context.Provider>;
 }
 
 function TodoReminder({ open }: { open?: () => void }) {
@@ -150,7 +153,8 @@ export function apply(ctx: ClientContext) {
     document.head.appendChild(style);
     return () => style.remove();
   }, "bkms-workbench: styles");
-  ctx.slots.inject("main", () => ctx.slots.register({ name: "main", key: "bkms-workbench", inject: () => ({}) }, Workbench));
+  // The page declares the parts channels can fill (client/slots.tsx); the settings section declares its own settings card slot.
+  ctx.slots.inject("main", () => ctx.slots.register({ name: "main", key: "bkms-workbench", inject: () => ({}), children: PAGE_CHILDREN }, Workbench));
   ctx.slots.inject("sidebar.panellist", () => {
     let remove: (() => void) | undefined;
     const update = () => {
@@ -165,5 +169,8 @@ export function apply(ctx: ClientContext) {
     const layout = ctx.get?.("layout") as { selectPanel?: (id: string) => void } | undefined;
     return { open: layout?.selectPanel ? () => layout.selectPanel!("bkms-workbench") : undefined };
   } }, TodoReminder));
-  ctx.slots.inject("settings.section", () => ctx.slots.register({ name: "settings.section", id: "bkms-workbench", order: 44, label: () => t("工作台设置"), inject: () => ({}) }, () => <WorkbenchSettings />));
+  ctx.slots.inject("settings.section", () => ctx.slots.register({ name: "settings.section", id: "bkms-workbench", order: 44, label: () => t("工作台设置"), inject: () => ({}), children: SETTINGS_CHILDREN },
+    ({ renderSlot }: { renderSlot?: RenderSlot }) => <SlotProvider render={renderSlot} settingsPage><WorkbenchSettings /></SlotProvider>));
+  // Built in for now; the WeChat plugin registers the same parts from its own client (docs/DESIGN-CORE-CHANNELS.md, phase 4).
+  registerWechatParts(ctx);
 }

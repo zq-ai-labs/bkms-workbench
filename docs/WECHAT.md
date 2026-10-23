@@ -8,7 +8,7 @@
 Windows 微信 4.x（已登录）
    └─ 本地加密数据库 ── wechat/wxread（内置，移植自 wechatauto-replica）解密读取
                               └─ wechat/bridge.py：只读桥，标准输入输出逐行 JSON
-工作台后台（Node，src/wechat.ts）
+工作台后台（Node，src/channels/wechat/）
    ├─ 按名单决定读哪些会话（白名单 / 黑名单，人员和群聊分开）
    ├─ 首次加入的会话只建立基线，不处理历史消息
    ├─ 对方停顿 N 分钟后，把连发的几条消息合成一个事项

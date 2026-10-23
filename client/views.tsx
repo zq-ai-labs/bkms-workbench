@@ -2,9 +2,9 @@ import * as React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { systemMessage, t } from "./i18n";
 import { useWorkbench } from "./context";
-import { AUTONOMY_LABEL, CATEGORY, LABELS, api, counterpart, dayLabel, longDate, fullDate, minutesLeft, nextStep, senderName, sourceOf, statusLabel, taskTitle, time, urgencyRank, when, type Activity, type Status, type Task } from "./lib";
+import { AUTONOMY_LABEL, CATEGORY, LABELS, api, counterpart, dayLabel, longDate, fullDate, minutesLeft, nextStep, senderName, sourceName, sourceOf, statusLabel, taskTitle, time, urgencyRank, when, type Activity, type Status, type Task } from "./lib";
 import { Empty, Icon, PageHeader, Section, SourceTag, StatusTag, Tag } from "./ui";
-import { ChatsView } from "./wechat";
+import { ChannelPart } from "./slots";
 import { TaskWorkspace } from "./workspace";
 import { BatchClassify } from "./classification";
 import { setSourceExpanded, useSourceLayout } from "./layout";
@@ -200,8 +200,8 @@ export function DoneView() {
   </div>;
 }
 
-export function ItemsView({ selected, chats }: { selected?: string; chats?: boolean }) {
-  const { data, go } = useWorkbench();
+export function ItemsView({ selected, channel }: { selected?: string; channel?: string }) {
+  const { data, go, perform, refresh, notify } = useWorkbench();
   const [search, setSearch] = useState(""), [status, setStatus] = useState("all"), [category, setCategory] = useState("all"), [business, setBusiness] = useState("all");
   const task = selected ? data.tasks.find(item => item.id === selected) : undefined;
   if (selected && task) return <div className="bkw-detail-page">
@@ -209,12 +209,19 @@ export function ItemsView({ selected, chats }: { selected?: string; chats?: bool
       actions={!!task.topicIds?.length && <span className="bkw-tags">{task.topicIds.map(id => { const topic = data.topics.find(item => item.id === id); return topic ? <button type="button" key={id} className="bkw-link" onClick={() => go({ view: "topics", topic: id })}>#{topic.name}</button> : null; })}</span>} />
     <TaskWorkspace key={task.id} task={task} />
   </div>;
-  const wechatOn = !!data.wechat?.settings.enabled;
-  const modes = wechatOn && <div className="bkw-seg" role="tablist" aria-label={t("查看方式")}>
-    <button type="button" role="tab" aria-selected={!chats} className={!chats ? "on" : ""} onClick={() => go({ view: "items" })}>{t("按事项")}</button>
-    <button type="button" role="tab" aria-selected={!!chats} className={chats ? "on" : ""} onClick={() => go({ view: "items", chats: true })}>{t("按会话")}</button>
+  // Each channel that is on can show its items by conversation.
+  const channels = (data.channelInfo ?? []).filter(item => item.enabled), active = channels.find(item => item.kind === channel);
+  const modes = channels.length > 0 && <div className="bkw-seg" role="tablist" aria-label={t("查看方式")}>
+    <button type="button" role="tab" aria-selected={!active} className={!active ? "on" : ""} onClick={() => go({ view: "items" })}>{t("按事项")}</button>
+    {channels.map(item => <button type="button" role="tab" key={item.kind} aria-selected={active === item} className={active === item ? "on" : ""} onClick={() => go({ view: "items", channel: item.kind })}>{channels.length > 1 ? `${t("按会话")} · ${sourceName(item.kind, data.channelInfo)}` : t("按会话")}</button>)}
   </div>;
-  if (chats && wechatOn) return <div className="bkw-chats-page"><div className="bkw-chats-bar">{modes}<span className="bkw-muted">{t("像微信一样按会话阅读，AI 识别的事项直接标在对话里。")}</span></div><ChatsView /></div>;
+  if (active) {
+    const saveSettings = (value: unknown, message: string) => perform("channelSettings", async () => { await api("saveSettings", { revision: data.revision, settings: { channels: { [active.kind]: value } } }); await refresh(); notify(message); });
+    return <div className="bkw-chats-page"><div className="bkw-chats-bar">{modes}<span className="bkw-muted">{t("按会话阅读，AI 识别的事项直接标在对话里。")}</span></div>
+      <ChannelPart part="conversations" kind={active.kind} props={{ page: data.channels?.[active.kind], tasks: data.tasks, revision: data.revision, open: id => go({ view: "items", task: id }), openSettings: () => go({ view: "settings" }), saveSettings }}
+        fallback={<div className="bkw-pad"><Empty icon="chat" title={t("这个渠道没有会话视图")} text={t("可以在“按事项”中查看这个渠道的事项。")} /></div>} />
+    </div>;
+  }
   // Business categories of every scheme, by name (the same name in two schemes is one filter).
   const businessNames = [...new Set((data.classifiers ?? []).flatMap(item => item.categories.map(category => category.name)))];
   const businessOk = (item: Task) => business === "all" || (business === "pending" ? item.classification?.state === "pending" : item.classification?.state === "applied" && item.classification.categoryName === business);

@@ -2,12 +2,11 @@ import { randomUUID } from 'node:crypto'
 import type { MailService } from './mail/service.js'
 import { MAIL_PROVIDERS, MailAccountError, presetOf } from './mail/accounts.js'
 import { readFile } from 'node:fs/promises'
-import { Engine, settingsOf } from './engine.js'
+import { Engine, isMail, settingsOf } from './engine.js'
 import { originalMailFields } from './original-mail.js'
 import { matches, ruleExcludes, ruleMode, validateRule } from './rules.js'
-import { CLOCK, touch, validateWechatSettings } from './store.js'
+import { CLOCK, touch } from './store.js'
 import type { Records } from './storage/repository.js'
-import { chatAllowed, wechatSettingsOf } from './wechat.js'
 import { activityEntry, exampleText, localDate, needsAttention, relations, senderKey, topicMatches, trialData } from './digest.js'
 import { sourceStatuses } from './sources.js'
 import { checkVariables, validateProfile } from './context-vars.js'
@@ -23,9 +22,9 @@ const takeOver = async (tx: Records, task: Task, reason: string): Promise<void> 
   await tx.undoActivity(task.id, 'auto_send_scheduled', now())
 }
 /** Remember a confirmed or rejected message for a workflow (latest 20 kept; a newer verdict on the same task replaces the older one). */
-const learn = async (tx: Records, ruleId: string, task: Task, match: boolean): Promise<void> => {
+const learn = async (tx: Records, ruleId: string, task: Task, match: boolean, label?: string): Promise<void> => {
   const current = (await tx.examplesOf('rule', ruleId)).filter(example => example.taskId !== task.id)
-  const example: RuleExample = { id: randomUUID(), match, text: exampleText(task), at: now(), taskId: task.id }
+  const example: RuleExample = { id: randomUUID(), match, text: exampleText(task, label), at: now(), taskId: task.id }
   await tx.setExamples('rule', ruleId, [...current, example].slice(-20))
 }
 const list = (value: unknown, maxItems: number, maxLength: number, message: string): string[] => {
@@ -121,11 +120,17 @@ export class WorkbenchApi {
       version, stateRevision: seq,
       tasks: enriched, rules: config.rules, revision: config.revision, settings: config.settings, defaults: settingsOf(config.settings), logs: logs.reverse(), accounts, health: { ...health, error: providerError || health.error }, capabilities: await this.engine.capabilities(),
       activity: activity.slice(-300).sort((a, b) => b.at.localeCompare(a.at)), topics, reports: reports.reverse(), brief, today: localDate(),
-      sources: sourceStatuses({ ready: health.email, accounts: accounts.length, error: providerError }, health.wechat ? { enabled: wechatSettingsOf(config.settings.wechat).enabled, ...health.wechat } : undefined), meetings: [],
-      wechat: await repo.channelState('wechat').then(saved => ({ settings: wechatSettingsOf(config.settings.wechat), pending: Object.keys(saved.entries).length, watching: Object.keys(saved.cursors).length })),
+      sources: sourceStatuses({ ready: health.email, accounts: accounts.length, error: providerError }, this.engine.channels.list().map(channel => ({ channel, settings: config.settings.channels?.[channel.kind] }))), meetings: [],
+      // What each installed channel shows on the page, and channels that need an upgrade before they can be used.
+      channels: Object.fromEntries(await Promise.all(this.engine.channels.list().map(async channel => [channel.kind, channel.snapshot?.(config.settings.channels?.[channel.kind], await repo.channelState(channel.kind)) ?? {}]))),
+      channelInfo: this.channelInfo(config.settings), rejectedChannels: this.engine.channels.rejected(),
       ruleExamples,
       classifiers: config.classifiers, categoryExamples,
     }
+  }
+  /** Installed channels for the page: their names, how replies work and whether each is on. */
+  private channelInfo(settings: { channels?: Record<string, unknown> }) {
+    return this.engine.channels.list().map(channel => ({ kind: channel.kind, label: channel.label, reply: channel.capabilities.reply, enabled: channel.settings.enabled(settings.channels?.[channel.kind]) }))
   }
   /**
    * Trial run over mail received in a chosen time range, read straight from the mailbox (history before the baseline
@@ -219,7 +224,7 @@ export class WorkbenchApi {
     if (body.action === 'preferences') {
       const repo = this.engine.repo, config = await repo.config()
       // Global navigation and reminders do not need mailbox access or draft bodies.
-      return { revision: config.revision, stateRevision: await repo.changeSeq(), settings: config.settings, attention: await repo.attention() }
+      return { revision: config.revision, stateRevision: await repo.changeSeq(), settings: config.settings, attention: await repo.attention(), channelInfo: this.channelInfo(config.settings), rejectedChannels: this.engine.channels.rejected() }
     }
     if (body.action === 'mailSettings') {
       const config = await this.engine.repo.config()
@@ -273,10 +278,19 @@ export class WorkbenchApi {
     }
     if (body.action === 'saveSettings') {
       const settings = body.settings
-      if (!settings || typeof settings !== 'object' || Array.isArray(settings) || !Object.keys(settings).length || Object.keys(settings).some(key => !['enabled', 'pollSeconds', 'showWorkbench', 'notifyNewTodo', 'triage', 'undoMinutes', 'briefEnabled', 'briefTime', 'weeklyEnabled', 'weeklyDay', 'weeklyTime', 'meetingBriefMinutes', 'wechat', 'hiddenViews', 'profile'].includes(key))) throw new WorkbenchError('工作台设置无效。')
+      if (!settings || typeof settings !== 'object' || Array.isArray(settings) || !Object.keys(settings).length || Object.keys(settings).some(key => !['enabled', 'pollSeconds', 'showWorkbench', 'notifyNewTodo', 'triage', 'undoMinutes', 'briefEnabled', 'briefTime', 'weeklyEnabled', 'weeklyDay', 'weeklyTime', 'meetingBriefMinutes', 'channels', 'hiddenViews', 'profile'].includes(key))) throw new WorkbenchError('工作台设置无效。')
       if ('hiddenViews' in settings) { settings.hiddenViews = list(settings.hiddenViews, 3, 20, '页签设置无效。'); if (settings.hiddenViews.some((view: string) => !['today', 'meetings', 'topics'].includes(view))) throw new WorkbenchError('页签设置无效。') }
       if ('profile' in settings) settings.profile = validateProfile(settings.profile)
-      if ('wechat' in settings) { validateWechatSettings(settings.wechat); for (const key of ['people', 'groups'] as const) settings.wechat[key].list = [...new Set(settings.wechat[key].list)] }
+      // Each channel checks its own settings; a channel that is not installed cannot be configured.
+      const changedChannels: string[] = []
+      if ('channels' in settings) {
+        if (!settings.channels || typeof settings.channels !== 'object' || Array.isArray(settings.channels)) throw new WorkbenchError('工作台设置无效。')
+        for (const [kind, value] of Object.entries(settings.channels)) {
+          const channel = this.engine.channels.get(kind)
+          if (!channel) throw new WorkbenchError('这个渠道未安装，不能保存它的设置。', 'channel-unavailable', 409)
+          settings.channels[kind] = channel.settings.validate(value); changedChannels.push(kind)
+        }
+      }
       for (const key of ['enabled', 'showWorkbench', 'notifyNewTodo', 'triage', 'briefEnabled', 'weeklyEnabled']) if (key in settings && typeof settings[key] !== 'boolean') throw new WorkbenchError('工作台开关应为布尔值。')
       if ('pollSeconds' in settings && (!Number.isSafeInteger(settings.pollSeconds) || settings.pollSeconds < 30 || settings.pollSeconds > 3600)) throw new WorkbenchError('检查间隔应为 30–3600 秒。')
       if ('undoMinutes' in settings && (!Number.isSafeInteger(settings.undoMinutes) || settings.undoMinutes < 1 || settings.undoMinutes > 240)) throw new WorkbenchError('撤回窗口应为 1–240 分钟。')
@@ -286,11 +300,11 @@ export class WorkbenchApi {
       return this.engine.repo.write(async tx => {
         await tx.checkConfig(body.revision)
         const current = (await tx.config()).settings, enabled = current.enabled
-        const next = { ...current, ...settings }
+        const next = { ...current, ...settings, ...(settings.channels ? { channels: { ...current.channels, ...settings.channels } } : {}) }
         await tx.saveConfig({ settings: next })
         await tx.log(enabled !== next.enabled ? next.enabled ? '已开启后台自动处理。' : '已暂停接收和排队执行，正在运行的任务继续完成。' : '已更新工作台设置。')
         return next
-      }).finally(() => { if ('wechat' in settings) this.engine.wechatChanged() })
+      }).finally(() => { for (const kind of changedChannels) this.engine.channels.get(kind)?.settings.changed?.() })
     }
     if (body.action === 'saveRule') {
       const rule = validateRule(body.rule)
@@ -343,7 +357,7 @@ export class WorkbenchApi {
     })
     if (body.action === 'testRule') {
       const rule = validateRule(body.rule), task = await this.engine.repo.task(body.taskId)
-      return { matched: matches(rule, { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.attachments.length > 0 || task.hasAttachments === true, kind: task.source.kind === 'wechat' ? 'wechat' : 'email' }), rule: rule.name, note: '仅匹配预览，不会调用 DSH 或发送邮件。' }
+      return { matched: matches(rule, { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.attachments.length > 0 || task.hasAttachments === true, kind: task.source.kind ?? 'email' }), rule: rule.name, note: '仅匹配预览，不会调用 DSH 或发送邮件。' }
     }
     if (body.action === 'poll') return this.engine.poll()
     if (body.action === 'generateBrief') return this.engine.generateBrief(uiLanguage, signal)
@@ -398,7 +412,7 @@ export class WorkbenchApi {
       const pool = tasks.slice().sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)).slice(0, 30)
       const items = pool.map(task => {
         const category = task.triage?.category
-        if (!matches(rule, { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.attachments.length > 0 || task.hasAttachments === true, kind: task.source.kind === 'wechat' ? 'wechat' : 'email' })) return { id: task.id, matched: false, reason: '发件人、主题或附件条件不符。', category }
+        if (!matches(rule, { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.attachments.length > 0 || task.hasAttachments === true, kind: task.source.kind ?? 'email' })) return { id: task.id, matched: false, reason: '发件人、主题或附件条件不符。', category }
         if (category && ruleExcludes(rule).includes(category)) return { id: task.id, matched: false, reason: '属于方案排除的信息类别。', category }
         return { id: task.id, matched: true, reason: '符合发件人、主题和附件条件。', category }
       })
@@ -423,28 +437,9 @@ export class WorkbenchApi {
       if (entry.kind === 'auto_send_scheduled') return this.cancelAutoSend(entry.taskId)
       throw new WorkbenchError('这条记录无法撤回。', 'state', 409)
     }
-    if (body.action === 'wechatStatus') return this.engine.wechatStatus(signal)
-    if (body.action === 'wechatChats') return this.engine.wechatChats(signal)
-    if (body.action === 'wechatSearch') {
-      if (typeof body.q !== 'string' || !body.q.trim() || body.q.length > 50) throw new WorkbenchError('请输入 50 字以内的名称。')
-      const { service } = await this.engine.wechatService()
-      return service.search(body.q.trim(), signal)
-    }
-    if (body.action === 'wechatHistory') {
-      // Only conversations allowed by the lists can be read, and only in pages.
-      const { service, settings } = await this.engine.wechatService()
-      if (typeof body.chat !== 'string' || !chatAllowed(settings, body.chat)) throw new WorkbenchError('这个会话不在允许读取的范围内。', 'wechat-blocked', 403)
-      const offset = Number(body.offset ?? 0), limit = Number(body.limit ?? 50)
-      if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100000 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new WorkbenchError('分页参数无效。')
-      return service.history(body.chat, offset, limit, signal)
-    }
-    if (body.action === 'clearWechatCache') {
-      if (body.confirmed !== true) throw new WorkbenchError('请确认清除。')
-      await this.engine.wechat?.clear?.()
-      this.engine.wechatChanged()
-      await this.engine.repo.write(tx => tx.log('已清除微信本地解密缓存，下次读取时重新生成。'))
-      return { cleared: true }
-    }
+    // Actions of an installed channel (its own settings, lists or history), with that channel's settings.
+    const owner = this.engine.channels.actionOwner(body.action)
+    if (owner) return owner.actions![body.action](body, { settings: (await this.engine.repo.config()).settings.channels?.[owner.kind], signal, log: message => this.engine.repo.write(tx => tx.log(message)) })
     if (body.action === 'baselineWindow') {
       // Preview only: how much mail a start time would bring back. Nothing changes.
       if (typeof body.account !== 'string' || typeof body.folder !== 'string') throw new WorkbenchError('请选择邮箱和文件夹。')
@@ -493,10 +488,12 @@ export class WorkbenchApi {
     return this.exclusive(id, async () => {
       const repo = this.engine.repo
       const task = await repo.task(id, requireRevision(body.revision))
-      if (task.source.kind === 'wechat' && ['loadMail', 'saveDraft', 'previewSend', 'send', 'resolveSend'].includes(body.action)) throw new WorkbenchError('微信消息只读：请复制建议回复，在微信中发送。', 'wechat-readonly', 409)
+      // Items from other channels are read-only here: nothing to draft, send or load from a mailbox.
+      const channel = this.engine.channelOf(task), other = !isMail(task)
+      if (other && ['loadMail', 'saveDraft', 'previewSend', 'send', 'resolveSend'].includes(body.action)) throw new WorkbenchError(channel?.text.readonly ?? '这项信息来自未安装的渠道，只能查看。', channel?.readonlyCode ?? 'channel-unavailable', 409)
       if (body.action === 'classify') {
         // You choose the category: applied at once (a move moves the mail now) and remembered as an example.
-        if (task.source.kind === 'wechat') throw new WorkbenchError('微信消息不参与业务分类。', 'state', 409)
+        if (other) throw new WorkbenchError(channel?.text.notClassified ?? '这项信息来自未安装的渠道，只能查看。', 'state', 409)
         if (['running', 'queued', 'sending', 'uncertain'].includes(task.status)) throw new WorkbenchError('处理中不能更改分类，请稍后再试。', 'state', 409)
         const current = await repo.config()
         const classifier = current.classifiers.find(item => item.id === task.classification?.classifierId) ?? classifierFor(current, task.account, task.source.folder)
@@ -520,17 +517,18 @@ export class WorkbenchApi {
         return repo.task(id)
       }
       if (body.action === 'saveReply') {
-        if (task.source.kind !== 'wechat' || task.status !== 'review') throw new WorkbenchError('只有待审核的微信事项可以修改建议回复。', 'state', 409)
+        if (channel?.capabilities.reply !== 'copy' || task.status !== 'review') throw new WorkbenchError(channel?.text.replyNotEditable ?? '只有待审核的事项可以修改建议回复。', 'state', 409)
         if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 16000) throw new WorkbenchError('请填写不超过 16000 字的回复。')
         return repo.updateTask(id, body.revision, item => {
-          if (body.replyRevision !== undefined && item.wechat?.replyRevision !== body.replyRevision) throw new WorkbenchError('建议回复已更新，请刷新后重试。', 'conflict', 409)
-          item.wechat!.reply = body.text.trim(); item.wechat!.replyRevision = (item.wechat!.replyRevision ?? 0) + 1
+          if (body.replyRevision !== undefined && item.reply?.revision !== body.replyRevision) throw new WorkbenchError('建议回复已更新，请刷新后重试。', 'conflict', 409)
+          item.reply = { text: body.text.trim(), revision: (item.reply?.revision ?? 0) + 1 }
           touch(item, '已保存修改后的回复。'); return item
         })
       }
       if (body.action === 'markHandled') {
-        if (task.source.kind !== 'wechat' || ['running', 'queued', 'completed', 'ignored'].includes(task.status)) throw new WorkbenchError('当前状态不能标记为已处理。', 'state', 409)
-        return repo.updateTask(id, body.revision, async (item, tx) => { item.status = 'completed'; touch(item, '已在微信中处理。'); await tx.log('微信事项已标记为已处理。', id); return item })
+        const copy = channel?.capabilities.reply === 'copy' ? channel : undefined
+        if (!copy || ['running', 'queued', 'completed', 'ignored'].includes(task.status)) throw new WorkbenchError('当前状态不能标记为已处理。', 'state', 409)
+        return repo.updateTask(id, body.revision, async (item, tx) => { item.status = 'completed'; touch(item, copy.text.handled); await tx.log(copy.text.handledLog, id); return item })
       }
       if (body.action === 'loadMail') {
         if (['running', 'sending'].includes(task.status)) throw new WorkbenchError('任务正在执行，请稍后查看原邮件。')
@@ -555,7 +553,7 @@ export class WorkbenchApi {
             const confirmed = item.match?.state === 'suggested' && item.match.ruleId === rule.id
             // Re-running the same workflow (e.g. after editing it) is not a new judgement.
             if (previous !== rule.id || confirmed) {
-              await learn(tx, rule.id, item, true)
+              await learn(tx, rule.id, item, true, channel?.ai.exampleLabel(item))
               item.match = { ruleId: rule.id, ruleName: rule.name, by: 'manual', state: 'applied', reason: confirmed ? '你确认了 AI 的建议。' : '你手动选择了这个方案。', at: now() }
               touch(item, confirmed ? `已确认 AI 建议的方案「${rule.name}」，AI 会参考这次判断。` : `已手动选择方案「${rule.name}」，AI 会参考这次判断。`)
             }
@@ -581,12 +579,12 @@ export class WorkbenchApi {
         if (!ruleId) throw new WorkbenchError('这项信息还没有方案。', 'state', 409)
         return repo.updateTask(id, body.revision, async (item, tx) => {
           const name = item.match?.ruleName ?? item.ruleName ?? ''
-          await learn(tx, ruleId, item, false)
+          await learn(tx, ruleId, item, false, channel?.ai.exampleLabel(item))
           await takeOver(tx, item, '你更改了方案，自动发送取消。')
           if (item.summary) item.history.push({ at: now(), message: `更改方案前的结果：\n${item.summary}` })
           item.match = { ruleId, ruleName: name, by: 'manual', state: 'rejected', at: now() }
           delete item.rule; delete item.ruleId; delete item.ruleName; delete item.summary; delete item.checks; delete item.informationGaps; delete item.error; delete item.needsInfoKind
-          if (item.wechat) delete item.wechat.reply
+          delete item.reply
           item.status = 'unmatched'
           touch(item, `你判断这项信息不属于方案「${name}」，AI 以后会参考这次纠正。可以选择其他方案或忽略。`); await tx.log(`已从方案「${name}」移出并记为反例。`, id)
           return item

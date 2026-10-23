@@ -13,13 +13,18 @@ export const parseClock = (value: string | undefined, fallback: string): number 
 export const startOfWeek = (date = new Date()): Date => { const day = new Date(date.getFullYear(), date.getMonth(), date.getDate()); day.setDate(day.getDate() - ((day.getDay() + 6) % 7)); return day }
 
 export const senderAddress = (from: string): string => (from.match(/<([^>]+)>/)?.[1] || from).trim().toLowerCase()
-/** Preference key for a task's counterpart: the email address, or the WeChat conversation. */
-/** Short, content-light summary used as a learned example for a workflow. */
-export const exampleText = (task: Task): string => {
+/** Mail is the built-in channel; other kinds come from installed channels. */
+const fromMail = (task: Task) => !task.source?.kind || task.source.kind === 'email'
+/**
+ * Short, content-light summary used as a learned example for a workflow. `label` names the source of an item from
+ * another channel (given by that channel, e.g. its conversation name); mail is named by its sender.
+ */
+export const exampleText = (task: Task, label?: string): string => {
   const what = task.triage?.reason || splitQuoted(task.body).latest.replace(/\s+/g, ' ').slice(0, 160)
-  return `${task.source?.kind === 'wechat' ? '微信 ' + (task.wechat?.chatName || '') : '发件人 ' + senderAddress(task.from)}｜主题：${(task.subject || task.title).slice(0, 80)}｜${what}`.slice(0, 300)
+  return `${fromMail(task) ? '发件人 ' + senderAddress(task.from) : label ?? task.subject}｜主题：${(task.subject || task.title).slice(0, 80)}｜${what}`.slice(0, 300)
 }
-export const senderKey = (task: Task): string => task.source?.kind === 'wechat' ? `wechat:${task.source.folder}` : senderAddress(task.from)
+/** Preference key for a task's counterpart: the mail address, or the channel and its scope (one conversation). */
+export const senderKey = (task: Task): string => fromMail(task) ? senderAddress(task.from) : `${task.source.kind}:${task.source.folder}`
 const normalizedSubject = (subject: string) => subject.replace(/^\s*((re|fw|fwd|回复|答复|转发)\s*[:：]\s*)+/gi, '').trim().toLowerCase()
 
 /** Reliable thread links (Message-ID references) and weaker same-sender/same-subject suggestions. */
@@ -34,13 +39,13 @@ export function relations(tasks: Task[]): Map<string, { related: string[]; possi
       if (other && other.id !== task.id) { entry(task.id).related.add(other.id); entry(other.id).related.add(task.id) }
     }
   }
-  // Segments of the same WeChat conversation are reliably related.
+  // Items of one conversation in another channel are reliably related.
   const chats = new Map<string, Task[]>()
-  for (const task of tasks) if (task.source?.kind === 'wechat') chats.set(task.source.folder, [...(chats.get(task.source.folder) || []), task])
+  for (const task of tasks) if (!fromMail(task)) { const key = senderKey(task); chats.set(key, [...(chats.get(key) || []), task]) }
   for (const items of chats.values()) for (const a of items) for (const b of items) if (a.id !== b.id) entry(a.id).related.add(b.id)
   const groups = new Map<string, Task[]>()
   for (const task of tasks) {
-    if (task.source?.kind === 'wechat') continue
+    if (!fromMail(task)) continue
     const subject = normalizedSubject(task.subject)
     if (subject.length < 2) continue
     const key = `${senderAddress(task.from)}\n${subject}`

@@ -82,7 +82,7 @@ mail.body 是对方这次新写的内容；mail.quotedHistory 是邮件里引用
 系统自动通知、账单、提醒、验证码归为 notification；营销推广归为 marketing。只有对方需要收件人做事或回复时才归为 request 或 reply_needed。
 nextStep 要具体，例如“确认 500 台报价并今天回复”“补充 10/09 的高铁票”；无需行动时留空。不要编造邮件中没有的事实。
 context 是工作台提供的当前时间和用户资料（可信），用来理解“今天”“本部门”等说法。
-语言：reason、nextStep、ruleReason 是给用户看的说明，一律使用${input.uiLanguage === 'en' ? '英文（English）' : '中文'}，与信息原文和方案说明使用什么语言无关；人名、公司名、型号、数量、金额保持原样。${input.mail.channel === 'wechat' ? '\n本条信息是一段微信对话记录（channel=wechat），“我”是收件人本人，subject 是会话名称。判断对方是否需要我做事或回复；微信里来自真人的消息不要归为 marketing。' : ''}${input.classifier ? BUSINESS_PROMPT : ''}`,
+语言：reason、nextStep、ruleReason 是给用户看的说明，一律使用${input.uiLanguage === 'en' ? '英文（English）' : '中文'}，与信息原文和方案说明使用什么语言无关；人名、公司名、型号、数量、金额保持原样。${input.channelHint ? '\n' + input.channelHint : ''}${input.classifier ? BUSINESS_PROMPT : ''}`,
     }),
   }
 }
