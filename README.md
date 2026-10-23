@@ -142,7 +142,7 @@ powershell -File scripts/start-workbench.ps1 -Build -PrepareOnly
 
 升级本地源码并构建后应重启 DSH 进程；依赖模块的热更新不等价于完整重启。
 
-现有自定义 Profile 也可通过其对应 DSH 命令安装本地插件目录或 `pnpm run pack:plugin` 生成的 tgz，再重启。邮件收发已内置；之前装过 dsh-email 的 Profile 建议卸载它（工作台设置中会提示），邮箱账号需要在工作台里重新添加。不要把工作台直接装进其他用途的生产 HOME 做首次试验。
+现有自定义 Profile 也可通过其对应 DSH 命令安装本地插件目录或 `pnpm run pack:plugin` 生成的 tgz，再重启。tgz 里已带好全部运行依赖（包括 Git 依赖 `zq-sqlite`），安装时不需要访问 npm 或 GitHub。邮件收发已内置；之前装过 dsh-email 的 Profile 建议卸载它（工作台设置中会提示），邮箱账号需要在工作台里重新添加。不要把工作台直接装进其他用途的生产 HOME 做首次试验。
 
 ## 规则
 

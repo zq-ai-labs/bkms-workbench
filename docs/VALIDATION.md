@@ -1,5 +1,11 @@
 # 本地验证记录
 
+## 离线安装包（2026-10-23）
+
+- `pnpm run pack:plugin` 改为 `scripts/pack-plugin.mjs`：在临时目录用扁平布局只装运行依赖，带 `bundleDependencies` 打包。包约 7.6 MB，含 imapflow、nodemailer、mailparser、yaml、proper-lockfile、zq-sqlite 及其全部间接依赖（kysely、pino 等）。
+- 断网验证：全新的空 pnpm 缓存，软件源与代理都指向不存在的地址，`pnpm add <tgz>` 成功（只解析插件包本身）；装好后插件可加载，各依赖都从包内解析，SQLite 数据库能打开。DSH 的 `plugin add` 底层就是这条 pnpm 命令。
+- 只能在你的环境验证：在真正不联网的机器上用 DSH / XBuddy 安装。
+
 ## 核心与渠道改造 · 阶段 4：微信拆为独立插件（2026-10-22）
 
 - 工作台 `pnpm test`：全部通过（微信用例移到插件仓库；新增“外部渠道”行为测试：排队、复制回复、只读拒绝、渠道动作、错误状态码、卸载后只读、版本不一致提示升级）。

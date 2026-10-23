@@ -39,7 +39,7 @@ pnpm install --frozen-lockfile
 pnpm run build          # tsc（后端 + 前端）+ esbuild 打包前端
 pnpm test               # 构建后运行 test/*.test.mjs 与 test/mail/*.test.mjs（应全部通过，7 个跳过属正常）
 pnpm run check          # 只做类型检查
-pnpm run pack:plugin    # 生成 dist/bkms-workbench-<版本>.tgz（Mac 等环境直接安装）
+pnpm run pack:plugin    # 生成 dist/bkms-workbench-<版本>.tgz，内含全部运行依赖（scripts/pack-plugin.mjs），可离线安装
 node scripts/bench-storage.mjs 100,1000,3000   # 存储性能基线（合成数据，临时目录），改存储前后对比
 node scripts/seed-demo.mjs --home <…/runtime/poc/bkms-workbench-demo-xx> --lang zh|en   # 演示数据，见 docs/DEMO.md
 ```
