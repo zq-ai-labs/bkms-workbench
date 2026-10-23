@@ -94,7 +94,8 @@ export function Workbench({ renderSlot }: { renderSlot?: RenderSlot }) {
   return <Context.Provider value={context}><SlotProvider render={renderSlot}>
     <div className={`bkw bkw-workbench view-${view}`} data-testid="bkms-workbench">
       <header className="bkw-top">
-        <div className="bkw-top-row">
+        {/* The title row drags the window on macOS, like the host's own page headers; its buttons stay clickable. */}
+        <div className="bkw-top-row" data-window-drag="">
           <h1>{t("任务工作台")}</h1>
           <div className="bkw-top-actions">
             <span className={`bkw-live ${data.settings.enabled ? "on" : ""}`}><i />{data.settings.enabled ? t("自动处理运行中") : t("自动处理已暂停")}{loaded && <small>{t("{0} 个信息源", connected)}{data.health.lastPoll ? ` · ${t("{0} 已同步", time(data.health.lastPoll))}` : ""}</small>}</span>

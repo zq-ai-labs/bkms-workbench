@@ -106,6 +106,9 @@ body[data-ds-dark-theme] .bkw, body[data-ds-dark-theme] .bkw-settings, body[data
 /* Header and tabs */
 .bkw-top { flex: none; padding: 0 24px; background: var(--surf); border-bottom: 1px solid var(--line); }
 .bkw-top-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 16px; flex-wrap: wrap; }
+/* macOS with the sidebar collapsed: DSH publishes the width of the window buttons and sidebar controls drawn over the
+   top-left corner; the title row starts after them. Unset elsewhere, so nothing moves on Windows or with the sidebar open. */
+.bkw-top-row { padding-left: max(0px, calc(var(--dsh-frame-leading-clearance, 0px) - 24px)); }
 .bkw-top h1 { font-size: 18px; font-weight: 600; }
 .bkw-top-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .bkw-live { display: inline-flex; align-items: center; gap: 7px; margin-right: 4px; font-size: 12px; color: var(--ink2); }
@@ -645,6 +648,7 @@ body[data-ds-dark-theme] .bkw-check-no { color: #1d1606; }
   .bkw-wx-panel { padding: 4px 16px 16px; }
   .bkw-levels.two { grid-template-columns: minmax(0, 1fr); }
   .bkw-top { padding: 0 16px; }
+  .bkw-top-row { padding-left: max(0px, calc(var(--dsh-frame-leading-clearance, 0px) - 16px)); }
   .bkw-pad, .bkw-today, .bkw-split, .bkw-topic, .bkw-report-editor { padding: 16px; }
   .bkw-plan-form { padding: 0 16px; }
   .bkw-workbench .bkw-content { overflow: auto !important; }
