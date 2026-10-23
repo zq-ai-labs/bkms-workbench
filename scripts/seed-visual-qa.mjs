@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, lstat, open, readdir, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import { Store, log } from '../lib/store.js'
+import { WorkbenchRepository } from '../lib/storage/repository.js'
 import { validateRule } from '../lib/rules.js'
 import { DraftStore } from '../lib/mail/draft-store.js'
 
@@ -40,7 +40,7 @@ try {
   await marker.sync()
 } finally { await marker.close() }
 
-const store = new Store(join(home, 'data', 'bkms-workbench'))
+const store = new WorkbenchRepository(join(home, 'data', 'bkms-workbench'))
 // Drafts live with the built-in mail module: <data>/bkms-workbench/mail/drafts.
 const drafts = new DraftStore(join(home, 'data', 'bkms-workbench', 'mail'), 'drafts')
 const rule = validateRule({
@@ -114,19 +114,20 @@ const wechatTask = {
   ruleId: rule.id, ruleName: rule.name, rule: structuredClone(rule),
   triage: { state: 'done', category: 'request', urgency: 'high', reason: '群里 @你，问能否加急发货，需中午前确认。', nextStep: '决定是否走加急并答复王工', by: 'ai', at: at(23) },
   checks: [{ item: '库存与出库时间需要核实。', quote: '今天下午可以出库' }],
-  wechat: { chat: 'demo@chatroom', chatName: '[演示] 交付协调群', group: true, mentioned: true, messages: wechatMessages, fromSeq: 1001, toSeq: 1003, reply: '@王工 走加急吧，今天下午可以出库，麻烦安排零担，周五前送到。', replyRevision: 1 },
+  channelData: { chat: 'demo@chatroom', chatName: '[演示] 交付协调群', group: true, mentioned: true, messages: wechatMessages, fromSeq: 1001, toSeq: 1003 },
+  reply: { text: '@王工 走加急吧，今天下午可以出库，麻烦安排零担，周五前送到。', revision: 1 },
 }
 const activity = (minutes, kind, item, extra = {}) => ({ id: randomUUID(), at: at(minutes), kind, title: item.subject, taskId: item.id, ruleName: item.ruleName, source: 'email', ...extra })
 const today = new Date(), day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
 
-await store.mutate(state => {
-  state.settings = { enabled: false, pollSeconds: 60 }
-  state.rules = [rule, lowRisk]
-  state.tasks = [report, procurement, quotation, notice, urgent, ack, wechatTask]
-  state.activity = [activity(299, 'archive', notice, { detail: '服务故障恢复通知，无需处理。' }), activity(93, 'report', report), activity(10, 'auto_send_scheduled', ack, { autonomy: 'low_risk', undoUntil: ack.autoSend.at })]
-  state.topics = [{ id: randomUUID(), name: '[演示] 华东项目', kind: 'project', keywords: ['华东', '控制模块'], senders: [], schedule: 'none', createdAt: at(2000), updatedAt: at(30), summary: { text: '客户询价 200 套控制模块，报价草稿待审核；另有加急发货请求待决定。', level: 'attention', risks: ['交期依据不足'], todos: ['审核报价草稿', '决定是否加急'], at: at(30), by: 'ai' } }]
-  state.reports = [{ id: randomUUID(), kind: 'weekly', title: '[演示] 本周周报', text: '## 本周完成\n- 整理本周客户反馈\n\n## 进行中与风险\n- 华东项目报价待审核\n\n## 下周计划\n- [请补充]', periodStart: day, periodEnd: day, generatedAt: at(20), updatedAt: at(20), by: 'template' }]
-  state.brief = { date: day, text: '【演示】今天有 4 件事需要你决策，建议先处理华东项目的报价回复；另有一条加急发货请求待你决定。AI 已归档 1 条通知，一条确认回复将在 25 分钟后自动发送，可撤回。', generatedAt: at(5), by: 'template' }
-  log(state, '已创建明确标识的合成演示任务；后台保持关闭，未配置任何真实邮箱或凭据。')
+await store.write(async tx => {
+  await tx.saveConfig({ settings: { enabled: false, pollSeconds: 60 }, rules: [rule, lowRisk] })
+  for (const task of [report, procurement, quotation, notice, urgent, ack, wechatTask]) await tx.insertTask(task)
+  for (const entry of [activity(299, 'archive', notice, { detail: '服务故障恢复通知，无需处理。' }), activity(93, 'report', report), activity(10, 'auto_send_scheduled', ack, { autonomy: 'low_risk', undoUntil: ack.autoSend.at })]) await tx.addActivity(entry)
+  for (const topic of [{ id: randomUUID(), name: '[演示] 华东项目', kind: 'project', keywords: ['华东', '控制模块'], senders: [], schedule: 'none', createdAt: at(2000), updatedAt: at(30), summary: { text: '客户询价 200 套控制模块，报价草稿待审核；另有加急发货请求待决定。', level: 'attention', risks: ['交期依据不足'], todos: ['审核报价草稿', '决定是否加急'], at: at(30), by: 'ai' } }]) await tx.saveTopic(topic)
+  for (const report of [{ id: randomUUID(), kind: 'weekly', title: '[演示] 本周周报', text: '## 本周完成\n- 整理本周客户反馈\n\n## 进行中与风险\n- 华东项目报价待审核\n\n## 下周计划\n- [请补充]', periodStart: day, periodEnd: day, generatedAt: at(20), updatedAt: at(20), by: 'template' }]) await tx.addReport(report)
+  await tx.setBrief({ date: day, text: '【演示】今天有 4 件事需要你决策，建议先处理华东项目的报价回复；另有一条加急发货请求待你决定。AI 已归档 1 条通知，一条确认回复将在 25 分钟后自动发送，可撤回。', generatedAt: at(5), by: 'template' })
+  await tx.log('已创建明确标识的合成演示任务；后台保持关闭，未配置任何真实邮箱或凭据。')
 })
+await store.close()
 console.log(JSON.stringify({ home: actualHome, tasks: 6, drafts: 2, rules: 2, ruleEnabled: false, backgroundEnabled: false, marker: join(home, 'VISUAL-QA-SYNTHETIC.json') }, null, 2))

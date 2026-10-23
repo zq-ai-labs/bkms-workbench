@@ -19,7 +19,8 @@ export async function runStructured<T>(ctx: any, options: {
   let result: T | undefined
   const staged = new WeakMap<object, T>()
   const handle = await agents.create({
-    sessionId: `bkms-workbench-${options.name}-${randomUUID()}`, agentOptions: { ...model }, signal,
+    // A background run, not a conversation: DSH keeps sessions with this origin out of its session list.
+    sessionId: `bkms-workbench-${options.name}-${randomUUID()}`, meta: { origin: 'subagent' }, agentOptions: { ...model }, signal,
     setup(agentCtx: any) {
       agentCtx.tools.restrict({ allow: [] })
       agentCtx.tools.presentAs('native')

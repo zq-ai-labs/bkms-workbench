@@ -2,7 +2,7 @@ import * as React from "react";
 import { EMPTY, type Snapshot } from "./lib";
 
 export type View = "today" | "decide" | "done" | "items" | "meetings" | "topics" | "plans" | "settings" | "logs";
-export type Route = { view: View; task?: string; rule?: string; topic?: string; report?: string; chats?: boolean };
+export type Route = { view: View; task?: string; rule?: string; topic?: string; report?: string; channel?: string };
 export type WorkbenchContext = {
   data: Snapshot; loaded: boolean; busy: string;
   refresh(): Promise<Snapshot>;

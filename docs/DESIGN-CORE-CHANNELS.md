@@ -426,6 +426,13 @@ ctx.slots.inject('bkms-workbench.channel.settings', () =>
 - **非组件逻辑放到后端**：列表标题、对方名称（现 `lib.ts` 的 `taskTitle` / `counterpart`）由渠道在后端算好放进快照，前端不再按渠道判断；方案来源是否可选（现 `plans.tsx:155`）看快照里的渠道状态。
 - **渠道前端缺席**（插件未装，或某个键没人注册）：`keyed` 插槽对没人认领的键什么也不渲染，工作台在该位置显示通用内容（标题、对方、正文），只保留“忽略、重新处理、选择方案”等核心动作。
 - **阶段 0 已验证机制**：`scripts/dsh-checks/cross-plugin-slots.client.spec.tsx` 在 DSH 正式的插槽注册表与渲染器上通过——两种加载顺序、未认领键的通用内容、卸载后回退都正常。**仍需确认**：以 tgz 安装的外部插件在真实 DSH 页面中同样可用（阶段 4 拆出微信插件时验证）。万一不行，退路是微信界面代码暂留工作台前端，只在微信渠道已注册时显示。
+**阶段 3 实际做法**（与上表的差异）：
+- 实际的插槽见 `client/slots.tsx`：`task.tags`、`task.counterpart`、`task.body`、`task.source`、`items.conversations`、`channel.settings`，全部为 `keyed`、按渠道类型分派。DSH 设置页是另一个注册条目，不能渲染主界面声明的子插槽，所以它另外声明 `bkms-workbench.settings.channel`，渠道把同一张设置卡注册到两处。
+- 建议回复、复制、“已在×处理”没有做成插槽：服务端快照新增 `channelInfo`（名称、`reply: 'copy'`、是否开启），核心按它显示通用的回复区，文字里代入渠道名。“按会话”也按 `channelInfo` 中已开启的渠道显示，不用 `list` 插槽。
+- 插槽组件需要的数据和回调都经 owner props 传入（`TaskPartProps`、`SourcePartProps`、`ConversationsProps`、`SettingsCardProps`），不读工作台的 React Context——阶段 4 拆到独立插件后照样可用。
+- 列表标题、对方名称没有移到后端：渠道条目的 `subject` 就是会话名，`counterpart` 通用地取它。
+- 已在真实 DSH（隔离数据目录、测试夹具微信数据）中检查：各插槽渲染、保存回调、DSH 设置页的卡片，中英文、深色与窄屏。
+
 - **i18n 与样式**：渠道插件自带 `en.json` / `system-en.json`，在自己的命名空间注册；`test/i18n.test.mjs` 的规则同样适用；只用核心 `styles.css` 的颜色变量，深色模式与 ≤1000px 单栏要求不变。
 
 ## 5. 存储接口
@@ -493,6 +500,8 @@ ctx.slots.inject('bkms-workbench.channel.settings', () =>
 - 人工动作中“读后判断再写”的地方（如 `ignore` 前判断状态）放进方法内部，避免现在 `exclusive` + 先读后写的两步之间被后台改动。`WorkbenchApi.exclusive`（同任务串行）保留，作为进程内的第二道保护。
 - `snapshot` 不再由一次整读组成，而是 `config.get + tasks.list + activity.recent(300) + topics.list + reports.list + briefs.get + logs.recent + examples.list` 拼装；页面带上次的 `changeSeq` 时，未变化直接返回 `unchanged`。
 - 引擎里的 AI 判断、IMAP 读取都在两次仓储调用之间，和现在两次 `mutate` 之间的位置相同，事务边界不变。
+
+**阶段 1 的实际做法（与上表的出入）**：实施时没有为每个业务动作单独写一个存储方法，而是按聚合提供读写与事务——`Records`（任务、配置、学习例子、联系人偏好、日志与活动、游标与渠道状态、主题、报告、简报的按记录读写）加上 `WorkbenchRepository.write()`（一次一个事务）与 `updateTask()`（取一个任务、修改、保存）。业务规则（状态怎么变、写哪条历史和活动）仍留在引擎和接口层，存储层只读写记录。原因：如果每个业务动作都做成存储方法，业务规则会落进存储层，以后换 PostgreSQL 或 MySQL 时要把业务规则重写一遍；现在换数据库只需重写 `src/storage/`。上表仍是业务操作与调用点的对照，附录 A 的逐处对照不变。
 
 ### 5.4 乐观锁与并发
 
@@ -619,6 +628,8 @@ CREATE TABLE schema_migrations (version integer PRIMARY KEY, applied_at text NOT
 **落到 SQLite（D1）时的写法**：上面用 PostgreSQL 写法便于对照服务器数据库，实际先落地的是 SQLite：`jsonb` → `TEXT`、`boolean` → `INTEGER 0/1`、`bigint` → `INTEGER`；部分索引（`WHERE`）与 `ON CONFLICT`、`RETURNING`（3.35+）都支持；启用 WAL 日志模式（读写互不阻塞，写入只追加日志文件）。迁移文件用 Kysely schema builder 编写，同一份定义可生成 SQLite 与以后服务器数据库的 DDL。
 
 ### 5.6 全文搜索接口
+
+> 阶段 1 状态：中文切分与 FTS5 查询已在 `zq-sqlite` 实现并测试（`searchTokens` / `searchQuery`）。页面目前没有搜索入口，工作台的搜索索引表与搜索框一起做，避免为没人用的索引多占一倍正文空间。
 
 ```ts
 export interface SearchIndex {
@@ -836,6 +847,12 @@ Web 实现：
 | **4 微信渠道插件（独立仓库）** | 在 `zq-ai-labs/workbench-weixin` 仓库（D9）中建立微信插件：渠道实现、Python 桥与 `wxread/`（`NOTICE.md` 随迁）、前端注册、自己的中英文字典；工作台提供 `workbenchChannels` 服务并做版本检查（D10） | 真实 DSH 中安装/卸载微信插件；卸载后微信任务仍可查看；版本不相等时设置页提示升级正确的一方；只装工作台时邮件功能完整 | 两个仓库协同发布：渠道接口一变就要两边同时升级（D10 不做兼容） |
 | ~~Web 版~~ | **暂缓（D3）**，内容见 §6 | | |
 
+**进度**（2026-10-22）：阶段 0 已完成（分支 `feat/core-p0-guardrails`）；阶段 1 已完成（分支 `feat/core-p1-sqlite`，叠在阶段 0 之上；`zq-sqlite` v0.1.0 在其仓库的 `feat/initial` 分支与标签 `v0.1.0`）。阶段 1 实测见 `docs/VALIDATION.md`：写入与空闲开销不再随任务数增长，但完整快照仍要连正文取出全部任务，任务很多时比原来慢。**阶段 1 的后续**：快照只发列表摘要（不含正文、HTML、历史），打开任务时再取完整内容；需要同时改前端详情页，单独一个 PR。
+
+阶段 2 已完成（分支 `feat/core-p2-channels`）：渠道接口 `src/channels/types.ts`、注册表、微信移入 `src/channels/wechat/`，核心不再按微信分支。阶段 3 已完成（同一分支）：前端渠道插槽与 `client/channels/wechat/`，核心前端只剩已知来源名称表和临时的静态注册。
+
+阶段 4 已完成（分支 `feat/core-p4-weixin-split`，叠在阶段 2/3 之上；插件仓库 `zq-ai-labs/workbench-weixin` 的 `feat/initial` 分支）：工作台提供 `workbenchChannels` 服务，不再含微信代码；渠道错误按 `status` 字段识别（插件用自己的错误类）；渠道随快照下发自己后端消息的英文（`systemEnglish`）；插槽 props 带 `kit`（工作台的组件与 `api`）；方案来源接受任何合法的渠道类型名。插件保留接口副本（`src/contract.ts`、`client/contract.ts`），版本号必须一致。已在真实 DSH 中验证：两插件一起安装时各插槽、设置、按会话正常；卸载微信插件后微信事项按通用方式显示、设置页无微信卡片、无错误。
+
 阶段 1 完成后，本地的读写放大问题解决，数据已在 SQLite；阶段 2 完成后，工作台（内置邮件）在 DSH 内已能独立成立，微信只是一个可不启用的渠道；阶段 4 才是物理拆分。
 
 ## 8. 问题状态
@@ -849,6 +866,10 @@ Web 实现：
 - 微信插件：独立仓库（D9）。
 - 渠道接口版本：不相等即拒绝加载并提示升级，不做兼容（D10）。
 - 升级：从 SQLite 版开始靠迁移脚本保留数据，不支持降级（D11）。
+
+**后续事项**
+- 快照改为列表摘要 + 按需取详情（见 §7 进度）。
+- 设 `DSH_SOURCE_ROOT` 时 3 项真实 DSH 集成测试在 `main` 上就失败（仍按旧 dsh-email 插件与旧接口编写），需要更新。
 
 **仍待决定**
 1. **`zq-sqlite` 的仓库地址、正式包名与发布方式**（私有 npm 源，或各插件以 Git 依赖固定版本）：阶段 1 开始前定。

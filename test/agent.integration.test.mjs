@@ -70,6 +70,8 @@ test('real DSH isolated agent: scoped result, restricted tools, terminal errors 
   let mailMutations = 0
   for (const name of ['email_draft', 'email_watch', 'email_attachment']) ctx.tools.register({ name, description: 'Mutates mail state or files', parameters: { type: 'object', properties: {} }, output: { schema: { type: 'null' }, render: () => [] }, async execute() { mailMutations++; return null } })
   const runner = createAgentRunner(ctx, directory)
+  const created = []
+  ctx.on('session/created', session => { created.push(session.header) }, { global: true })
   let fileReads = 0
   let fileWrites = 0
   ctx.tools.register({ name: 'read_document', description: 'Read file', parameters: { type: 'object', properties: { file_path: { type: 'string' } } }, output: { schema: { type: 'null' }, render: () => [] }, async execute() { fileReads++; return null } })
@@ -87,6 +89,11 @@ test('real DSH isolated agent: scoped result, restricted tools, terminal errors 
   const result = await runner.run(task, rule, new AbortController().signal)
   assert.equal(result.output.summary, '已提取客户需求')
   assert.match(result.sessionId, /^bkms-workbench-/)
+  // The run is recorded for debugging, with its tool calls.
+  // A background run, not a conversation: DSH keeps sessions of this origin out of its session list.
+  assert.equal(created.find(header => header.id === result.sessionId)?.origin, 'subagent')
+  assert.equal(result.trace.sessionId, result.sessionId); assert.equal(result.trace.outcome, 'completed')
+  assert.ok(result.trace.steps.some(step => step.kind === 'tool' && step.name === RESULT_TOOL && step.input.includes('已提取客户需求')))
   assert.deepEqual(observed.tools.map(tool => tool.name), [RESULT_TOOL])
   assert.equal(JSON.stringify(observed.messages).includes('PRIVATE_GLOBAL_PERSONA'), false)
   assert.equal(JSON.stringify(observed.messages).includes('SELECTED_SKILL_BODY'), true)

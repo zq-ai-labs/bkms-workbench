@@ -12,6 +12,7 @@ const en: Record<string, string> = { ...english, ...systemEnglish };
 const zh = { ...Object.fromEntries(Object.keys(en).map(key => [key, key])), "unit.task.one": "项任务", "unit.message.one": "封邮件" } as Record<string, string>;
 let service: LocaleService | undefined;
 let translate: ReturnType<LocaleService["bind"]> | undefined;
+let registered: (() => void) | undefined;
 const listeners = new Set<() => void>();
 const notify = () => listeners.forEach(listener => listener());
 const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
@@ -22,13 +23,13 @@ export function useWorkbenchLocale(): void { useSyncExternalStore(subscribe, sna
 /** Reuse the host's locale preference, fallback chain and lifecycle. No local preference. */
 export function connectLocale(next?: LocaleService): () => void {
   service = next;
-  const unregister = next?.register("bkms-workbench", { zh, en });
+  registered = next?.register("bkms-workbench", { zh, en });
   translate = next?.bind("bkms-workbench");
   const unsubscribe = next?.subscribe(notify);
   notify();
   return () => {
     unsubscribe?.();
-    unregister?.();
+    registered?.(); registered = undefined;
     if (service === next) { service = undefined; translate = undefined; notify(); }
   };
 }
@@ -40,7 +41,7 @@ export function t(key: string, ...values: unknown[]): string {
 }
 
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const patterns = Object.entries(en).filter(([key]) => key !== "{0}。{1}").flatMap(([key, value]) => [key, value].map(template => {
+const buildPatterns = () => Object.entries(en).filter(([key]) => key !== "{0}。{1}").flatMap(([key, value]) => [key, value].map(template => {
   const indices: number[] = [];
   const parts = template.split(/(\{\d+\})/g).map(part => {
     if (/^\{\d+\}$/.test(part)) { indices.push(Number(part.slice(1, -1))); return "([\\s\\S]*?)"; }
@@ -48,6 +49,30 @@ const patterns = Object.entries(en).filter(([key]) => key !== "{0}。{1}").flatM
   });
   return { key, indices, regex: new RegExp(`^${parts.join("")}$`) };
 })).sort((a, b) => b.key.replace(/\{\d+\}/g, "").length - a.key.replace(/\{\d+\}/g, "").length);
+let patterns = buildPatterns();
+const added = new Set<string>();
+/**
+ * English for the messages of installed channels (`channelInfo[].systemEnglish`), which are not in this plugin's own
+ * dictionaries. Existing entries are kept; the same dictionary is added only once.
+ */
+export function addSystemEnglish(dictionaries: (Record<string, string> | undefined)[]): void {
+  let changed = false;
+  for (const dictionary of dictionaries) {
+    if (!dictionary) continue;
+    const key = JSON.stringify(dictionary);
+    if (added.has(key)) continue;
+    added.add(key);
+    for (const [zhText, enText] of Object.entries(dictionary)) {
+      if (typeof enText !== "string" || !enText.trim() || /[\u4e00-\u9fff]/.test(enText) || /^\s*(\{\d+\}\s*)+$/.test(enText) || Object.hasOwn(en, zhText)) continue;
+      en[zhText] = enText; zh[zhText] = zhText; changed = true;
+    }
+  }
+  if (!changed) return;
+  patterns = buildPatterns();
+  // The host keeps its own copy of the dictionaries; register them again so `t()` knows the new entries.
+  if (service) { registered?.(); registered = service.register("bkms-workbench", { zh, en }); }
+  notify();
+}
 
 /** Translate only recognized system messages, never arbitrary mail or user-authored content. */
 export function systemMessage(message: string): string {

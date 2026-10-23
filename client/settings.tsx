@@ -1,11 +1,11 @@
 import * as React from "react";
 import { useEffect, useRef, useState } from "react";
 import { systemMessage, t, useWorkbenchLocale } from "./i18n";
-import { SOURCE, api, dateTime, errorMessage, type SourceKind } from "./lib";
+import { SOURCE, api, dateTime, downloadText, errorMessage, uiLanguage } from "./lib";
 import { FolderPicker, localInput } from "./plans";
 import { applySaved, refreshPreferences, settingsOf, usePreferences, type Settings } from "./store";
 import { Alert, Field, Modal, Switch, Tag } from "./ui";
-import { WechatSettingsCard } from "./wechat";
+import { ChannelPart } from "./slots";
 import { ProfileCard } from "./variables";
 import { MailAccountsCard } from "./mail-accounts";
 
@@ -24,6 +24,9 @@ export function WorkbenchSettings({ embedded }: { embedded?: boolean }) {
   const [interval, setIntervalValue] = useState(String(data.settings.pollSeconds));
   const [reset, setReset] = useState<{ account: string; folder: string; confirmed: boolean; revision: number; since?: string; includeAnswered?: boolean }>();
   const [window_, setWindow] = useState<{ count: number; answered: number; limit: number; error?: string; loading?: boolean }>();
+  // Importing workflows and schemes from a file exported by another workbench.
+  const [importing, setImporting] = useState<{ file: { rules: unknown[]; classifiers: unknown[] }; name: string; account: string; folder: string }>();
+  const [imported, setImported] = useState<{ rules: number; classifiers: number; renamed: { from: string; to: string }[]; relabeled: string[] }>();
   // How much mail the chosen start time brings back; refreshed whenever the mailbox, folder or time changes.
   const windowKey = reset?.since && reset.account && reset.folder.trim() ? JSON.stringify([reset.account, reset.folder.trim(), reset.since]) : "";
   useEffect(() => {
@@ -55,8 +58,9 @@ export function WorkbenchSettings({ embedded }: { embedded?: boolean }) {
   }
   const accounts = mail?.accounts || [];
   const ready = !!(mail?.health.email && accounts.length && mail.health.agent && mail.health.running);
-  // Background processing can also run on WeChat alone.
-  const wechatOn = (data.settings as Settings).wechat?.enabled === true;
+  // Background processing can also run on an installed channel alone.
+  const channelOn = (data.channelInfo ?? []).some(item => item.enabled);
+  const label = (value: { zh: string; en: string }) => value[uiLanguage()] || value.zh;
   const disabled = !loaded || busy;
   const hidden = data.settings.hiddenViews ?? [];
   const row = (title: string, hint: string, control: React.ReactNode) => <div className="bkw-set-row"><span><strong>{title}</strong><small>{hint}</small></span><span className="bkw-set-control">{control}</span></div>;
@@ -69,8 +73,10 @@ export function WorkbenchSettings({ embedded }: { embedded?: boolean }) {
       <section id="bkw-set-sources" className="bkw-set-card"><h3>{t("信息源")}</h3>
         <MailAccountsCard disabled={!loaded} onChanged={refreshMail} tone={ready ? "good" : mail?.health.email ? "warn" : "muted"} label={ready ? t("正常") : mail?.health.email ? t("等待服务") : accounts.length ? t("未连接") : t("未添加")}
           status={!mail ? t("正在加载…") : accounts.length ? t("{0} · 每 {1} 秒检查 · 最近检测 {2}", accounts.map(account => account.label).join("、"), data.settings.pollSeconds, mail.health.lastPoll ? dateTime(mail.health.lastPoll) : t("尚未检测")) : t("添加邮箱账号后，工作台自动接收新邮件、生成回复草稿。")} />
-        <WechatSettingsCard value={(data.settings as Settings).wechat} disabled={disabled} save={(wechat, message) => save({ wechat }, message)} />
-        {(["feishu", "wecom", "meeting"] as SourceKind[]).map(kind => <div key={kind} className="bkw-set-row"><span className="bkw-source-icon">{t(SOURCE[kind]).slice(0, 1)}</span><span><strong>{t(SOURCE_NAME[kind])}</strong><small>{t("需要安装对应的接入适配器后才能连接。工作台不会模拟未接入的来源。")}</small></span><Tag>{t("待接入")}</Tag></div>)}
+        {(data.channelInfo ?? []).map(item => <ChannelPart key={item.kind} part="settings" kind={item.kind} props={{ value: (data.settings as Settings).channels?.[item.kind], disabled, save: (value, message) => save({ channels: { [item.kind]: value } }, message) }}
+          fallback={<div className="bkw-set-row"><span className="bkw-source-icon">{label(item.label).slice(0, 1)}</span><span><strong>{label(item.label)}</strong><small>{t("这个渠道没有提供设置界面。")}</small></span><Tag tone={item.enabled ? "good" : "muted"}>{item.enabled ? t("已开启") : t("未开启")}</Tag></div>} />)}
+        {(data.rejectedChannels ?? []).map(item => <div key={item.kind} className="bkw-set-row"><span className="bkw-source-icon">{label(item.label).slice(0, 1)}</span><span><strong>{label(item.label)}</strong><small>{item.upgrade === "channel" ? t("这个渠道插件的版本过旧，请升级渠道插件后使用。") : t("这个渠道插件需要更新版本的工作台，请升级工作台后使用。")}</small></span><Tag tone="warn">{t("需要升级")}</Tag></div>)}
+        {["feishu", "wecom", "meeting"].map(kind => <div key={kind} className="bkw-set-row"><span className="bkw-source-icon">{t(SOURCE[kind]).slice(0, 1)}</span><span><strong>{t(SOURCE_NAME[kind])}</strong><small>{t("需要安装对应的接入适配器后才能连接。工作台不会模拟未接入的来源。")}</small></span><Tag>{t("待接入")}</Tag></div>)}
         {mail?.health.error && <Alert tone="danger">{systemMessage(mail.health.error)}</Alert>}
       </section>
       <section id="bkw-set-profile" className="bkw-set-card"><h3>{t("我的资料")}</h3>
@@ -83,21 +89,58 @@ export function WorkbenchSettings({ embedded }: { embedded?: boolean }) {
         {row(t("会前简报"), t("连接日历后，在会议开始前生成。"), <><select aria-label={t("会前简报提前时间")} value={s.meetingBriefMinutes} disabled={disabled} onChange={event => void save({ meetingBriefMinutes: Number(event.target.value) })}>{[15, 30, 60, 120].map(value => <option key={value} value={value}>{t("提前 {0} 分钟", value)}</option>)}</select></>)}
       </section>
       <section id="bkw-set-safety" className="bkw-set-card"><h3>{t("自主与安全")}</h3>
-        {row(t("后台自动处理"), t("暂停后不检测新信息、不分拣、不执行；已在运行的任务会完成。"), <Switch label={t("后台自动处理")} checked={data.settings.enabled} disabled={disabled || (!data.settings.enabled && !ready && !(wechatOn && mail?.health.agent && mail.health.running))} onChange={value => void save({ enabled: value }, value ? t("已开启后台自动处理") : t("已暂停后台自动处理"))} />)}
+        {row(t("后台自动处理"), t("暂停后不检测新信息、不分拣、不执行；已在运行的任务会完成。"), <Switch label={t("后台自动处理")} checked={data.settings.enabled} disabled={disabled || (!data.settings.enabled && !ready && !(channelOn && mail?.health.agent && mail.health.running))} onChange={value => void save({ enabled: value }, value ? t("已开启后台自动处理") : t("已暂停后台自动处理"))} />)}
         {row(t("AI 分拣"), t("新信息先由 AI 判断类别和适用方案，通知与营销邮件自动归档，可随时恢复。关闭后按字面条件匹配全部方案。"), <Switch label={t("AI 分拣")} checked={s.triage} disabled={disabled} onChange={value => void save({ triage: value })} />)}
         {row(t("撤回窗口"), t("按方案自动发送的回复先等待这段时间，期间可撤回。"), <select aria-label={t("撤回窗口")} value={s.undoMinutes} disabled={disabled} onChange={event => void save({ undoMinutes: Number(event.target.value) })}>{[5, 15, 30, 60, 120].map(value => <option key={value} value={value}>{t("{0} 分钟", value)}</option>)}</select>)}
         {row(t("发送结果不确定时"), t("不会自动重发，转为“发送待核实”交你处理。"), <Tag tone="good">{t("始终开启")}</Tag>)}
       </section>
       <section id="bkw-set-display" className="bkw-set-card"><h3>{t("显示")}</h3>
         {VIEWS.map(([id, label, hint]) => <React.Fragment key={id}>{row(t("显示“{0}”页签", t(label)), t(hint), <Switch label={t("显示“{0}”页签", t(label))} checked={!hidden.includes(id)} disabled={disabled} onChange={value => void save({ hiddenViews: value ? hidden.filter(item => item !== id) : [...hidden, id] })} />)}</React.Fragment>)}
+        {row(t("显示 AI 处理过程"), t("开发调试用：在事项的“记录”中显示每次 AI 处理调用的工具、输入输出和用时。普通使用不需要打开。"), <Switch label={t("显示 AI 处理过程")} checked={(data.settings as Settings).showTrace === true} disabled={disabled} onChange={value => void save({ showTrace: value })} />)}
         {row(t("显示工作台入口"), t("在侧栏显示任务工作台。隐藏入口不影响后台处理，可随时在此恢复。"), <Switch label={t("显示工作台入口")} checked={data.settings.showWorkbench !== false} disabled={disabled} onChange={value => void save({ showWorkbench: value })} />)}
       </section>
       <section id="bkw-set-advanced" className="bkw-set-card"><h3>{t("高级与恢复")}</h3>
         {row(t("邮件检查间隔"), t("后台自动处理开启时生效，范围 30–3600 秒。"), <form className="bkw-inline-form" onSubmit={event => { event.preventDefault(); void save({ pollSeconds: Number(interval) }); }}><input aria-label={t("邮件检查间隔")} required type="number" min={30} max={3600} value={interval} disabled={disabled} onChange={event => setIntervalValue(event.target.value)} /><span>{t("秒")}</span><button type="submit" className="bkw-btn small" disabled={disabled || Number(interval) === data.settings.pollSeconds}>{t("保存")}</button></form>)}
+        {row(t("导出与导入方案"), t("把处理方案和业务分类方案导出成文件，在别的工作台导入。文件不含邮箱、文件夹和学习例子；导入的方案都是停用状态，请检查后再启用。"), <span className="bkw-actions">
+          <button type="button" className="bkw-btn small" disabled={busy || !loaded} onClick={async () => {
+            try {
+              const result = await api<{ file: unknown; skipped: string[] }>("exportWorkflows");
+              downloadText(JSON.stringify(result.file, null, 2), `workbench-workflows-${new Date().toISOString().slice(0, 10)}.json`, "application/json;charset=utf-8");
+              setSaved(result.skipped.length ? t("已导出；分派方案不导出：{0}", result.skipped.join("、")) : t("已导出方案文件"));
+            } catch (failure) { setError(errorMessage(failure)); }
+          }}>{t("导出")}</button>
+          <label className={`bkw-btn small ${busy || !loaded ? "disabled" : ""}`}>{t("导入…")}<input type="file" accept="application/json,.json" hidden disabled={busy || !loaded} onChange={async event => {
+            const chosen = event.currentTarget.files?.[0]; event.currentTarget.value = "";
+            if (!chosen) return;
+            try {
+              const file = JSON.parse(await chosen.text());
+              if (!file || !Array.isArray(file.rules) || !Array.isArray(file.classifiers)) throw new Error(t("这不是工作台导出的方案文件。"));
+              setImported(undefined); setImporting({ file, name: chosen.name, account: "", folder: accounts[0]?.inboxFolder || "INBOX" });
+            } catch (failure) { setError(failure instanceof SyntaxError ? t("这不是工作台导出的方案文件。") : errorMessage(failure)); }
+          }} /></label>
+        </span>)}
+        {imported && <Alert onClose={() => setImported(undefined)}>{t("已导入 {0} 个处理方案、{1} 个分类方案，均为停用状态。", imported.rules, imported.classifiers)}
+          {!!imported.renamed.length && <><br />{t("重名已改名：{0}", imported.renamed.map(item => item.to).join("、"))}</>}
+          {!!imported.relabeled.length && <><br />{t("这些分类原来会移动邮件，导入后改为只打标签，请在分类方案中重新选择目标文件夹：{0}", imported.relabeled.join("、"))}</>}
+        </Alert>}
         {row(t("重建收件基线"), t("决定从哪里开始处理：从现在开始，或从某天某个时间开始补处理历史邮件（用于快速验证方案）。邮箱 UIDVALIDITY 变化导致检测暂停时，也在这里恢复。"), <button type="button" className="bkw-btn small" disabled={busy || !accounts.length || !mail?.health.email} onClick={() => setReset({ account: "", folder: "INBOX", confirmed: false, revision: mail!.revision })}>{t("重建")}</button>)}
       </section>
       <p className="bkw-settings-foot" role="status">{busy ? t("保存中…") : saved || (!loaded && !error ? t("正在加载…") : t("这些设置保存在当前 DSH 实例中，界面语言跟随 DSH 全局设置。"))}</p>
     </div>
+    {importing && <Modal title={t("导入方案")} onClose={() => { if (!busy) setImporting(undefined); }}>
+      <p className="bkw-dialog-description">{t("文件“{0}”中有 {1} 个处理方案、{2} 个分类方案。导入后它们读取下面选择的邮箱和文件夹，全部为停用状态，检查后再逐个启用。", importing.name, importing.file.rules.length, importing.file.classifiers.length)}</p>
+      <Field label={t("邮箱账号")}><select value={importing.account} onChange={event => setImporting({ ...importing, account: event.target.value, folder: accounts.find(account => account.id === event.target.value)?.inboxFolder || "INBOX" })}><option value="">{t("全部邮箱")}</option>{accounts.map(account => <option key={account.id} value={account.id}>{account.label}</option>)}</select></Field>
+      <Field label={t("读取的文件夹")}><FolderPicker account={importing.account || accounts[0]?.id || ""} ready={!!accounts.length} value={importing.folder} defaultFolder={accounts.find(account => account.id === importing.account)?.inboxFolder || "INBOX"} onChange={folder => setImporting({ ...importing, folder })} /></Field>
+      <div className="bkw-dialog-actions"><button type="button" className="bkw-btn" disabled={busy} onClick={() => setImporting(undefined)}>{t("取消")}</button>
+        <button type="button" className="bkw-btn primary" disabled={busy || !importing.folder.trim()} onClick={async () => {
+          if (operation.current) return;
+          operation.current = true; setBusy(true); setError("");
+          try {
+            const result = await api<{ rules: number; classifiers: number; renamed: { from: string; to: string }[]; relabeled: string[] }>("importWorkflows", { revision: data.revision, file: importing.file, account: importing.account, folder: importing.folder.trim() });
+            setImporting(undefined); setImported(result); await refreshPreferences();
+          } catch (failure) { setError(errorMessage(failure)); } finally { operation.current = false; setBusy(false); }
+        }}>{busy ? t("正在导入…") : t("确认导入")}</button></div>
+    </Modal>}
     {reset && <Modal title={t("重建收件基线")} onClose={() => { if (!busy) { setReset(undefined); setWindow(undefined); } }}>
       <div className="bkw-seg" role="radiogroup" aria-label={t("开始处理的时间")}>
         <button type="button" role="radio" aria-checked={reset.since === undefined} className={reset.since === undefined ? "on" : ""} onClick={() => { setReset({ ...reset, since: undefined, confirmed: false }); setWindow(undefined); }}>{t("从现在开始")}</button>

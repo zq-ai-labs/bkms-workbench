@@ -1,9 +1,10 @@
 import { useSyncExternalStore } from "react";
-import { api, type WechatSettings } from "./lib";
+import { api } from "./lib";
+import { addSystemEnglish } from "./i18n";
 import { TodoTracker, type Preferences } from "./preferences";
 
 /** Lightweight preferences shared by the sidebar entry, reminders and both settings surfaces. */
-export type Settings = Preferences["settings"] & { profile?: import("./variables").Profile; triage?: boolean; undoMinutes?: number; briefEnabled?: boolean; briefTime?: string; weeklyEnabled?: boolean; weeklyDay?: number; weeklyTime?: string; meetingBriefMinutes?: number; wechat?: WechatSettings };
+export type Settings = Preferences["settings"] & { profile?: import("./variables").Profile; triage?: boolean; undoMinutes?: number; briefEnabled?: boolean; briefTime?: string; weeklyEnabled?: boolean; weeklyDay?: number; weeklyTime?: string; meetingBriefMinutes?: number; channels?: Record<string, unknown>; showTrace?: boolean };
 const initial = (): Preferences => ({ revision: 1, settings: { enabled: false, pollSeconds: 60, showWorkbench: true, notifyNewTodo: false }, attention: [] });
 export let preferences: Preferences = initial();
 export let reminder = { count: 0, sequence: 0 };
@@ -20,7 +21,7 @@ export function acceptPreferences(next: Preferences) {
   else if (count) reminder = { count: reminder.count + count, sequence: reminder.sequence + 1 };
   emit();
 }
-export async function refreshPreferences(signal?: AbortSignal) { acceptPreferences(await api<Preferences>("preferences", {}, signal)); }
+export async function refreshPreferences(signal?: AbortSignal) { const next = await api<Preferences>("preferences", {}, signal); addSystemEnglish((next.channelInfo ?? []).map(item => item.systemEnglish)); acceptPreferences(next); }
 export const usePreferences = () => useSyncExternalStore(subscribePreferences, () => preferences);
 export const useReminder = () => useSyncExternalStore(subscribePreferences, () => reminder);
 export function dismissReminder() { reminder = { ...reminder, count: 0 }; emit(); }

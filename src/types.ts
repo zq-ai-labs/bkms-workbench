@@ -1,3 +1,4 @@
+import type { AgentTrace } from './trace.js'
 export type Status = 'queued' | 'running' | 'review' | 'needs_info' | 'failed' | 'sending' | 'sent' | 'uncertain' | 'ignored' | 'unmatched' | 'completed'
 /** How far a workflow may act without a person: draft only, bounded low-risk sending, or all bounded replies. */
 export type Autonomy = 'draft' | 'low_risk' | 'auto'
@@ -5,6 +6,8 @@ export const AUTONOMY: readonly Autonomy[] = ['draft', 'low_risk', 'auto']
 /** Information sources. Email and WeChat (read-only) have adapters; the others are declared so workflows and UI stay source-neutral. */
 export type SourceKind = 'email' | 'feishu' | 'wecom' | 'wechat' | 'meeting'
 export const SOURCE_KINDS: readonly SourceKind[] = ['email', 'feishu', 'wecom', 'wechat', 'meeting']
+/** A channel kind (`source.kind`, `Rule.sources`): lower-case letters, digits and dashes. */
+export const CHANNEL_KIND = /^[a-z][a-z0-9-]{0,30}$/
 /** AI triage result of one incoming message. */
 export type TriageCategory = 'request' | 'reply_needed' | 'fyi' | 'notification' | 'marketing' | 'other'
 export const TRIAGE_CATEGORIES: readonly TriageCategory[] = ['request', 'reply_needed', 'fyi', 'notification', 'marketing', 'other']
@@ -21,7 +24,8 @@ export interface Rule {
   /** Triage categories this workflow never handles. Undefined keeps the safe default (notifications and marketing). */
   exclude?: TriageCategory[]
   autonomy?: Autonomy
-  sources?: SourceKind[]
+  /** `email` and channel kinds; a channel that is not installed simply brings no items. */
+  sources?: string[]
   /**
    * How a message is assigned. `ai` (default): only when AI confirms the workflow fits; uncertain cases are
    * suggested to you and nothing is assigned without a model. `literal`: every message meeting the literal
@@ -64,47 +68,11 @@ export interface Classification {
   by: 'ai' | 'manual'; confidence?: Confidence; reason?: string; candidates?: string[]; at: string
 }
 export interface Cursor { uidValidity: number; lastUid: number }
-/** Where a task came from. Email uses mailbox coordinates; a WeChat segment reuses the same shape (account `wechat`, folder = chat id, uid = last message sequence) so older builds can still read the data. */
-export interface Source { account: string; folder: string; uid: number; uidValidity: number; kind?: 'wechat' }
-/** One normalized WeChat message as returned by the read-only bridge. */
-export interface WechatMessage {
-  seq: number; at: string; sender: string; senderName: string; self: boolean; type: string; text: string
-  quote?: { sender: string; text: string }
-  mentionsMe?: boolean
-}
-/** A WeChat conversation segment handled as one task. `reply` is the AI's suggested reply; nothing is ever sent. */
-export interface WechatSegment {
-  chat: string; chatName: string; group: boolean; messages: WechatMessage[]; fromSeq: number; toSeq: number
-  mentioned?: boolean; reply?: string; replyRevision?: number
-}
-export type WechatChatKind = 'person' | 'group'
-export interface WechatChat { id: string; name: string; kind: WechatChatKind; lastAt?: string }
-/** Which conversations may be read. Allow mode reads only the listed ones; block mode reads everything except them. */
-export interface WechatList { mode: 'allow' | 'block'; list: string[] }
-export interface WechatSettings {
-  enabled: boolean
-  /** Python command, e.g. `py -3` or a full path to python.exe. */
-  python?: string
-  /** Folder of the wechatauto-replica checkout when it is not installed with pip. */
-  library?: string
-  people: WechatList
-  groups: WechatList & { scope: 'mention' | 'all' }
-  /** A segment is handled once the chat has been quiet this long. */
-  quietMinutes?: number
-  /** Display names of listed chats, so the lists stay readable while WeChat is offline. */
-  names?: Record<string, string>
-}
-export interface WechatPending { chatName: string; group: boolean; messages: WechatMessage[]; firstAt: string; lastAt: string }
-export interface WechatState { watermarks: Record<string, number>; pending: Record<string, WechatPending> }
-export interface WechatStatus { ready: boolean; wxid?: string; name?: string; library?: string; error?: string }
-export interface WechatService {
-  status(signal?: AbortSignal): Promise<WechatStatus>
-  chats(signal?: AbortSignal): Promise<WechatChat[]>
-  search(q: string, signal?: AbortSignal): Promise<WechatChat[]>
-  latest(chats: string[], signal?: AbortSignal): Promise<Record<string, number>>
-  poll(watermarks: Record<string, number>, signal?: AbortSignal): Promise<Record<string, WechatMessage[]>>
-  history(chat: string, offset: number, limit: number, signal?: AbortSignal): Promise<{ messages: WechatMessage[]; more: boolean }>
-}
+/**
+ * Where a task came from. Mail: account, folder, UID and the folder's generation. Another channel sets `kind` to its
+ * own kind; `folder` is its scope (e.g. a conversation) and `uid` the position there, e.g. the last message.
+ */
+export interface Source { account: string; folder: string; uid: number; uidValidity: number; kind?: string }
 export interface Triage {
   state: 'pending' | 'done'
   category?: TriageCategory
@@ -117,11 +85,14 @@ export interface Triage {
   archived?: boolean
 }
 export interface Check { item: string; quote?: string }
+export interface SuggestedReply { text: string; revision: number }
 export interface AutoSend { at: string; scheduledAt: string; autonomy: Autonomy; draftRevision: number; canceledAt?: string; reason?: string }
 export interface Task {
   id: string; revision: number; title: string; account: string; status: Status; from: string; subject: string; body: string
   receivedAt: string; updatedAt: string; ruleId?: string; ruleName?: string; rule?: Rule
-  source: Source; summary?: string; error?: string; draftId?: string; draft?: any; sessionId?: string; hasAttachments?: boolean; mailLoaded?: boolean
+  source: Source; summary?: string; error?: string; draftId?: string; draft?: any; sessionId?: string
+  /** What the last background AI run did, for debugging (src/trace.ts); shown only when `settings.showTrace` is on. */
+  trace?: AgentTrace; hasAttachments?: boolean; mailLoaded?: boolean
   informationGaps?: string; needsInfoKind?: 'information' | 'attachments'
   bodyHtml?: string; to?: string; cc?: string; mailDate?: string; mailSize?: number
   messageId?: string; references?: string; replyTo?: string; attachments: { filename: string; size: number; part?: string; contentType?: string; localPath?: string }[]
@@ -129,7 +100,10 @@ export interface Task {
   triage?: Triage
   checks?: Check[]
   autoSend?: AutoSend
-  wechat?: WechatSegment
+  /** Channel-private data of an item from another channel (e.g. a conversation segment); only that channel reads it. */
+  channelData?: unknown
+  /** The AI's suggested reply for a channel where replies are copied by hand; nothing is ever sent from here. */
+  reply?: SuggestedReply
   match?: MatchInfo
   /** Business category from a classification scheme. */
   classification?: Classification
@@ -164,12 +138,15 @@ export interface Settings {
   enabled: boolean; pollSeconds: number; showWorkbench?: boolean; notifyNewTodo?: boolean
   /** AI triage before workflow matching. Defaults on. */
   triage?: boolean
+  /** Show what each background AI run did in the task record (for debugging). Off by default. */
+  showTrace?: boolean
   /** Delay before an automatic reply is actually submitted; it can be withdrawn meanwhile. */
   undoMinutes?: number
   briefEnabled?: boolean; briefTime?: string
   weeklyEnabled?: boolean; weeklyDay?: number; weeklyTime?: string
   meetingBriefMinutes?: number
-  wechat?: WechatSettings
+  /** Settings of other channels by kind, validated by each channel before saving. */
+  channels?: Record<string, unknown>
   /** Who uses this workbench, for `{{user.*}}` variables and the AI's runtime context. No secrets. */
   profile?: Profile
   /** Optional pages hidden from the workbench navigation. */
@@ -182,7 +159,6 @@ export interface State {
   cursors: Record<string, Cursor>; logs: Log[]
   activity?: Activity[]; topics?: Topic[]; reports?: Report[]; brief?: Brief
   senders?: Record<string, SenderPreference>
-  wechat?: WechatState
   /** Learned examples per workflow, outside `rules` so learning never bumps the configuration revision. */
   ruleExamples?: Record<string, RuleExample[]>
   /** Classification schemes (configuration: saving one bumps `configRevision`). */
@@ -227,8 +203,10 @@ export interface RangeMessage { uid: number; from: string; subject: string; date
 export interface AgentOutput { summary: string; needsInfo?: string; needsInfoKind?: 'information' | 'attachments'; informationGaps?: string; subject?: string; text?: string; checks?: Check[]; lowRisk?: boolean }
 /** Trusted runtime context for the AI: variable values for the instructions and a short description of who and when. */
 export interface RuntimeContext { values: Record<string, string>; text: string }
-export interface AgentRunner { available(): boolean; run(task: Task, rule: Rule, signal: AbortSignal, options?: { language?: 'zh' | 'en'; context?: RuntimeContext }): Promise<{ output: AgentOutput; sessionId?: string }> }
-export interface TriageInput { mail: { from: string; subject: string; body: string; quotedHistory?: string; hasAttachments: boolean; receivedAt: string; channel?: 'email' | 'wechat' }; thread?: { previousRule?: { id: string; name: string } }; classifier?: TriageClassifier; context?: { now: string; timezone: string; department?: string; role?: string }; rules: { id: string; name: string; semantic: string; output: RuleOutput; hint: string; examples?: { match: boolean; text: string }[] }[]; uiLanguage?: 'zh' | 'en' }
+/** For an item from another channel: its writing rules and what the agent reads, under the channel's own key. */
+export interface AgentChannel { kind: string; guide: string; input: Record<string, unknown> }
+export interface AgentRunner { available(): boolean; run(task: Task, rule: Rule, signal: AbortSignal, options?: { language?: 'zh' | 'en'; context?: RuntimeContext; channel?: AgentChannel }): Promise<{ output: AgentOutput; sessionId?: string; trace?: AgentTrace }> }
+export interface TriageInput { mail: { from: string; subject: string; body: string; quotedHistory?: string; hasAttachments: boolean; receivedAt: string; channel?: string }; channelHint?: string; thread?: { previousRule?: { id: string; name: string } }; classifier?: TriageClassifier; context?: { now: string; timezone: string; department?: string; role?: string }; rules: { id: string; name: string; semantic: string; output: RuleOutput; hint: string; examples?: { match: boolean; text: string }[] }[]; uiLanguage?: 'zh' | 'en' }
 export interface TriageOutput { category: TriageCategory; urgency: 'high' | 'normal' | 'low'; reason: string; nextStep: string; ruleId: string; confidence?: Confidence; ruleReason?: string; business?: BusinessVerdict }
 /** What the triage model sees of a classification scheme. */
 export interface TriageClassifier { guidance: string; categories: { id: string; name: string; include: string; exclude: string; fallback: boolean; examples: { match: boolean; text: string }[] }[] }

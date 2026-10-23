@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { connectLocale, systemMessage, t, useWorkbenchLocale, type LocaleService } from "./i18n";
+import { addSystemEnglish, connectLocale, systemMessage, t, useWorkbenchLocale, type LocaleService } from "./i18n";
 import { Context, type Route, type View, type WorkbenchContext } from "./context";
 import { EMPTY, api, errorMessage, time, type Snapshot } from "./lib";
 import { dismissReminder, preferences, refreshPreferences, resetPreferences, subscribePreferences, usePreferences, useReminder } from "./store";
@@ -9,6 +9,7 @@ import { DecideView, DoneView, ItemsView, LogsView, MeetingsView, TodayView } fr
 import { TopicsView } from "./topics";
 import { PlansView } from "./plans";
 import { WorkbenchSettings } from "./settings";
+import { PAGE_CHILDREN, SETTINGS_CHILDREN, SlotProvider, type RenderSlot } from "./slots";
 // @ts-ignore CSS is bundled as a text module by scripts/build-client.mjs.
 import stylesheet from "./styles.css";
 
@@ -16,21 +17,34 @@ export { WorkbenchSettings };
 let lastRoute: Route = { view: "today" };
 const TABS: [View, string, string][] = [["today", "今日", "sun"], ["decide", "待我决策", "inbox"], ["done", "AI 已代办", "done"], ["items", "全部事项", "grid"], ["meetings", "会议", "calendar"], ["topics", "主题与报告", "topic"], ["plans", "处理方案", "rules"]];
 
-export function Workbench() {
+/** The workbench page. `renderSlot` comes from DSH for the channel parts this entry declares. */
+export function Workbench({ renderSlot }: { renderSlot?: RenderSlot }) {
   useWorkbenchLocale();
   const [data, setData] = useState<Snapshot>(EMPTY), [loaded, setLoaded] = useState(false);
   const [route, setRoute] = useState<Route>(lastRoute);
   const [busy, setBusy] = useState(""), [error, setError] = useState(""), [notice, setNotice] = useState(""), [hiddenStatus, setHiddenStatus] = useState("");
+  /** Navigation requested during an operation, applied when it finishes. */
+  const queued = useRef<Route | undefined>(undefined), goRef = useRef<(next: Route) => void>(() => {});
   const op = useRef(false), sequence = useRef(0), mounted = useRef(true), leave = useRef<(() => boolean) | undefined>(undefined);
+  /** Version of the data on screen; the periodic check sends it and gets only “unchanged” while nothing changed. */
+  const version = useRef<string | undefined>(undefined);
   const refresh = useCallback(async () => {
     const request = ++sequence.current;
     const snapshot = await api<Snapshot>("snapshot");
-    if (mounted.current && request === sequence.current) { setData(snapshot); setLoaded(true); }
+    if (mounted.current && request === sequence.current) { addSystemEnglish((snapshot.channelInfo ?? []).map(item => item.systemEnglish)); version.current = snapshot.version; setData(snapshot); setLoaded(true); }
     return snapshot;
   }, []);
   useEffect(() => {
     mounted.current = true;
-    const load = () => refresh().catch(failure => setError(errorMessage(failure)));
+    const check = async () => {
+      if (!version.current) { await refresh(); return; }
+      const request = ++sequence.current;
+      const snapshot = await api<Snapshot>("snapshot", { since: version.current });
+      if (!mounted.current || request !== sequence.current || snapshot.unchanged) return;
+      addSystemEnglish((snapshot.channelInfo ?? []).map(item => item.systemEnglish));
+      version.current = snapshot.version; setData(snapshot); setLoaded(true);
+    };
+    const load = () => check().catch(failure => setError(errorMessage(failure)));
     load();
     const timer = setInterval(load, 8000);
     return () => { mounted.current = false; clearInterval(timer); };
@@ -41,18 +55,24 @@ export function Workbench() {
     if (op.current) return;
     op.current = true; setBusy(key); setError(""); setNotice("");
     try { await work(); } catch (failure) { setError(errorMessage(failure)); await refresh().catch(() => {}); }
-    finally { op.current = false; setBusy(""); }
+    finally {
+      op.current = false; setBusy("");
+      // A page asked to go somewhere while the operation ran (e.g. to the workflow it just saved): go there now.
+      const next = queued.current; queued.current = undefined;
+      if (next) goRef.current(next);
+    }
   }, [refresh]);
   const routeRef = useRef(route);
   routeRef.current = route;
   const go = useCallback((next: Route) => {
-    if (op.current) return;
+    if (op.current) { queued.current = next; return; }
     const current = routeRef.current;
-    if (current.view === next.view && current.task === next.task && current.rule === next.rule && current.topic === next.topic && current.report === next.report && !!current.chats === !!next.chats) return;
+    if (current.view === next.view && current.task === next.task && current.rule === next.rule && current.topic === next.topic && current.report === next.report && current.channel === next.channel) return;
     if (leave.current && !leave.current()) return;
     leave.current = undefined;
     setRoute(next);
   }, []);
+  goRef.current = go;
   const context: WorkbenchContext = useMemo(() => ({ data, loaded, busy, refresh, perform, notify: setNotice, fail: setError, go, leave }), [data, loaded, busy, refresh, perform, go]);
   const decisions = data.tasks.filter(task => task.attention).length;
   const recent = data.activity.filter(item => Date.parse(item.at) >= Date.now() - 864e5 && !item.undoneAt).length;
@@ -68,13 +88,14 @@ export function Workbench() {
   // Hidden pages leave the tab bar; they stay reachable from links inside the workbench.
   const view = route.view === "today" && hidden.has("today") && loaded ? "decide" : route.view;
   const page = !loaded ? <div className="bkw-pad"><Empty title={error ? t("暂时无法加载工作台") : t("正在加载工作台")} text={error ? t("请检查服务连接后刷新重试。") : t("正在获取你的任务与方案。")}><button type="button" className="bkw-btn" onClick={() => void perform("refresh", refresh)}>{t("重新加载")}</button></Empty></div>
-    : view === "today" ? <TodayView /> : view === "decide" ? <DecideView selected={route.task} /> : view === "done" ? <DoneView /> : view === "items" ? <ItemsView selected={route.task} chats={route.chats} />
+    : view === "today" ? <TodayView /> : view === "decide" ? <DecideView selected={route.task} /> : view === "done" ? <DoneView /> : view === "items" ? <ItemsView selected={route.task} channel={route.channel} />
     : view === "meetings" ? <MeetingsView /> : view === "topics" ? <TopicsView topicId={route.topic} reportId={route.report} /> : view === "plans" ? <PlansView ruleId={route.rule} />
     : view === "logs" ? <LogsView /> : <div className="bkw-pad"><WorkbenchSettings embedded /></div>;
-  return <Context.Provider value={context}>
+  return <Context.Provider value={context}><SlotProvider render={renderSlot}>
     <div className={`bkw bkw-workbench view-${view}`} data-testid="bkms-workbench">
       <header className="bkw-top">
-        <div className="bkw-top-row">
+        {/* The title row drags the window on macOS, like the host's own page headers; its buttons stay clickable. */}
+        <div className="bkw-top-row" data-window-drag="">
           <h1>{t("任务工作台")}</h1>
           <div className="bkw-top-actions">
             <span className={`bkw-live ${data.settings.enabled ? "on" : ""}`}><i />{data.settings.enabled ? t("自动处理运行中") : t("自动处理已暂停")}{loaded && <small>{t("{0} 个信息源", connected)}{data.health.lastPoll ? ` · ${t("{0} 已同步", time(data.health.lastPoll))}` : ""}</small>}</span>
@@ -100,7 +121,7 @@ export function Workbench() {
       </div>}
       <main className="bkw-content">{page}</main>
     </div>
-  </Context.Provider>;
+  </SlotProvider></Context.Provider>;
 }
 
 function TodoReminder({ open }: { open?: () => void }) {
@@ -141,7 +162,8 @@ export function apply(ctx: ClientContext) {
     document.head.appendChild(style);
     return () => style.remove();
   }, "bkms-workbench: styles");
-  ctx.slots.inject("main", () => ctx.slots.register({ name: "main", key: "bkms-workbench", inject: () => ({}) }, Workbench));
+  // The page declares the parts channels can fill (client/slots.tsx); the settings section declares its own settings card slot.
+  ctx.slots.inject("main", () => ctx.slots.register({ name: "main", key: "bkms-workbench", inject: () => ({}), children: PAGE_CHILDREN }, Workbench));
   ctx.slots.inject("sidebar.panellist", () => {
     let remove: (() => void) | undefined;
     const update = () => {
@@ -156,5 +178,6 @@ export function apply(ctx: ClientContext) {
     const layout = ctx.get?.("layout") as { selectPanel?: (id: string) => void } | undefined;
     return { open: layout?.selectPanel ? () => layout.selectPanel!("bkms-workbench") : undefined };
   } }, TodoReminder));
-  ctx.slots.inject("settings.section", () => ctx.slots.register({ name: "settings.section", id: "bkms-workbench", order: 44, label: () => t("工作台设置"), inject: () => ({}) }, () => <WorkbenchSettings />));
+  ctx.slots.inject("settings.section", () => ctx.slots.register({ name: "settings.section", id: "bkms-workbench", order: 44, label: () => t("工作台设置"), inject: () => ({}), children: SETTINGS_CHILDREN },
+    ({ renderSlot }: { renderSlot?: RenderSlot }) => <SlotProvider render={renderSlot} settingsPage><WorkbenchSettings /></SlotProvider>));
 }

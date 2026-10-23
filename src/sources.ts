@@ -1,27 +1,21 @@
-import type { SourceKind } from './types.js'
+import { SOURCE_KINDS } from './types.js'
+import type { Channel } from './channels/types.js'
 
 /**
- * Contract for an information source. Email is implemented by the built-in mail module (`src/mail`, adapted from
- * dsh-email) and WeChat through the read-only bridge in `wechat.ts`; other IM and meeting platforms need an adapter that fulfils
- * the same contract before they can be connected. The workbench never simulates
- * a connection that does not exist.
+ * Connection status of each information source, for the page. Mail is built in; other sources are installed channels
+ * (`src/channels`). A source that is declared but not installed shows `adapter-required`: the workbench never
+ * simulates a connection that does not exist.
  */
-export interface SourceAdapter {
-  kind: SourceKind
-  /** Incremental read from a cursor; returns normalized messages and the next cursor. */
-  scan(cursor: unknown, signal: AbortSignal): Promise<{ cursor: unknown; messages: { id: string; from: string; subject: string; text: string; at: string; thread?: string }[] }>
-  /** Reply in the original conversation. Only ever invoked after review or within a workflow's bounded autonomy. */
-  reply?(messageId: string, text: string, signal: AbortSignal): Promise<{ receipt: string }>
-}
+export interface SourceStatus { kind: string; connected: boolean; detail: string }
 
-export interface SourceStatus { kind: SourceKind; connected: boolean; detail: string }
-
-export function sourceStatuses(email: { ready: boolean; accounts: number; error?: string }, wechat?: { enabled: boolean; ready: boolean; name?: string; error?: string }): SourceStatus[] {
-  return [
-    { kind: 'email', connected: email.ready && email.accounts > 0, detail: email.ready ? (email.accounts ? `${email.accounts}` : 'no-account') : 'unavailable' },
-    { kind: 'feishu', connected: false, detail: 'adapter-required' },
-    { kind: 'wecom', connected: false, detail: 'adapter-required' },
-    { kind: 'wechat', connected: !!wechat?.enabled && wechat.ready, detail: !wechat ? 'adapter-required' : !wechat.enabled ? 'disabled' : wechat.ready ? (wechat.name || 'ready') : 'unavailable' },
-    { kind: 'meeting', connected: false, detail: 'adapter-required' },
-  ]
+export function sourceStatuses(email: { ready: boolean; accounts: number; error?: string }, channels: { channel: Channel; settings: unknown }[]): SourceStatus[] {
+  const installed = new Map(channels.map(item => [item.channel.kind, item]))
+  const status = (kind: string): SourceStatus => {
+    if (kind === 'email') return { kind, connected: email.ready && email.accounts > 0, detail: email.ready ? (email.accounts ? `${email.accounts}` : 'no-account') : 'unavailable' }
+    const found = installed.get(kind)
+    if (!found) return { kind, connected: false, detail: 'adapter-required' }
+    const enabled = found.channel.settings.enabled(found.settings), health = found.channel.health()
+    return { kind, connected: enabled && !!health?.ready, detail: !enabled ? 'disabled' : health?.ready ? (health.name || 'ready') : 'unavailable' }
+  }
+  return [...new Set<string>([...SOURCE_KINDS, ...installed.keys()])].map(status)
 }

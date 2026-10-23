@@ -3,9 +3,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { systemMessage, t } from "./i18n";
 import { useWorkbench } from "./context";
 import { OriginalMailBody } from "./original-mail";
-import { AUTONOMY_LABEL, CATEGORY, CONFIDENCE, api, counterpart, draftValue, downloadOriginal, downloadPreview, errorMessage, fullDate, minutesLeft, nextStep, senderName, sourceOf, statusLabel, taskTitle, time, uploadDraftAttachment, when, type Draft, type EditDraft, type Rule, type SendPlan, type Task } from "./lib";
+import { AUTONOMY_LABEL, CATEGORY, CONFIDENCE, api, counterpart, draftValue, downloadOriginal, downloadPreview, errorMessage, fullDate, isMail, minutesLeft, nextStep, senderName, sourceName, sourceOf, statusLabel, taskTitle, time, uploadDraftAttachment, when, type AgentTrace, type Draft, type EditDraft, type Rule, type SendPlan, type Task } from "./lib";
 import { Alert, AutoTextarea, Field, Icon, Modal, SourceTag, StatusTag, Tag } from "./ui";
-import { ChatHistory, SegmentConversation } from "./wechat";
+import { ChannelPart } from "./slots";
 import { ClassificationBlock } from "./classification";
 import { MIN_RESULT, MIN_SOURCE, setSourceExpanded, setSourceRatio, sourceColumn, useSourceLayout } from "./layout";
 
@@ -57,9 +57,10 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
   const [, setTick] = useState(0);
   const ackKey = `${task.id}:${task.draft?.revision ?? 0}`;
   const acks = acknowledged.get(ackKey) ?? new Set<number>();
-  const wechat = task.source?.kind === "wechat";
-  const [reply, setReply] = useState(task.wechat?.reply ?? ""), [replyBase, setReplyBase] = useState(task.wechat?.reply ?? "");
-  const replyDirty = wechat && reply !== replyBase;
+  // Items from other channels are read-only here: the AI suggests a reply that a person copies into that channel's app.
+  const kind = sourceOf(task), other = !isMail(task), channelName = sourceName(kind, data.channelInfo);
+  const [reply, setReply] = useState(task.reply?.text ?? ""), [replyBase, setReplyBase] = useState(task.reply?.text ?? "");
+  const replyDirty = other && reply !== replyBase;
   const dirty = (!!form && JSON.stringify(form) !== original) || replyDirty;
   const autoActive = !!task.autoSend && !task.autoSend.canceledAt && task.status === "review";
   const locked = !!busy || task.status !== "review" || (!!task.draft && task.draft.state !== "draft") || autoActive;
@@ -72,7 +73,7 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
   const checks = task.checks?.length ? task.checks : task.informationGaps && task.status === "review" ? task.informationGaps.split(/\n+/).map(line => line.replace(/^\s*(\d+[.、)]|[-•·])\s*/, "").trim()).filter(Boolean).map(item => ({ item, quote: undefined as string | undefined })) : [];
   const pendingChecks = checks.filter((_, index) => !acks.has(index)).length;
 
-  useEffect(() => { if (!replyDirty) { setReply(task.wechat?.reply ?? ""); setReplyBase(task.wechat?.reply ?? ""); } }, [task.id, task.wechat?.replyRevision]);
+  useEffect(() => { if (!replyDirty) { setReply(task.reply?.text ?? ""); setReplyBase(task.reply?.text ?? ""); } }, [task.id, task.reply?.revision]);
   useEffect(() => { if (!autoActive) return; const timer = setInterval(() => setTick(value => value + 1), 30000); return () => clearInterval(timer); }, [autoActive]);
   useEffect(() => {
     if (!task.draft) { if (!dirty) { setForm(undefined); setOriginal(""); setFormRevision(undefined); setTaskRevision(task.revision); } return; }
@@ -100,9 +101,9 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
   const run = (key: string, work: () => Promise<unknown>) => void perform(key, work);
   const canReject = !!task.ruleId && !["running", "sending", "sent", "uncertain", "queued"].includes(task.status);
   const rejectRule = () => run("rejectRule", async () => { await api("rejectRule", { id: task.id, revision: task.revision }); cachedDraft = undefined; await refresh(); notify(t("已记下：这类信息不属于该方案")); });
-  const saveReply = () => run("saveReply", async () => { await api("saveReply", { id: task.id, revision: task.revision, replyRevision: task.wechat?.replyRevision, text: reply }); setReplyBase(reply); await refresh(); notify(t("回复已保存")); });
-  const copyReply = () => run("copyReply", async () => { await copyText(reply); notify(t("已复制，请到微信中粘贴发送")); });
-  const markHandled = () => run("markHandled", async () => { await api("markHandled", { id: task.id, revision: task.revision }); await refresh(); notify(t("已标记为在微信中处理")); onDone?.(); });
+  const saveReply = () => run("saveReply", async () => { await api("saveReply", { id: task.id, revision: task.revision, replyRevision: task.reply?.revision, text: reply }); setReplyBase(reply); await refresh(); notify(t("回复已保存")); });
+  const copyReply = () => run("copyReply", async () => { await copyText(reply); notify(t("已复制，请到{0}中粘贴发送", channelName)); });
+  const markHandled = () => run("markHandled", async () => { await api("markHandled", { id: task.id, revision: task.revision }); await refresh(); notify(t("已标记为在{0}中处理", channelName)); onDone?.(); });
   async function saveDraft() {
     if (!form) return;
     await api("saveDraft", { id: task.id, revision: taskRevision, draftRevision: formRevision, draft: form });
@@ -116,7 +117,7 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.key !== "Enter" || preview) return;
-      if (wechat) { if (task.status !== "review" || busy) return; event.preventDefault(); if (replyDirty) saveReply(); else if (reply) copyReply(); return; }
+      if (other) { if (task.status !== "review" || busy) return; event.preventDefault(); if (replyDirty) saveReply(); else if (reply) copyReply(); return; }
       if (dirty && !locked) { event.preventDefault(); run("saveDraft", saveDraft); }
       else if (canSend) { event.preventDefault(); openPreview(); }
     };
@@ -131,12 +132,12 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
       <StatusTag task={task} />
       {task.triage?.urgency === "high" && ["review", "needs_info", "unmatched", "failed"].includes(task.status) && <Tag tone="danger">{t("紧急")}</Tag>}
       {task.triage?.category && <Tag>{t(CATEGORY[task.triage.category])}</Tag>}
-      <SourceTag kind={sourceOf(task)} />
-      {task.wechat?.mentioned && <Tag tone="accent">{t("@我")}</Tag>}
+      <SourceTag kind={kind} />
+      {other && <ChannelPart part="tags" kind={kind} props={{ task }} />}
     </div>
-    <h2>{wechat ? task.title : task.subject || task.title || t("无主题邮件")}</h2>
+    <h2>{other ? task.title : task.subject || task.title || t("无主题邮件")}</h2>
     <div className="bkw-ws-meta">
-      <span>{wechat ? (task.wechat?.group ? t("群聊 · {0}", task.wechat.chatName) : t("私聊 · {0}", task.wechat?.chatName || "")) : senderName(task.from)}</span><span>{fullDate(task.mailDate || task.receivedAt)}</span>
+      <span>{other ? <ChannelPart part="counterpart" kind={kind} props={{ task }} fallback={task.subject || task.from} /> : senderName(task.from)}</span><span>{fullDate(task.mailDate || task.receivedAt)}</span>
       <span>{task.ruleName ? t("方案：{0}", task.ruleName) : t("尚未匹配方案")}</span>
       {latestRule?.autonomy && <span>{t("自主级别：{0}", t(AUTONOMY_LABEL[latestRule.autonomy]))}</span>}
     </div>
@@ -218,14 +219,14 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
 
     {["sent", "uncertain"].includes(task.status) && <ReceiptPanel draft={task.draft} />}
 
-    {wechat && task.wechat?.reply !== undefined && <section className="bkw-draft" aria-label={t("建议回复")}>
+    {other && task.reply !== undefined && <section className="bkw-draft" aria-label={t("建议回复")}>
       <div className="bkw-draft-head">
         <h3>{t("建议回复")}</h3>
-        <span className="bkw-muted">{replyDirty ? t("有未保存的修改") : task.status === "completed" ? t("已在微信中处理") : t("只读接入：复制后在微信中发送")}</span>
+        <span className="bkw-muted">{replyDirty ? t("有未保存的修改") : task.status === "completed" ? t("已在{0}中处理", channelName) : t("只读接入：复制后在{0}中发送", channelName)}</span>
       </div>
       <HighlightedBody value={reply} disabled={!!busy || task.status !== "review"} checks={checks} active={activeCheck} onChange={setReply} />
     </section>}
-    {wechat && task.wechat && <SegmentConversation task={task} />}
+    {other && <ChannelPart part="body" kind={kind} props={{ task }} fallback={<section className="bkw-block"><div className="bkw-prose">{task.body}</div></section>} />}
 
     {form && task.draft && <section className="bkw-draft" aria-label={t("回复草稿")}>
       <div className="bkw-draft-head">
@@ -291,10 +292,10 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
       </div>}
     </div>
     <div className="bkw-actions">
-      {wechat && <>
+      {other && <>
         {replyDirty && <button type="button" className="bkw-btn" disabled={!!busy} onClick={saveReply}>{busy === "saveReply" ? t("保存中…") : t("保存修改")}</button>}
         {task.status === "review" && !!reply && <button type="button" className="bkw-btn" disabled={!!busy || replyDirty} onClick={copyReply}><Icon name="copy" size={15} />{t("复制回复")}{!replyDirty && <kbd>⌘↵</kbd>}</button>}
-        {["review", "needs_info", "unmatched", "failed"].includes(task.status) && <button type="button" className="bkw-btn primary" disabled={!!busy || replyDirty} onClick={markHandled}><Icon name="check" size={15} />{t("已在微信处理")}</button>}
+        {["review", "needs_info", "unmatched", "failed"].includes(task.status) && <button type="button" className="bkw-btn primary" disabled={!!busy || replyDirty} onClick={markHandled}><Icon name="check" size={15} />{t("已在{0}处理", channelName)}</button>}
       </>}
       {task.draft && task.status === "review" && !autoActive && <>
         {dirty && <button type="button" className="bkw-btn" disabled={locked} onClick={() => run("saveDraft", saveDraft)}>{busy === "saveDraft" ? t("保存中…") : t("保存草稿")}</button>}
@@ -330,12 +331,12 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
           setSourceRatio(Math.min(Math.max(base + (event.key === "ArrowLeft" ? step : -step), MIN_SOURCE / rect.width), Math.max(MIN_SOURCE, rect.width - MIN_RESULT) / rect.width));
         }} />
       <div className="bkw-subtabs" role="tablist">
-        {([["mail", wechat ? t("聊天记录") : t("原邮件")], ["related", related.length ? t("相关往来 {0}", related.length) : t("相关往来")], ["history", t("记录")]] as const).map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={sourceTab === id} onClick={() => setSourceTab(id)}>{label}</button>)}
+        {([["mail", other ? t("聊天记录") : t("原邮件")], ["related", related.length ? t("相关往来 {0}", related.length) : t("相关往来")], ["history", t("记录")]] as const).map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={sourceTab === id} onClick={() => setSourceTab(id)}>{label}</button>)}
       <button type="button" className="bkw-icon-btn bkw-expand" aria-pressed={layout.expanded} aria-label={layout.expanded ? t("恢复宽度") : t("展开阅读")} title={layout.expanded ? t("恢复宽度（Esc）") : t("展开阅读")} onClick={() => setSourceExpanded(!layout.expanded)}><Icon name={layout.expanded ? "collapse" : "expand"} size={15} /></button>
       </div>
       <div className="bkw-ws-source-body">
-        {sourceTab === "mail" && wechat && task.wechat && <ChatHistory key={task.wechat.chat} chat={task.wechat.chat} group={task.wechat.group} current={task.id} />}
-        {sourceTab === "mail" && !wechat && <>
+        {sourceTab === "mail" && other && <ChannelPart part="source" kind={kind} props={{ task, tasks: data.tasks, open: id => go({ view: "items", task: id }) }} fallback={<div className="bkw-prose">{task.body}</div>} />}
+        {sourceTab === "mail" && !other && <>
           <div className="bkw-mail-head">
             <strong>{task.subject || t("无主题邮件")}</strong>
             <dl>
@@ -363,15 +364,15 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
         {sourceTab === "related" && <div className="bkw-related">
           {!related.length && <p className="bkw-muted">{t("没有找到同一会话或相同主题的往来。")}</p>}
           {related.map(item => <button type="button" key={item.id} className="bkw-related-item" onClick={() => go({ view: "items", task: item.id })}>
-            <span className="bkw-related-meta"><SourceTag kind={sourceOf(item)} />{task.relatedIds?.includes(item.id) ? (wechat ? t("同一聊天") : t("同一会话")) : t("可能相关")}<time>{when(item.receivedAt)}</time></span>
+            <span className="bkw-related-meta"><SourceTag kind={sourceOf(item)} />{task.relatedIds?.includes(item.id) ? (other ? t("同一聊天") : t("同一会话")) : t("可能相关")}<time>{when(item.receivedAt)}</time></span>
             <strong>{taskTitle(item)}</strong>
             <span className="bkw-muted">{counterpart(item)} · {statusLabel(item)}</span>
           </button>)}
           {!!task.possibleIds?.length && <p className="bkw-footnote">{t("“可能相关”只按发件人和主题推断，不会自动合并。")}</p>}
         </div>}
-        {sourceTab === "history" && <div className="bkw-timeline">
+        {sourceTab === "history" && <><div className="bkw-timeline">
           {task.history?.length ? task.history.slice().reverse().map((event, index) => <div key={index}><i /><time>{fullDate(event.at)}</time><p>{systemMessage(event.message)}</p></div>) : <p className="bkw-muted">{t("尚无处理记录")}</p>}
-        </div>}
+        </div>{task.trace && <AgentTraceView trace={task.trace} />}</>}
       </div>
     </aside>
 
@@ -486,3 +487,20 @@ export function ReceiptPanel({ draft }: { draft?: Draft }) {
 
 export const nextStepOf = nextStep;
 export const errorText = (error: unknown) => systemMessage(errorMessage(error));
+
+/** The last background AI run of a task, for debugging (shown only when “show AI runs” is on in settings). */
+function AgentTraceView({ trace }: { trace: AgentTrace }) {
+  const seconds = (trace.durationMs / 1000).toFixed(1);
+  return <details className="bkw-trace">
+    <summary>{t("AI 处理过程")}<small>{t("{0} · 用时 {1} 秒 · {2} 步", fullDate(trace.startedAt), seconds, trace.steps.length)}{trace.tokens ? ` · ${t("输入 {0} / 输出 {1} tokens", trace.tokens.input, trace.tokens.output)}` : ""}</small></summary>
+    <p className="bkw-trace-meta"><span>{t("结束：{0}", trace.outcome)}</span><code>{trace.sessionId}</code></p>
+    <ol>{trace.steps.map((step, index) => <li key={index} className={`${step.kind} ${step.error ? "error" : ""}`}>
+      <strong>{step.kind === "tool" ? t("工具 {0}", step.name || "") : t("模型")}{step.at ? <time>{time(new Date(step.at).toISOString())}</time> : null}</strong>
+      {step.text && <pre>{step.text}</pre>}
+      {step.input && <><small>{t("输入")}</small><pre>{step.input}</pre></>}
+      {step.output && <><small>{t("输出")}</small><pre>{step.output}</pre></>}
+      {step.error && <><small>{t("错误")}</small><pre>{step.error}</pre></>}
+    </li>)}</ol>
+    {trace.truncated && <p className="bkw-muted">{t("步骤较多，只保留了前 60 步。")}</p>}
+  </details>;
+}

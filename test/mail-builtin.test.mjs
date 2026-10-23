@@ -4,7 +4,8 @@ import { mkdir, mkdtemp, rm, stat, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
-import { Store } from '../lib/store.js'
+import { WorkbenchRepository } from '../lib/storage/repository.js'
+import { stateOf, setSettings, editRules, editTask, editTasks, readFresh } from './helpers.mjs'
 import { Engine } from '../lib/engine.js'
 import { WorkbenchApi } from '../lib/api.js'
 import { MailService, moveMessage, mailWindow, listRange } from '../lib/mail/service.js'
@@ -34,12 +35,12 @@ function fakePool() {
 }
 
 async function setup(t) {
-  const root = await mkdtemp(join(tmpdir(), 'bkms-mail-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
+  const root = await mkdtemp(join(tmpdir(), 'bkms-mail-')), closers = []
+  // Close what the test opened before removing the folder: Windows keeps open files.
+  t.after(async () => { for (const close of closers.reverse()) await close(); mail.close(); await rm(root, { recursive: true, force: true }) })
   const pool = fakePool(), mail = new MailService(join(root, 'mail'), pool.create)
   await mail.reload()
-  t.after(() => mail.close())
-  return { root, mail, pool }
+  return { root, mail, pool, onClose: close => closers.push(close) }
 }
 
 test('accounts: validated, password kept server-side, file private, presets resolved', async t => {
@@ -152,11 +153,11 @@ test('a broken old draft file never blocks the built-in draft store', async t =>
 })
 
 test('end to end through the built-in service: baseline, new mail, draft, reviewed send', async t => {
-  const { root, mail, pool } = await setup(t)
-  const store = new Store(join(root, 'data'))
+  const { root, mail, pool, onClose } = await setup(t)
+  const store = new WorkbenchRepository(join(root, 'data'))
   const agent = { available: () => true, async run() { return { output: { summary: '客户询价。', subject: 'Re: 询价', text: '您好，报价如下。' }, sessionId: 's' } } }
   const engine = new Engine(store, () => mail.configured() ? mail.service() : undefined, agent), api = new WorkbenchApi(engine, undefined, undefined, mail)
-  await engine.start(); t.after(() => engine.stop())
+  await engine.start(); onClose(() => engine.stop())
   // No account yet: the settings view shows no error, just no account.
   let info = await api.action({ action: 'mailSettings' })
   assert.equal(info.health.email, false); assert.equal(info.health.error, undefined); assert.equal(info.mail.configured, false)
@@ -170,11 +171,11 @@ test('end to end through the built-in service: baseline, new mail, draft, review
   await assert.rejects(api.action({ action: 'saveMailAccount', account, revision: 0 }), error => error.status === 409)
   info = await api.action({ action: 'mailSettings' })
   assert.equal(info.health.email, true); assert.deepEqual(info.accounts.map(a => a.id), ['sales@example.test'])
-  await api.action({ action: 'saveRule', revision: (await store.read()).configRevision, rule: { name: '询价', enabled: true, priority: 100, account: '', folder: 'INBOX', match: { from: '', subject: '', hasAttachments: false, mode: 'all' }, instructions: '回复询价。', tools: [], output: 'reply', maxRetries: 0, matchMode: 'literal' } })
+  await api.action({ action: 'saveRule', revision: (await stateOf(store)).configRevision, rule: { name: '询价', enabled: true, priority: 100, account: '', folder: 'INBOX', match: { from: '', subject: '', hasAttachments: false, mode: 'all' }, instructions: '回复询价。', tools: [], output: 'reply', maxRetries: 0, matchMode: 'literal' } })
   await engine.poll()
   pool.state.inbox = [{ uid: 11, date: new Date().toISOString(), from: [{ address: 'buyer@example.test' }], subject: '询价', seen: false, hasAttachments: false }]
   await engine.poll()
-  for (let i = 0; i < 5 && (await store.read()).tasks.some(task => ['queued', 'running'].includes(task.status)); i++) await engine.processNext()
+  for (let i = 0; i < 5 && (await stateOf(store)).tasks.some(task => ['queued', 'running'].includes(task.status)); i++) await engine.processNext()
   const task = (await api.snapshot()).tasks[0]
   assert.equal(task.status, 'review'); assert.equal(task.account, 'sales@example.test'); assert.equal(task.draft.to, 'buyer@example.test')
   const preview = await api.action({ action: 'previewSend', id: task.id, revision: task.revision, draftRevision: task.draft.revision })
@@ -184,11 +185,11 @@ test('end to end through the built-in service: baseline, new mail, draft, review
   assert.deepEqual(pool.state.sends[0][7], { inReplyTo: 'm11@example.test', references: 'm11@example.test' })
   assert.equal((await api.snapshot()).tasks[0].status, 'sent')
   // A finished task whose draft is gone (e.g. kept by the old dsh-email plugin) is history: no workbench-wide warning.
-  await store.mutate(doc => { doc.tasks[0].draftId = '00000000-0000-4000-8000-000000000000' })
+  await editTask(store, 0, task => { task.draftId = '00000000-0000-4000-8000-000000000000' })
   let snapshot = await api.snapshot()
   assert.equal(snapshot.health.error, undefined); assert.equal(snapshot.tasks[0].draft, undefined)
   // A task still waiting for review does need its draft, so that is still reported.
-  await store.mutate(doc => { doc.tasks[0].status = 'review' })
+  await editTask(store, 0, task => { task.status = 'review' })
   snapshot = await api.snapshot()
   assert.match(snapshot.health.error, /草稿无法读取/)
 })

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { AUTONOMY, DEFAULT_EXCLUDE, SOURCE_KINDS, TRIAGE_CATEGORIES, WorkbenchError, type Confidence, type Rule, type TriageCategory } from './types.js'
+import { AUTONOMY, CHANNEL_KIND, DEFAULT_EXCLUDE, TRIAGE_CATEGORIES, WorkbenchError, type Confidence, type Rule, type TriageCategory } from './types.js'
 import { isPreparationTool } from './agent.js'
 const string = (v: unknown, max: number): string => { if (typeof v !== 'string' || v.length > max || v.includes('\0')) throw new WorkbenchError('规则字段格式或长度无效。'); return v.trim() }
 export function validateRule(input: any): Rule {
@@ -43,7 +43,7 @@ export function validateRule(input: any): Rule {
   }
   if (rule.autonomy && rule.output !== 'reply') delete rule.autonomy
   if (input.sources !== undefined) {
-    if (!Array.isArray(input.sources) || !input.sources.length || input.sources.some((s: unknown) => !SOURCE_KINDS.includes(s as any))) throw new WorkbenchError('信息来源无效。')
+    if (!Array.isArray(input.sources) || !input.sources.length || input.sources.some((s: unknown) => typeof s !== 'string' || !CHANNEL_KIND.test(s))) throw new WorkbenchError('信息来源无效。')
     const sources = [...new Set(input.sources)] as Rule['sources']
     if (!(sources!.length === 1 && sources![0] === 'email')) rule.sources = sources
   }
@@ -55,10 +55,10 @@ export function validateRule(input: any): Rule {
 }
 export const ruleExcludes = (rule: Rule): readonly TriageCategory[] => rule.exclude ?? DEFAULT_EXCLUDE
 export const ruleSources = (rule: Rule) => rule.sources ?? ['email']
-export function matches(rule: Rule, mail: { account: string; folder?: string; from: string; subject: string; hasAttachments: boolean; kind?: 'email' | 'wechat' }): boolean {
+export function matches(rule: Rule, mail: { account: string; folder?: string; from: string; subject: string; hasAttachments: boolean; kind?: string }): boolean {
   if (!rule.enabled) return false
-  // Mailbox and folder only narrow email; a WeChat segment matches by source plus sender and chat name.
-  if (mail.kind === 'wechat') { if (!ruleSources(rule).includes('wechat')) return false }
+  // Mailbox and folder only narrow mail; an item from another channel matches by its source plus sender and subject.
+  if (mail.kind && mail.kind !== 'email') { if (!(ruleSources(rule) as string[]).includes(mail.kind)) return false }
   else if (!ruleSources(rule).includes('email') || (rule.account && rule.account !== mail.account) || (mail.folder && rule.folder !== mail.folder)) return false
   const tests: boolean[] = []
   if (rule.match.from) tests.push(mail.from.toLowerCase().includes(rule.match.from.toLowerCase()))

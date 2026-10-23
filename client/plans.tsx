@@ -2,7 +2,7 @@ import * as React from "react";
 import { useEffect, useRef, useState } from "react";
 import { language, systemMessage, t } from "./i18n";
 import { useWorkbench } from "./context";
-import { AUTONOMY_LABEL, CATEGORY, SOURCE, api, errorMessage, when, type Autonomy, type Capabilities, type Category, type MatchMode, type Rule, type SourceKind } from "./lib";
+import { AUTONOMY_LABEL, CATEGORY, SOURCE, api, errorMessage, sourceName, when, type Autonomy, type Capabilities, type Category, type MatchMode, type Rule } from "./lib";
 import { Alert, AutoTextarea, Empty, Field, Icon, Switch, Tag } from "./ui";
 import { ClassifierEditor, blankClassifier } from "./classifiers";
 import { previewVariables, unknownVariables, useVariableMenu, type Profile } from "./variables";
@@ -29,29 +29,37 @@ export function PlansView({ ruleId }: { ruleId?: string }) {
   const classifier = classifierId && classifierId !== "new" ? classifiers.find(item => item.id === classifierId) : undefined;
   const selected = ruleId === "new" || classifierId ? undefined : ruleId === "triage" ? undefined : data.rules.find(rule => rule.id === ruleId) ?? (ruleId ? undefined : sorted[0]);
   const showTriage = ruleId === "triage" || (!ruleId && !sorted.length);
+  /** A group title with its own "new" button, so each kind of item is created where it is listed. */
+  const groupHead = (title: string, count: number, label: string, route: string, active: boolean) => <div className="bkw-nav-head">
+    <h4>{title}{count > 0 && <span className="bkw-nav-count">{count}</span>}</h4>
+    <button type="button" className={`bkw-nav-add ${active ? "on" : ""}`} title={label} aria-label={label} aria-pressed={active} onClick={() => open(route)}><Icon name="plus" size={13} /><span>{t("新建")}</span></button>
+  </div>;
+  /** The item being created, shown in the list until it is saved. */
+  const draft = (title: string) => <div className="bkw-nav-item tall on draft" aria-current="page"><span><strong>{title}</strong><small>{t("未保存")}</small></span></div>;
   return <div className="bkw-plans">
     <div className="bkw-pipeline" aria-label={t("每条信息的处理路径")}>
       {[t("收集"), t("AI 分拣：是什么、要不要处理"), t("匹配方案"), t("执行"), t("按自主级别：自动完成，或交你决策")].map((step, index) => <React.Fragment key={index}>{index > 0 && <Icon name="arrow" size={12} />}<span className={index === 1 ? "on" : ""}><b>{index + 1}</b>{step}</span></React.Fragment>)}
     </div>
     <div className="bkw-plans-body">
       <nav className="bkw-topic-nav" aria-label={t("方案列表")}>
-        <button type="button" className="bkw-btn primary block" onClick={() => open("new")}><Icon name="plus" size={15} />{t("新建方案")}</button>
         <div className="bkw-nav-group"><h4>{t("分拣（所有信息先经过）")}</h4>
           <button type="button" className={`bkw-nav-item tall ${showTriage ? "on" : ""}`} onClick={() => open("triage")}><span><strong>{t("AI 分拣")}</strong><small>{t("通知归档 · 识别请求 · 选择方案")}</small></span><Tag tone={data.defaults.triage ? "good" : "muted"}>{data.defaults.triage ? t("已开启") : t("已关闭")}</Tag></button>
         </div>
-        <div className="bkw-nav-group"><h4>{t("业务分类")}</h4>
+        <div className="bkw-nav-group">{groupHead(t("业务分类"), classifiers.length, t("新建分类方案"), "c:new", classifierId === "new")}
+          {classifierId === "new" && draft(t("新分类方案"))}
           {classifiers.map(item => <button type="button" key={item.id} className={`bkw-nav-item tall ${classifierId === item.id ? "on" : ""} ${item.enabled ? "" : "paused"}`} onClick={() => open("c:" + item.id)}>
             <span><strong>{item.name}</strong><small>{t("{0} 个分类 · 待人工 {1}", item.categories.length, data.tasks.filter(task => task.classification?.classifierId === item.id && task.classification.state === "pending").length)}</small></span>
             {!item.enabled && <Tag>{t("已停用")}</Tag>}
           </button>)}
-          <button type="button" className={`bkw-nav-item ${classifierId === "new" ? "on" : ""}`} onClick={() => open("c:new")}><Icon name="plus" size={14} /><span>{t("新建分类方案")}</span></button>
+          {!classifiers.length && classifierId !== "new" && <button type="button" className="bkw-nav-empty" onClick={() => open("c:new")}><Icon name="plus" size={13} /><span>{t("按投诉、咨询等业务类型分开邮件")}</span></button>}
         </div>
-        <div className="bkw-nav-group"><h4>{t("处理方案")}</h4>
+        <div className="bkw-nav-group">{groupHead(t("处理方案"), sorted.length, t("新建处理方案"), "new", ruleId === "new")}
+          {ruleId === "new" && draft(t("新处理方案"))}
           {sorted.map(rule => <button type="button" key={rule.id} className={`bkw-nav-item tall ${selected?.id === rule.id && !showTriage ? "on" : ""} ${rule.enabled ? "" : "paused"}`} onClick={() => open(rule.id)}>
             <span><strong>{rule.name}</strong><small>{rule.enabled ? corrections(rule.id) ? t("本周命中 {0} 次 · 纠正 {1} 次", hits(rule.id), corrections(rule.id)) : t("本周命中 {0} 次 · {1}", hits(rule.id), rule.output === "reply" ? t("回复草稿") : rule.output === "dispatch" ? t("分派到 {0}", rule.dispatchFolder || "") : t("分析报告")) : t("已停用")}</small></span>
             {rule.output === "dispatch" ? <Tag tone="accent">{t("分派")}</Tag> : <Tag tone={rule.autonomy === "auto" ? "warn" : rule.autonomy === "low_risk" ? "accent" : "muted"}>{t(AUTONOMY_LABEL[rule.autonomy || "draft"])}</Tag>}
           </button>)}
-          {!sorted.length && <p className="bkw-card-empty">{t("还没有处理方案。")}</p>}
+          {!sorted.length && ruleId !== "new" && <button type="button" className="bkw-nav-empty" onClick={() => open("new")}><Icon name="plus" size={13} /><span>{t("说清处理哪些信息、怎么处理")}</span></button>}
         </div>
       </nav>
       <div className="bkw-plan-main">
@@ -181,12 +189,12 @@ function RuleEditor({ rule }: { rule: Rule }) {
       </div>
       <div className="bkw-sec"><div><b>{t("什么信息适用")}</b><span>{t("先看来源和字面条件，再由 AI 按含义判断")}</span></div>
         <div className="bkw-stack">
-          <div className="bkw-chips">{(Object.keys(SOURCE) as SourceKind[]).filter(kind => kind !== "meeting").map(kind => {
-            // Email and WeChat (read-only) can feed a workflow; a workflow keeps at least one source.
-            const selected = value.sources ?? ["email"], on = selected.includes(kind);
-            const available = kind === "email" || (kind === "wechat" && !dispatch && (on || !!data.sources.find(source => source.kind === "wechat")?.connected || !!data.wechat?.settings.enabled));
+          <div className="bkw-chips">{[...new Set([...Object.keys(SOURCE).filter(kind => kind !== "meeting"), ...(data.channelInfo ?? []).map(item => item.kind)])].map(kind => {
+            // Email and installed channels can feed a workflow; a workflow keeps at least one source. Dispatch is for mail only.
+            const selected = value.sources ?? ["email"], on = selected.includes(kind), installed = data.channelInfo?.find(item => item.kind === kind);
+            const available = kind === "email" || (!dispatch && (on || (!!installed && (installed.enabled || !!data.sources.find(source => source.kind === kind)?.connected))));
             const toggle = () => { const next = on ? selected.filter(item => item !== kind) : [...selected, kind]; if (next.length) patch({ sources: next }); };
-            return <button type="button" key={kind} className={`bkw-chip ${on ? "on" : ""}`} disabled={!available} aria-pressed={on} title={available ? undefined : t("尚未接入")} onClick={toggle}>{t(SOURCE[kind])}{!available && <small>{t("未接入")}</small>}</button>;
+            return <button type="button" key={kind} className={`bkw-chip ${on ? "on" : ""}`} disabled={!available} aria-pressed={on} title={available ? undefined : t("尚未接入")} onClick={toggle}>{sourceName(kind, data.channelInfo)}{!available && <small>{t("未接入")}</small>}</button>;
           })}</div>
           <div className="bkw-grid2">
             <Field label={t("邮箱")}><select value={value.account} onChange={event => patch({ account: event.target.value, folder: data.accounts.find(account => account.id === event.target.value)?.inboxFolder || "INBOX" })}>{data.accounts.map(account => <option key={account.id} value={account.id}>{account.label}</option>)}<option value="">{t("全部邮箱")}</option></select></Field>
@@ -232,7 +240,7 @@ function RuleEditor({ rule }: { rule: Rule }) {
         <div className="bkw-stack">
           <div className="bkw-grid2">
             <Field label={t("方案名称")}><input required maxLength={100} value={value.name} onChange={event => patch({ name: event.target.value })} placeholder={t("例如：客户询价回复")} /></Field>
-            <Field label={t("生成内容")}><select value={value.output} onChange={event => { const output = event.target.value as Rule["output"]; patch({ output, ...(output !== "reply" ? { autonomy: "draft" as Autonomy } : {}), ...(output === "dispatch" ? { sources: ["email"] as SourceKind[], tools: [], skills: [], dispatchFolder: value.dispatchFolder || (value.name.trim() ? `分派/${value.name.trim()}` : "") } : {}) }); }}><option value="reply">{t("处理摘要 + 回复草稿")}</option><option value="report">{t("分析报告")}</option>{rule.output === "dispatch" && <option value="dispatch">{t("分派到文件夹（交给其他人处理）")}</option>}</select></Field>
+            <Field label={t("生成内容")}><select value={value.output} onChange={event => { const output = event.target.value as Rule["output"]; patch({ output, ...(output !== "reply" ? { autonomy: "draft" as Autonomy } : {}), ...(output === "dispatch" ? { sources: ["email"], tools: [], skills: [], dispatchFolder: value.dispatchFolder || (value.name.trim() ? `分派/${value.name.trim()}` : "") } : {}) }); }}><option value="reply">{t("处理摘要 + 回复草稿")}</option><option value="report">{t("分析报告")}</option>{rule.output === "dispatch" && <option value="dispatch">{t("分派到文件夹（交给其他人处理）")}</option>}</select></Field>
           </div>
           {dispatch ? <>
             <Field label={t("目标文件夹")} hint={t("匹配的邮件会移到这个文件夹，不存在时自动创建。负责的人或小组在自己的工作台上，用这个文件夹建处理方案；也可以直接在邮箱里查看。")}>

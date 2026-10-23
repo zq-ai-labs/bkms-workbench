@@ -3,12 +3,13 @@ import { join } from 'node:path'
 import { WorkbenchApi } from './api.js'
 import { createAgentRunner, getCapabilities } from './agent.js'
 import { Engine } from './engine.js'
-import { Store } from './store.js'
+import { WorkbenchRepository } from './storage/repository.js'
 import { createRuleAssistant } from './rule-assistant.js'
 import { createInstructionOptimizer } from './instruction-optimizer.js'
 import { createTriageRunner } from './triage.js'
 import { createWriter } from './writer.js'
-import { WechatConnector } from './wechat.js'
+import { ChannelRegistry } from './channels/registry.js'
+import { CHANNEL_API_VERSION, type WorkbenchChannels } from './channels/types.js'
 import { MailService } from './mail/service.js'
 import { EMAIL_DRAFT_ROUTE } from './mail/drafts.js'
 
@@ -16,7 +17,8 @@ export const name = 'bkms-workbench'
 export const inject = ['connection']
 export function apply(ctx: any): void {
   const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
-  const store = new Store(join(home, 'data', 'bkms-workbench'))
+  // One SQLite database for the workbench, opened on first use (docs/DESIGN-CORE-CHANNELS.md D1, D8).
+  const store = new WorkbenchRepository(join(home, 'data', 'bkms-workbench'))
   // Mail is built in: accounts, IMAP/SMTP connections and drafts live in the workbench data folder.
   const mail = new MailService(join(store.root, 'mail'))
   const email = mail.service()
@@ -27,9 +29,10 @@ export function apply(ctx: any): void {
   })
   // Read-only mail access for other plugins (e.g. contract agents). Sending stays in the workbench review.
   if (typeof ctx.provide === 'function') ctx.provide('workbenchMail', mail.external())
-  // WeChat is read through a local read-only bridge process, started only when enabled in settings.
-  const wechat = new WechatConnector(join(store.root, 'wechat-cache'))
-  const engine = new Engine(store, () => mail.configured() ? email : undefined, createAgentRunner(ctx, join(store.root, 'tasks')), () => getCapabilities(ctx), createTriageRunner(ctx), createWriter(ctx), wechat)
+  // Channels besides mail come from their own plugins (e.g. workbench-weixin), which register through this service.
+  const channels = new ChannelRegistry()
+  if (typeof ctx.provide === 'function') ctx.provide('workbenchChannels', { apiVersion: CHANNEL_API_VERSION, register: channel => channels.register(channel) } satisfies WorkbenchChannels)
+  const engine = new Engine(store, () => mail.configured() ? email : undefined, createAgentRunner(ctx, join(store.root, 'tasks')), () => getCapabilities(ctx), createTriageRunner(ctx), createWriter(ctx), channels)
   const api = new WorkbenchApi(engine, createRuleAssistant(ctx), createInstructionOptimizer(ctx), mail)
   // Drafts written by the old dsh-email plugin are copied in once, so earlier tasks keep their draft.
   const legacyDrafts = mail.importLegacyDrafts(join(home, 'data', 'dsh-email', 'drafts-v1.json')).then(count => { if (count) ctx.logger?.info?.('bkms-workbench: imported %d drafts from dsh-email', count) }, () => {})
@@ -42,7 +45,7 @@ export function apply(ctx: any): void {
     await ready.catch(() => {})
     await engine.stop()
     mail.close()
-    wechat.close()
+    await channels.close()
   }, 'bkms-workbench: background worker')
   const draftRoute = (request: Request) => ready.then(() => mail.drafts.fetch(request), error => new Response(JSON.stringify({ ok: false, error: { code: 'unavailable', message: engine.safe(error) } }), { status: 503, headers: { 'content-type': 'application/json' } }))
   // Draft attachments: upload from the review panel, download from the send preview.

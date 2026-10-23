@@ -3,7 +3,8 @@ import type { Preferences } from "./preferences";
 
 export type Status = "queued" | "running" | "review" | "needs_info" | "failed" | "sending" | "sent" | "uncertain" | "ignored" | "unmatched" | "completed";
 export type Autonomy = "draft" | "low_risk" | "auto";
-export type SourceKind = "email" | "feishu" | "wecom" | "wechat" | "meeting";
+/** `email` or the kind of an installed channel. */
+export type SourceKind = string;
 export type Category = "request" | "reply_needed" | "fyi" | "notification" | "marketing" | "other";
 export type Draft = {
   id: string; revision: number; account: string; to: string; cc: string; subject: string; text: string;
@@ -11,10 +12,6 @@ export type Draft = {
   sendChecks?: { at: string; outcome: "sent" | "not_sent" }[];
   receipt?: { accepted: string[]; rejected: string[]; response: string; messageId?: string };
 };
-export type WechatMessage = { seq: number; at: string; sender: string; senderName: string; self: boolean; type: string; text: string; quote?: { sender: string; text: string }; mentionsMe?: boolean };
-export type WechatList = { mode: "allow" | "block"; list: string[] };
-export type WechatSettings = { enabled: boolean; python?: string; library?: string; people: WechatList; groups: WechatList & { scope: "mention" | "all" }; quietMinutes?: number; names?: Record<string, string> };
-export type WechatChat = { id: string; name: string; kind: "person" | "group"; lastAt?: string };
 export type Task = {
   id: string; title: string; account: string; status: Status; from: string; replyTo?: string; subject: string; body: string;
   bodyHtml?: string; to?: string; cc?: string; mailDate?: string; mailSize?: number; receivedAt: string; updatedAt: string;
@@ -26,11 +23,17 @@ export type Task = {
   checks?: { item: string; quote?: string }[];
   autoSend?: { at: string; scheduledAt: string; autonomy: Autonomy; canceledAt?: string; reason?: string };
   relatedIds?: string[]; possibleIds?: string[]; topicIds?: string[]; attention?: boolean;
-  source?: { kind?: "wechat"; folder: string };
+  source?: { kind?: string; folder: string };
   match?: { ruleId: string; ruleName: string; by: "ai" | "literal" | "manual"; state: "applied" | "suggested" | "rejected"; confidence?: Confidence; reason?: string; at: string };
-  wechat?: { chat: string; chatName: string; group: boolean; messages: WechatMessage[]; fromSeq: number; toSeq: number; mentioned?: boolean; reply?: string; replyRevision?: number };
+  /** What an installed channel keeps with its items; only that channel's parts of the page read it. */
+  channelData?: unknown;
+  /** Suggested reply for channels where a person copies it into the channel's own app. */
+  reply?: { text: string; revision: number };
   classification?: Classification;
+  /** What the last background AI run did; only sent when “show AI runs” is on in settings. */
+  trace?: AgentTrace;
 };
+export type AgentTrace = { sessionId: string; startedAt: string; durationMs: number; outcome: string; tokens?: { input: number; output: number }; truncated?: boolean; steps: { kind: "model" | "tool"; at?: number; name?: string; text?: string; input?: string; output?: string; error?: string }[] };
 export type CategoryAction = "label" | "move";
 export type ClassifierCategory = { id: string; name: string; include: string; exclude?: string; action: CategoryAction; folder?: string; fallback?: true };
 export type Classifier = { id: string; name: string; enabled: boolean; account: string; folder: string; guidance?: string; includeNotices?: boolean; categories: ClassifierCategory[] };
@@ -51,15 +54,23 @@ export type Topic = { id: string; name: string; kind: "customer" | "project" | "
 export type Report = { id: string; kind: "weekly" | "topic"; title: string; text: string; periodStart: string; periodEnd: string; generatedAt: string; updatedAt: string; topicId?: string; by: string };
 export type Log = { id?: string; at?: string; level?: string; message?: string; taskId?: string };
 export type Defaults = { triage: boolean; undoMinutes: number; briefEnabled: boolean; briefTime: string; weeklyEnabled: boolean; weeklyDay: number; weeklyTime: string; meetingBriefMinutes: number };
+/** An installed channel as the page sees it. */
+export type ChannelInfo = { kind: string; label: { zh: string; en: string }; reply: "copy" | "none"; enabled: boolean; systemEnglish?: Record<string, string> };
+/** A channel that cannot be used until one side is upgraded. */
+export type RejectedChannel = { kind: string; label: { zh: string; en: string }; upgrade: "channel" | "workbench" };
 export type Snapshot = {
+  /** Data version; `unchanged` answers a periodic check when nothing changed since that version. */
+  version?: string; unchanged?: boolean;
   revision: number; tasks: Task[]; rules: Rule[]; accounts: { id: string; label: string; inboxFolder?: string }[]; logs: Log[];
   capabilities?: Capabilities; settings: Preferences["settings"] & Partial<Defaults>; defaults: Defaults;
-  health: { email: boolean; agent?: boolean; running?: boolean; lastPoll?: string; error?: string; triage?: boolean; writer?: boolean; wechat?: { ready: boolean; name?: string; library?: string; error?: string } };
-  wechat?: { settings: WechatSettings & { quietMinutes: number }; pending: number; watching: number };
+  health: { email: boolean; agent?: boolean; running?: boolean; lastPoll?: string; error?: string; triage?: boolean; writer?: boolean; channels?: Record<string, { ready: boolean; name?: string; error?: string } | undefined> };
+  /** Page data of each installed channel, by kind; read by that channel's own parts. */
+  channels?: Record<string, unknown>;
+  channelInfo?: ChannelInfo[]; rejectedChannels?: RejectedChannel[];
   ruleExamples?: Record<string, RuleExample[]>;
   classifiers?: Classifier[]; categoryExamples?: Record<string, RuleExample[]>;
   activity: Activity[]; topics: Topic[]; reports: Report[]; brief?: { date: string; text: string; generatedAt: string; by: string }; today: string;
-  sources: { kind: SourceKind; connected: boolean; detail: string }[]; meetings: unknown[];
+  sources: { kind: string; connected: boolean; detail: string }[]; meetings: unknown[];
 };
 export type EditDraft = Pick<Draft, "to" | "cc" | "subject" | "text"> & { attachments: string[] };
 export type SendPlan = {
@@ -91,7 +102,8 @@ export const statusTone = (task: Pick<Task, "status" | "triage" | "draft" | "cla
   return "muted";
 };
 export const CATEGORY: Record<Category, string> = { request: "请求", reply_needed: "需回复", fyi: "值得关注", notification: "通知", marketing: "营销", other: "其他" };
-export const SOURCE: Record<SourceKind, string> = { email: "邮件", feishu: "飞书", wecom: "企微", wechat: "微信", meeting: "会议" };
+/** Names of the sources the workbench knows, also used for a channel that is not installed. */
+export const SOURCE: Record<string, string> = { email: "邮件", feishu: "飞书", wecom: "企微", wechat: "微信", meeting: "会议" };
 export const CONFIDENCE: Record<Confidence, string> = { high: "把握高", medium: "把握一般", low: "把握低" };
 export const AUTONOMY_LABEL: Record<Autonomy, string> = { draft: "仅起草", low_risk: "低风险自动", auto: "全自动" };
 
@@ -116,12 +128,18 @@ export function nextStep(task: Task): string {
     case "ignored": return task.triage?.archived ? t("AI 已归档，可恢复") : t("此任务已忽略");
   }
 }
-/** Where a task came from; WeChat segments carry `source.kind`. */
-export const sourceOf = (task: Pick<Task, "source">): SourceKind => task.source?.kind === "wechat" ? "wechat" : "email";
-/** List title: a WeChat segment shows who said what; an email shows its subject. */
-export const taskTitle = (task: Pick<Task, "source" | "subject" | "title">): string => task.source?.kind === "wechat" ? task.title : task.subject || task.title;
-/** Counterpart line: the WeChat conversation, or the email sender. */
-export const counterpart = (task: Pick<Task, "source" | "from" | "wechat">): string => task.source?.kind === "wechat" ? task.wechat?.chatName || task.from : senderName(task.from);
+/** Where a task came from: mail, or the channel stored in `source.kind`. */
+export const sourceOf = (task: Pick<Task, "source">): SourceKind => task.source?.kind || "email";
+export const isMail = (task: Pick<Task, "source">): boolean => sourceOf(task) === "email";
+/** A source's name in the page language: the installed channel's own name, else the known name, else its kind. */
+export function sourceName(kind: string, channels?: ChannelInfo[]): string {
+  const label = channels?.find(item => item.kind === kind)?.label;
+  return label ? label[uiLanguage()] || label.zh : SOURCE[kind] ? t(SOURCE[kind]) : kind;
+}
+/** List title: an item from a channel shows who said what; an email shows its subject. */
+export const taskTitle = (task: Pick<Task, "source" | "subject" | "title">): string => isMail(task) ? task.subject || task.title : task.title;
+/** Counterpart line: the email sender, or the conversation of a channel item. */
+export const counterpart = (task: Pick<Task, "source" | "from" | "subject">): string => isMail(task) ? senderName(task.from) : task.subject || task.from;
 export const firstLine = (value: string) => value.split(/\n/).map(line => line.trim()).find(Boolean)?.slice(0, 80) || value.slice(0, 80);
 export const senderName = (from: string) => (from.match(/^\s*"?([^"<]+?)"?\s*</)?.[1] || from.replace(/<.*>/, "") || from).trim() || from;
 export const senderAddress = (from: string) => (from.match(/<([^>]+)>/)?.[1] || from).trim().toLowerCase();
@@ -173,7 +191,7 @@ function save(blob: Blob, filename: string) {
   link.href = url; link.download = filename; document.body.appendChild(link); link.click(); link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
-export const downloadText = (text: string, filename: string) => save(new Blob([text], { type: "text/markdown;charset=utf-8" }), filename);
+export const downloadText = (text: string, filename: string, type = "text/markdown;charset=utf-8") => save(new Blob([text], { type }), filename);
 export async function downloadPreview(plan: string, file: { id: string; filename: string }): Promise<void> {
   const response = await hostFetch(`api/bkms-workbench/drafts?preview=${encodeURIComponent(plan)}&attachment=${encodeURIComponent(file.id)}`, { credentials: "same-origin" });
   if (!response.ok) { const result = await response.json().catch(() => ({})); throw new Error(result.error?.message || t("附件预览已失效，请重新审核发送。")); }
@@ -203,6 +221,6 @@ export async function uploadDraftAttachment(draft: Draft, file: File): Promise<D
 
 /** The scheme a task belongs to: the one that classified it, else the enabled one covering its folder. */
 export function classifierOf(task: Task, classifiers: Classifier[] | undefined): Classifier | undefined {
-  if (task.source?.kind === "wechat") return undefined;
+  if (!isMail(task)) return undefined;
   return classifiers?.find(item => item.id === task.classification?.classifierId) ?? classifiers?.find(item => item.enabled && (!item.account || item.account === task.account) && item.folder === task.source?.folder);
 }

@@ -1,6 +1,6 @@
 {
   "name": "bkms-workbench",
-  "version": "0.1.1",
+  "version": "0.1.6",
   "description": "邮件规则自动处理、人工待办与草稿审核工作台",
   "repository": {
     "type": "git",
@@ -20,8 +20,6 @@
   },
   "files": [
     "lib",
-    "wechat/bridge.py",
-    "wechat/wxread",
     "src/mail/LICENSE",
     "src/mail/NOTICE.md",
     "cordis.patch.yml",
@@ -32,7 +30,7 @@
     "build": "tsc && tsc -p tsconfig.client.json && node scripts/build-client.mjs",
     "test": "pnpm run build && node --test test/*.test.mjs test/mail/*.test.mjs",
     "check": "tsc --noEmit && tsc -p tsconfig.client.json",
-    "pack:plugin": "pnpm run build && pnpm pack --pack-destination dist"
+    "pack:plugin": "pnpm run build && node scripts/pack-plugin.mjs"
   },
   "packageManager": "pnpm@11.7.0",
   "engines": {
@@ -55,7 +53,8 @@
     "mailparser": "3.9.33",
     "nodemailer": "10.0.13",
     "proper-lockfile": "4.1.2",
-    "yaml": "2.9.0"
+    "yaml": "2.9.0",
+    "zq-sqlite": "github:zq-ai-labs/zq-sqlite#v0.1.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -16,7 +16,8 @@ const module = { exports: {} }
 vm.runInNewContext(bundle.outputFiles[0].text, { module, exports: module.exports, require })
 const i18n = module.exports
 
-const clientFiles = readdirSync(new URL('../client/', import.meta.url)).filter(name => /\.tsx?$/.test(name) && !name.endsWith('.d.ts') && name !== 'i18n.ts')
+// Channel parts in client/channels/ are checked like the rest of the page.
+const clientFiles = readdirSync(new URL('../client/', import.meta.url), { recursive: true }).map(name => String(name).replaceAll('\\', '/')).filter(name => /\.tsx?$/.test(name) && !name.endsWith('.d.ts') && name !== 'i18n.ts')
 test('every workbench UI label has English text and matching placeholders', () => {
   const placeholders = text => (text.match(/\{\d+\}/g) || []).sort()
   for (const [key, value] of Object.entries(en)) {
