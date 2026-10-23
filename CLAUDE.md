@@ -22,6 +22,7 @@
 | `src/store.ts` `src/types.ts` | `touch`；所有数据类型 |
 | `src/triage.ts` `src/rules.ts` | AI 分拣与方案匹配（`matchMode` ai/literal、`confidence`、学习例子 `ruleExamples`） |
 | `src/classify.ts` | 业务分类方案：校验、适用方案、分拣输出的 `business` 字段、把握高才应用、学习例子 `categoryExamples` |
+| `src/portable.ts` | 方案与分类方案的导出导入：去掉邮箱、文件夹、编号、启用状态与学习例子；导入时指定邮箱和文件夹，全部停用 |
 | `src/context-vars.ts` | 我的资料、处理要求中的 `{{变量}}` 白名单与替换、给 AI 的运行上下文 |
 | 分派与补处理 | 方案 `output: 'dispatch'` + `dispatchFolder`：引擎 `dispatch()` 移动邮件（`src/mail/service.ts` 的 `moveMessage`），不跑 Agent；`state.backfills` 记录“从指定时间开始”的补处理，`task.backfill` 的邮件从不自动发送 |
 | `src/agent.ts` | 后台 Agent：提示词、结果工具 schema、工具白名单；审核类文字的语言由 `reviewLanguage()` 控制 |

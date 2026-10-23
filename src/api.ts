@@ -9,6 +9,7 @@ import { CLOCK, touch } from './store.js'
 import type { Records } from './storage/repository.js'
 import { activityEntry, exampleText, localDate, needsAttention, relations, senderKey, topicMatches, trialData } from './digest.js'
 import { sourceStatuses } from './sources.js'
+import { exportWorkflows, planImport } from './portable.js'
 import { checkVariables, validateProfile } from './context-vars.js'
 import { classifierFor, learnCategory, overlapping, triageClassifier, validateClassifier } from './classify.js'
 import { WorkbenchError, now, type RuleExample, type Task, type RuleAssistant, type InstructionOptimizer, type Topic } from './types.js'
@@ -321,6 +322,23 @@ export class WorkbenchApi {
         const revision = await tx.saveConfig({ rules })
         await tx.log(`已保存规则「${rule.name}」。`)
         return { ...rule, revision }
+      })
+    }
+    // Workflows and schemes as a file for another workbench, without this mailbox's own settings (src/portable.ts).
+    if (body.action === 'exportWorkflows') {
+      const config = await this.engine.repo.config()
+      return exportWorkflows(config.rules, config.classifiers ?? [], now())
+    }
+    if (body.action === 'importWorkflows') {
+      if (typeof body.account !== 'string' || typeof body.folder !== 'string' || !body.folder.trim()) throw new WorkbenchError('请选择导入后使用的邮箱和文件夹。')
+      return this.engine.repo.write(async tx => {
+        await tx.checkConfig(body.revision)
+        const config = await tx.config(), classifiers = config.classifiers ?? []
+        const plan = planImport(body.file, { account: body.account, folder: body.folder.trim() }, { rules: config.rules, classifiers })
+        if (config.rules.length + plan.rules.length > 100) throw new WorkbenchError('处理方案最多 100 个，请先删除不用的方案再导入。')
+        const revision = await tx.saveConfig({ rules: [...config.rules, ...plan.rules], classifiers: [...classifiers, ...plan.classifiers] })
+        await tx.log(`已导入 ${plan.rules.length} 个处理方案、${plan.classifiers.length} 个分类方案（均为停用状态）。`)
+        return { revision, rules: plan.rules.length, classifiers: plan.classifiers.length, renamed: plan.renamed, relabeled: plan.relabeled }
       })
     }
     if (body.action === 'saveClassifier') {

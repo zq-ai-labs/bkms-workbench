@@ -188,7 +188,7 @@ function save(blob: Blob, filename: string) {
   link.href = url; link.download = filename; document.body.appendChild(link); link.click(); link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
-export const downloadText = (text: string, filename: string) => save(new Blob([text], { type: "text/markdown;charset=utf-8" }), filename);
+export const downloadText = (text: string, filename: string, type = "text/markdown;charset=utf-8") => save(new Blob([text], { type }), filename);
 export async function downloadPreview(plan: string, file: { id: string; filename: string }): Promise<void> {
   const response = await hostFetch(`api/bkms-workbench/drafts?preview=${encodeURIComponent(plan)}&attachment=${encodeURIComponent(file.id)}`, { credentials: "same-origin" });
   if (!response.ok) { const result = await response.json().catch(() => ({})); throw new Error(result.error?.message || t("附件预览已失效，请重新审核发送。")); }

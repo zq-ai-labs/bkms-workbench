@@ -423,5 +423,13 @@
   "你把分类从「{0}」改为「{1}」，AI 会参考这次纠正。": "You changed the category from “{0}” to “{1}”. The AI will take this correction into account.",
   "你把它归为「{0}」，AI 会参考这次判断。": "You classified it as “{0}”. The AI will take this into account.",
   "你更改了分类，自动发送取消。": "You changed the category, so the automatic send was canceled.",
-  "处理要求里有不认识的变量：{0}。在编辑框中输入 / 可查看可用的变量。": "The instructions use unknown variables: {0}. Type / in the editor to see the available variables."
+  "处理要求里有不认识的变量：{0}。在编辑框中输入 / 可查看可用的变量。": "The instructions use unknown variables: {0}. Type / in the editor to see the available variables.",
+  "请选择导入后使用的邮箱和文件夹。": "Choose the mailbox and folder the imported items will use.",
+  "处理方案最多 100 个，请先删除不用的方案再导入。": "There can be at most 100 workflows. Delete unused ones before importing.",
+  "方案文件的版本不受支持，请用相同版本的工作台导出。": "This workflow file version is not supported. Export it from the same workbench version.",
+  "方案文件内容无效。": "The workflow file is invalid.",
+  "方案文件里没有可导入的方案。": "The workflow file has nothing to import.",
+  "方案文件里不应包含分派方案。": "A workflow file must not contain dispatch workflows.",
+  "方案「{0}」的处理要求": "the instructions of workflow “{0}”",
+  "已导入 {0} 个处理方案、{1} 个分类方案（均为停用状态）。": "Imported {0} workflows and {1} category schemes (switched off)."
 }

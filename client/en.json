@@ -1110,5 +1110,20 @@
   "这个渠道没有提供设置界面。": "This channel has no settings page.",
   "这个渠道插件的版本过旧，请升级渠道插件后使用。": "This channel plugin is too old. Upgrade the channel plugin to use it.",
   "这个渠道插件需要更新版本的工作台，请升级工作台后使用。": "This channel plugin needs a newer workbench. Upgrade the workbench to use it.",
-  "需要升级": "Upgrade needed"
+  "需要升级": "Upgrade needed",
+  "导出与导入方案": "Export and import workflows",
+  "把处理方案和业务分类方案导出成文件，在别的工作台导入。文件不含邮箱、文件夹和学习例子；导入的方案都是停用状态，请检查后再启用。": "Export workflows and business-category schemes to a file and import them into another workbench. The file has no mailbox, folders or learned examples; imported items are switched off until you check and enable them.",
+  "导出": "Export",
+  "导入…": "Import…",
+  "已导出；分派方案不导出：{0}": "Exported. Dispatch workflows are not exported: {0}",
+  "已导出方案文件": "Workflow file exported",
+  "这不是工作台导出的方案文件。": "This is not a workflow file exported by the workbench.",
+  "已导入 {0} 个处理方案、{1} 个分类方案，均为停用状态。": "Imported {0} workflows and {1} category schemes, all switched off.",
+  "重名已改名：{0}": "Renamed because the name was taken: {0}",
+  "这些分类原来会移动邮件，导入后改为只打标签，请在分类方案中重新选择目标文件夹：{0}": "These categories used to move mail and now only label it; choose a target folder in the category scheme: {0}",
+  "导入方案": "Import workflows",
+  "文件“{0}”中有 {1} 个处理方案、{2} 个分类方案。导入后它们读取下面选择的邮箱和文件夹，全部为停用状态，检查后再逐个启用。": "“{0}” has {1} workflows and {2} category schemes. They will read the mailbox and folder chosen below and are imported switched off; check them and enable them one by one.",
+  "读取的文件夹": "Folder to read",
+  "正在导入…": "Importing…",
+  "确认导入": "Import"
 }
