@@ -298,7 +298,7 @@ export class Engine {
     const informationGaps = result.output.informationGaps?.trim() || (checks.length ? checks.map((check, index) => `${index + 1}. ${check.item}`).join('\n') : undefined)
     await this.repo.updateTask(task.id, undefined, async (item, tx) => {
       const status = result.output.needsInfo ? 'needs_info' : reply ? 'review' : 'completed'
-      Object.assign(item, { summary: result.output.summary, informationGaps, checks: checks.length ? checks : undefined, needsInfoKind: result.output.needsInfo ? result.output.needsInfoKind || 'information' : undefined, sessionId: result.sessionId, workspace, status, error: result.output.needsInfo || undefined })
+      Object.assign(item, { summary: result.output.summary, informationGaps, checks: checks.length ? checks : undefined, needsInfoKind: result.output.needsInfo ? result.output.needsInfoKind || 'information' : undefined, sessionId: result.sessionId, trace: result.trace, workspace, status, error: result.output.needsInfo || undefined })
       if (reply) item.reply = { text: result.output.text!.trim(), revision: (item.reply?.revision ?? 0) + 1 }
       touch(item, result.output.needsInfo ? '需要补充信息后继续。' : reply ? channel.text.replyReady : '分析报告已生成。'); await tx.log('DSH 处理完成。', item.id)
       if (status === 'completed') await tx.addActivity(activityEntry({ kind: 'report', title: item.title, detail: item.ruleName, taskId: item.id, ruleName: item.ruleName, source: channel.kind as SourceKind }, randomUUID()))
@@ -472,7 +472,7 @@ export class Engine {
       const informationGaps = result.output.informationGaps?.trim() || (checks.length ? checks.map((check, index) => `${index + 1}. ${check.item}`).join('\n') : undefined)
       await this.repo.updateTask(task.id, undefined, async (item, tx) => {
         const status = result.output.needsInfo ? 'needs_info' : item.rule?.output === 'reply' ? 'review' : 'completed'
-        Object.assign(item, { summary: result.output.summary, informationGaps, checks: checks.length ? checks : undefined, needsInfoKind: result.output.needsInfo ? result.output.needsInfoKind || 'information' : undefined, sessionId: result.sessionId, draftId, status, error: result.output.needsInfo || undefined })
+        Object.assign(item, { summary: result.output.summary, informationGaps, checks: checks.length ? checks : undefined, needsInfoKind: result.output.needsInfo ? result.output.needsInfoKind || 'information' : undefined, sessionId: result.sessionId, trace: result.trace, draftId, status, error: result.output.needsInfo || undefined })
         delete item.autoSend
         touch(item, result.output.needsInfo ? '需要补充信息后继续。' : item.rule?.output === 'reply' ? '已生成回复草稿，等待人工审核。' : '分析报告已生成。'); await tx.log('DSH 处理完成。', item.id)
         if (status === 'completed') await tx.addActivity(activityEntry({ kind: 'report', title: item.subject || item.title, detail: item.ruleName, taskId: item.id, ruleName: item.ruleName, source: 'email' }, randomUUID()))
@@ -491,6 +491,9 @@ export class Engine {
       this.error = this.safe(error)
       if (task) await this.repo.updateTask(task.id, undefined, async (item, tx) => {
         item.error = this.safe(error)
+        // A failed AI run keeps its record too: that is when it is most needed.
+        const trace = (error as { trace?: Task['trace'] } | null)?.trace
+        if (trace) item.trace = trace
         const limit = item.triage?.state === 'pending' ? 2 : item.rule?.maxRetries ?? 0
         const retry = !this.stopping && item.attempts <= limit
         item.status = retry ? 'queued' : 'failed'; item.nextAttemptAt = retry ? new Date(Date.now() + 30000 * item.attempts).toISOString() : undefined

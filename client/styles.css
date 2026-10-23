@@ -362,6 +362,19 @@ body[data-ds-dark-theme] .bkw-check-no { color: #1d1606; }
 .bkw-timeline > div i { position: absolute; left: -4px; top: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--acc); }
 .bkw-timeline time { font: 11px var(--mono); color: var(--ink3); }
 .bkw-timeline p { white-space: pre-wrap; font-size: 12px; color: var(--ink2); }
+/* AI run record (debugging): collapsed under the task history. */
+.bkw-trace { margin-top: 8px; border: 1px dashed var(--line); border-radius: 8px; background: var(--surf2); }
+.bkw-trace > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 8px 12px; font-size: 12px; font-weight: 500; color: var(--ink2); cursor: pointer; }
+.bkw-trace > summary small { font-weight: 400; color: var(--ink3); }
+.bkw-trace-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 0 12px 6px; font-size: 11px; color: var(--ink3); }
+.bkw-trace-meta code { font: 11px var(--mono); overflow-wrap: anywhere; }
+.bkw-trace ol { display: grid; gap: 8px; margin: 0; padding: 0 12px 12px 30px; }
+.bkw-trace li { display: grid; gap: 3px; font-size: 12px; color: var(--ink2); }
+.bkw-trace li strong { display: flex; gap: 8px; font-weight: 500; color: var(--ink); }
+.bkw-trace li strong time { font: 11px var(--mono); color: var(--ink3); font-weight: 400; }
+.bkw-trace li.error strong { color: var(--red); }
+.bkw-trace li small { font-size: 11px; color: var(--ink3); }
+.bkw-trace pre { margin: 0; max-height: 220px; overflow: auto; padding: 6px 8px; border-radius: 6px; background: var(--surf); white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono); color: var(--ink2); }
 
 /* Items */
 .bkw-table { display: grid; background: var(--surf); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }

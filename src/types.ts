@@ -1,3 +1,4 @@
+import type { AgentTrace } from './trace.js'
 export type Status = 'queued' | 'running' | 'review' | 'needs_info' | 'failed' | 'sending' | 'sent' | 'uncertain' | 'ignored' | 'unmatched' | 'completed'
 /** How far a workflow may act without a person: draft only, bounded low-risk sending, or all bounded replies. */
 export type Autonomy = 'draft' | 'low_risk' | 'auto'
@@ -89,7 +90,9 @@ export interface AutoSend { at: string; scheduledAt: string; autonomy: Autonomy;
 export interface Task {
   id: string; revision: number; title: string; account: string; status: Status; from: string; subject: string; body: string
   receivedAt: string; updatedAt: string; ruleId?: string; ruleName?: string; rule?: Rule
-  source: Source; summary?: string; error?: string; draftId?: string; draft?: any; sessionId?: string; hasAttachments?: boolean; mailLoaded?: boolean
+  source: Source; summary?: string; error?: string; draftId?: string; draft?: any; sessionId?: string
+  /** What the last background AI run did, for debugging (src/trace.ts); shown only when `settings.showTrace` is on. */
+  trace?: AgentTrace; hasAttachments?: boolean; mailLoaded?: boolean
   informationGaps?: string; needsInfoKind?: 'information' | 'attachments'
   bodyHtml?: string; to?: string; cc?: string; mailDate?: string; mailSize?: number
   messageId?: string; references?: string; replyTo?: string; attachments: { filename: string; size: number; part?: string; contentType?: string; localPath?: string }[]
@@ -135,6 +138,8 @@ export interface Settings {
   enabled: boolean; pollSeconds: number; showWorkbench?: boolean; notifyNewTodo?: boolean
   /** AI triage before workflow matching. Defaults on. */
   triage?: boolean
+  /** Show what each background AI run did in the task record (for debugging). Off by default. */
+  showTrace?: boolean
   /** Delay before an automatic reply is actually submitted; it can be withdrawn meanwhile. */
   undoMinutes?: number
   briefEnabled?: boolean; briefTime?: string
@@ -200,7 +205,7 @@ export interface AgentOutput { summary: string; needsInfo?: string; needsInfoKin
 export interface RuntimeContext { values: Record<string, string>; text: string }
 /** For an item from another channel: its writing rules and what the agent reads, under the channel's own key. */
 export interface AgentChannel { kind: string; guide: string; input: Record<string, unknown> }
-export interface AgentRunner { available(): boolean; run(task: Task, rule: Rule, signal: AbortSignal, options?: { language?: 'zh' | 'en'; context?: RuntimeContext; channel?: AgentChannel }): Promise<{ output: AgentOutput; sessionId?: string }> }
+export interface AgentRunner { available(): boolean; run(task: Task, rule: Rule, signal: AbortSignal, options?: { language?: 'zh' | 'en'; context?: RuntimeContext; channel?: AgentChannel }): Promise<{ output: AgentOutput; sessionId?: string; trace?: AgentTrace }> }
 export interface TriageInput { mail: { from: string; subject: string; body: string; quotedHistory?: string; hasAttachments: boolean; receivedAt: string; channel?: string }; channelHint?: string; thread?: { previousRule?: { id: string; name: string } }; classifier?: TriageClassifier; context?: { now: string; timezone: string; department?: string; role?: string }; rules: { id: string; name: string; semantic: string; output: RuleOutput; hint: string; examples?: { match: boolean; text: string }[] }[]; uiLanguage?: 'zh' | 'en' }
 export interface TriageOutput { category: TriageCategory; urgency: 'high' | 'normal' | 'low'; reason: string; nextStep: string; ruleId: string; confidence?: Confidence; ruleReason?: string; business?: BusinessVerdict }
 /** What the triage model sees of a classification scheme. */

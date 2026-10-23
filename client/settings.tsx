@@ -96,6 +96,7 @@ export function WorkbenchSettings({ embedded }: { embedded?: boolean }) {
       </section>
       <section id="bkw-set-display" className="bkw-set-card"><h3>{t("显示")}</h3>
         {VIEWS.map(([id, label, hint]) => <React.Fragment key={id}>{row(t("显示“{0}”页签", t(label)), t(hint), <Switch label={t("显示“{0}”页签", t(label))} checked={!hidden.includes(id)} disabled={disabled} onChange={value => void save({ hiddenViews: value ? hidden.filter(item => item !== id) : [...hidden, id] })} />)}</React.Fragment>)}
+        {row(t("显示 AI 处理过程"), t("开发调试用：在事项的“记录”中显示每次 AI 处理调用的工具、输入输出和用时。普通使用不需要打开。"), <Switch label={t("显示 AI 处理过程")} checked={(data.settings as Settings).showTrace === true} disabled={disabled} onChange={value => void save({ showTrace: value })} />)}
         {row(t("显示工作台入口"), t("在侧栏显示任务工作台。隐藏入口不影响后台处理，可随时在此恢复。"), <Switch label={t("显示工作台入口")} checked={data.settings.showWorkbench !== false} disabled={disabled} onChange={value => void save({ showWorkbench: value })} />)}
       </section>
       <section id="bkw-set-advanced" className="bkw-set-card"><h3>{t("高级与恢复")}</h3>

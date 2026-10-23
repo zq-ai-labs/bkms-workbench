@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { systemMessage, t } from "./i18n";
 import { useWorkbench } from "./context";
 import { OriginalMailBody } from "./original-mail";
-import { AUTONOMY_LABEL, CATEGORY, CONFIDENCE, api, counterpart, draftValue, downloadOriginal, downloadPreview, errorMessage, fullDate, isMail, minutesLeft, nextStep, senderName, sourceName, sourceOf, statusLabel, taskTitle, time, uploadDraftAttachment, when, type Draft, type EditDraft, type Rule, type SendPlan, type Task } from "./lib";
+import { AUTONOMY_LABEL, CATEGORY, CONFIDENCE, api, counterpart, draftValue, downloadOriginal, downloadPreview, errorMessage, fullDate, isMail, minutesLeft, nextStep, senderName, sourceName, sourceOf, statusLabel, taskTitle, time, uploadDraftAttachment, when, type AgentTrace, type Draft, type EditDraft, type Rule, type SendPlan, type Task } from "./lib";
 import { Alert, AutoTextarea, Field, Icon, Modal, SourceTag, StatusTag, Tag } from "./ui";
 import { ChannelPart } from "./slots";
 import { ClassificationBlock } from "./classification";
@@ -370,9 +370,9 @@ export function TaskWorkspace({ task, onDone }: { task: Task; onDone?: () => voi
           </button>)}
           {!!task.possibleIds?.length && <p className="bkw-footnote">{t("“可能相关”只按发件人和主题推断，不会自动合并。")}</p>}
         </div>}
-        {sourceTab === "history" && <div className="bkw-timeline">
+        {sourceTab === "history" && <><div className="bkw-timeline">
           {task.history?.length ? task.history.slice().reverse().map((event, index) => <div key={index}><i /><time>{fullDate(event.at)}</time><p>{systemMessage(event.message)}</p></div>) : <p className="bkw-muted">{t("尚无处理记录")}</p>}
-        </div>}
+        </div>{task.trace && <AgentTraceView trace={task.trace} />}</>}
       </div>
     </aside>
 
@@ -487,3 +487,20 @@ export function ReceiptPanel({ draft }: { draft?: Draft }) {
 
 export const nextStepOf = nextStep;
 export const errorText = (error: unknown) => systemMessage(errorMessage(error));
+
+/** The last background AI run of a task, for debugging (shown only when “show AI runs” is on in settings). */
+function AgentTraceView({ trace }: { trace: AgentTrace }) {
+  const seconds = (trace.durationMs / 1000).toFixed(1);
+  return <details className="bkw-trace">
+    <summary>{t("AI 处理过程")}<small>{t("{0} · 用时 {1} 秒 · {2} 步", fullDate(trace.startedAt), seconds, trace.steps.length)}{trace.tokens ? ` · ${t("输入 {0} / 输出 {1} tokens", trace.tokens.input, trace.tokens.output)}` : ""}</small></summary>
+    <p className="bkw-trace-meta"><span>{t("结束：{0}", trace.outcome)}</span><code>{trace.sessionId}</code></p>
+    <ol>{trace.steps.map((step, index) => <li key={index} className={`${step.kind} ${step.error ? "error" : ""}`}>
+      <strong>{step.kind === "tool" ? t("工具 {0}", step.name || "") : t("模型")}{step.at ? <time>{time(new Date(step.at).toISOString())}</time> : null}</strong>
+      {step.text && <pre>{step.text}</pre>}
+      {step.input && <><small>{t("输入")}</small><pre>{step.input}</pre></>}
+      {step.output && <><small>{t("输出")}</small><pre>{step.output}</pre></>}
+      {step.error && <><small>{t("错误")}</small><pre>{step.error}</pre></>}
+    </li>)}</ol>
+    {trace.truncated && <p className="bkw-muted">{t("步骤较多，只保留了前 60 步。")}</p>}
+  </details>;
+}

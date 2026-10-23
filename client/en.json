@@ -1132,5 +1132,16 @@
   "新处理方案": "New workflow",
   "新建处理方案": "New workflow",
   "按投诉、咨询等业务类型分开邮件": "Sort mail by business type, e.g. complaints and inquiries",
-  "说清处理哪些信息、怎么处理": "Say which messages to handle and how"
+  "说清处理哪些信息、怎么处理": "Say which messages to handle and how",
+  "显示 AI 处理过程": "Show AI runs",
+  "开发调试用：在事项的“记录”中显示每次 AI 处理调用的工具、输入输出和用时。普通使用不需要打开。": "For development and debugging: show the tools, inputs, outputs and time of each AI run in an item’s History. Not needed for everyday use.",
+  "AI 处理过程": "AI run",
+  "{0} · 用时 {1} 秒 · {2} 步": "{0} · {1} s · {2} steps",
+  "输入 {0} / 输出 {1} tokens": "{0} in / {1} out tokens",
+  "结束：{0}": "Ended: {0}",
+  "工具 {0}": "Tool {0}",
+  "模型": "Model",
+  "输入": "Input",
+  "输出": "Output",
+  "步骤较多，只保留了前 60 步。": "Many steps: only the first 60 are kept."
 }

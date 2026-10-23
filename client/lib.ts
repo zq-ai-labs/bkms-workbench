@@ -30,7 +30,10 @@ export type Task = {
   /** Suggested reply for channels where a person copies it into the channel's own app. */
   reply?: { text: string; revision: number };
   classification?: Classification;
+  /** What the last background AI run did; only sent when “show AI runs” is on in settings. */
+  trace?: AgentTrace;
 };
+export type AgentTrace = { sessionId: string; startedAt: string; durationMs: number; outcome: string; tokens?: { input: number; output: number }; truncated?: boolean; steps: { kind: "model" | "tool"; at?: number; name?: string; text?: string; input?: string; output?: string; error?: string }[] };
 export type CategoryAction = "label" | "move";
 export type ClassifierCategory = { id: string; name: string; include: string; exclude?: string; action: CategoryAction; folder?: string; fallback?: true };
 export type Classifier = { id: string; name: string; enabled: boolean; account: string; folder: string; guidance?: string; includeNotices?: boolean; categories: ClassifierCategory[] };

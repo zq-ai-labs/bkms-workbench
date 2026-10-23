@@ -4,6 +4,7 @@ import { isAbsolute, relative, resolve } from 'node:path'
 import { historyForPrompt, splitQuoted } from './quoted.js'
 import { WorkbenchError, type AgentChannel, type AgentOutput, type AgentRunner, type Rule, type RuntimeContext, type Task } from './types.js'
 import { renderVariables } from './context-vars.js'
+import { traceOf } from './trace.js'
 
 export const RESULT_TOOL = 'bkms_workbench_result'
 /** The new text of the mail plus its quoted history, so the model can tell what was asked this time. */
@@ -153,7 +154,7 @@ export function createAgentRunner(ctx: any, workspaceRoot: string): AgentRunner 
         }
         attachments.push({ filename: attachment.filename, size: attachment.size, contentType: attachment.contentType, ...(localPath ? { localPath } : {}) })
       }
-      const sessionId = `bkms-workbench-${randomUUID()}`
+      const sessionId = `bkms-workbench-${randomUUID()}`, startedAt = Date.now()
       const selectedSkills: { name: string; content: string }[] = []
       const skillService = service(ctx, 'skills')
       for (const name of [...new Set((rule as Rule & { skills?: string[] }).skills ?? [])]) {
@@ -170,7 +171,8 @@ export function createAgentRunner(ctx: any, workspaceRoot: string): AgentRunner 
       let output: AgentOutput | undefined
       const staged = new WeakMap<object, AgentOutput>()
       const handle = await agents.create({
-        sessionId, meta: { cwd: workspace }, agentOptions: { ...selected }, signal,
+        // A background run, not a conversation: DSH keeps sessions with this origin out of its session list.
+        sessionId, meta: { cwd: workspace, origin: 'subagent' }, agentOptions: { ...selected }, signal,
         setup(agentCtx: any) {
           // No parent Agent or preset is inherited. Native mode keeps final-result commit unambiguous.
           agentCtx.tools.restrict({ allow })
@@ -211,6 +213,8 @@ export function createAgentRunner(ctx: any, workspaceRoot: string): AgentRunner 
         },
       })
       const onAbort = () => handle.agent.cancel({ kind: 'hook', reason: 'bkms-workbench task canceled' })
+      // What the run did, kept with the task for debugging (src/trace.ts); attached to a failure too.
+      const trace = () => { try { return traceOf(handle.agent.session.snapshotEvents(), sessionId, startedAt) } catch { return undefined } }
       signal.addEventListener('abort', onAbort, { once: true })
       try {
         signal.throwIfAborted()
@@ -226,7 +230,11 @@ export function createAgentRunner(ctx: any, workspaceRoot: string): AgentRunner 
         if (output === undefined) throw new WorkbenchError('DSH 未提交有效的结构化处理结果，请重试或调整规则。', 'invalid_output', 503)
         const sessions = service(ctx, 'sessions')
         if (typeof sessions?.flush === 'function') await sessions.flush(handle.agent.session)
-        return { output, sessionId }
+        return { output, sessionId, trace: trace() }
+      } catch (error) {
+        const recorded = trace()
+        if (recorded && error && typeof error === 'object') Object.assign(error, { trace: recorded })
+        throw error
       } finally {
         signal.removeEventListener('abort', onAbort)
         await handle.dispose()

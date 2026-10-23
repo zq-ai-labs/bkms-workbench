@@ -112,9 +112,10 @@ export class WorkbenchApi {
         // A finished task (sent, ignored…) whose old draft is gone is history, not a mailbox problem worth a banner.
         if (!(error instanceof WorkbenchError && error.code === 'draft-unavailable') || ['review', 'sending', 'uncertain'].includes(task.status)) providerError ??= this.engine.safe(error)
       }
-      const { workspace, rule, ...safe } = task
+      // The AI run record is for debugging; the page gets it only when the setting is on.
+      const { workspace, rule, trace, ...safe } = task
       const latestRule = config.rules.find(rule => rule.id === task.ruleId)
-      return { ...safe, canResolveSend: task.status === 'uncertain' && draft?.state === 'uncertain' && sendRecoveryAvailable, outputKind: task.rule?.output, ruleUpdated: !!latestRule && !!task.rule && JSON.stringify(latestRule) !== JSON.stringify(task.rule), attachments: task.attachments.map(({ localPath, ...file }) => file), draft: draft ? { ...draft, sourceKey: undefined, attachments: draft.attachments.map(({ id, filename }: any) => ({ id, filename })) } : undefined }
+      return { ...safe, ...(config.settings.showTrace && trace ? { trace } : {}), canResolveSend: task.status === 'uncertain' && draft?.state === 'uncertain' && sendRecoveryAvailable, outputKind: task.rule?.output, ruleUpdated: !!latestRule && !!task.rule && JSON.stringify(latestRule) !== JSON.stringify(task.rule), attachments: task.attachments.map(({ localPath, ...file }) => file), draft: draft ? { ...draft, sourceKey: undefined, attachments: draft.attachments.map(({ id, filename }: any) => ({ id, filename })) } : undefined }
     }))
     const health = this.engine.health()
     const links = relations(all)
@@ -282,7 +283,7 @@ export class WorkbenchApi {
     }
     if (body.action === 'saveSettings') {
       const settings = body.settings
-      if (!settings || typeof settings !== 'object' || Array.isArray(settings) || !Object.keys(settings).length || Object.keys(settings).some(key => !['enabled', 'pollSeconds', 'showWorkbench', 'notifyNewTodo', 'triage', 'undoMinutes', 'briefEnabled', 'briefTime', 'weeklyEnabled', 'weeklyDay', 'weeklyTime', 'meetingBriefMinutes', 'channels', 'hiddenViews', 'profile'].includes(key))) throw new WorkbenchError('工作台设置无效。')
+      if (!settings || typeof settings !== 'object' || Array.isArray(settings) || !Object.keys(settings).length || Object.keys(settings).some(key => !['enabled', 'pollSeconds', 'showWorkbench', 'notifyNewTodo', 'triage', 'undoMinutes', 'briefEnabled', 'briefTime', 'weeklyEnabled', 'weeklyDay', 'weeklyTime', 'meetingBriefMinutes', 'channels', 'hiddenViews', 'profile', 'showTrace'].includes(key))) throw new WorkbenchError('工作台设置无效。')
       if ('hiddenViews' in settings) { settings.hiddenViews = list(settings.hiddenViews, 3, 20, '页签设置无效。'); if (settings.hiddenViews.some((view: string) => !['today', 'meetings', 'topics'].includes(view))) throw new WorkbenchError('页签设置无效。') }
       if ('profile' in settings) settings.profile = validateProfile(settings.profile)
       // Each channel checks its own settings; a channel that is not installed cannot be configured.
@@ -295,7 +296,7 @@ export class WorkbenchApi {
           settings.channels[kind] = channel.settings.validate(value); changedChannels.push(kind)
         }
       }
-      for (const key of ['enabled', 'showWorkbench', 'notifyNewTodo', 'triage', 'briefEnabled', 'weeklyEnabled']) if (key in settings && typeof settings[key] !== 'boolean') throw new WorkbenchError('工作台开关应为布尔值。')
+      for (const key of ['enabled', 'showWorkbench', 'notifyNewTodo', 'triage', 'briefEnabled', 'weeklyEnabled', 'showTrace']) if (key in settings && typeof settings[key] !== 'boolean') throw new WorkbenchError('工作台开关应为布尔值。')
       if ('pollSeconds' in settings && (!Number.isSafeInteger(settings.pollSeconds) || settings.pollSeconds < 30 || settings.pollSeconds > 3600)) throw new WorkbenchError('检查间隔应为 30–3600 秒。')
       if ('undoMinutes' in settings && (!Number.isSafeInteger(settings.undoMinutes) || settings.undoMinutes < 1 || settings.undoMinutes > 240)) throw new WorkbenchError('撤回窗口应为 1–240 分钟。')
       if ('meetingBriefMinutes' in settings && (!Number.isSafeInteger(settings.meetingBriefMinutes) || settings.meetingBriefMinutes < 5 || settings.meetingBriefMinutes > 240)) throw new WorkbenchError('会前简报提前时间应为 5–240 分钟。')

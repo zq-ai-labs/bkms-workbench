@@ -4,7 +4,7 @@ import { addSystemEnglish } from "./i18n";
 import { TodoTracker, type Preferences } from "./preferences";
 
 /** Lightweight preferences shared by the sidebar entry, reminders and both settings surfaces. */
-export type Settings = Preferences["settings"] & { profile?: import("./variables").Profile; triage?: boolean; undoMinutes?: number; briefEnabled?: boolean; briefTime?: string; weeklyEnabled?: boolean; weeklyDay?: number; weeklyTime?: string; meetingBriefMinutes?: number; channels?: Record<string, unknown> };
+export type Settings = Preferences["settings"] & { profile?: import("./variables").Profile; triage?: boolean; undoMinutes?: number; briefEnabled?: boolean; briefTime?: string; weeklyEnabled?: boolean; weeklyDay?: number; weeklyTime?: string; meetingBriefMinutes?: number; channels?: Record<string, unknown>; showTrace?: boolean };
 const initial = (): Preferences => ({ revision: 1, settings: { enabled: false, pollSeconds: 60, showWorkbench: true, notifyNewTodo: false }, attention: [] });
 export let preferences: Preferences = initial();
 export let reminder = { count: 0, sequence: 0 };

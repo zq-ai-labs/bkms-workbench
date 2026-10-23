@@ -25,7 +25,8 @@
 | `src/portable.ts` | 方案与分类方案的导出导入：去掉邮箱、文件夹、编号、启用状态与学习例子；导入时指定邮箱和文件夹，全部停用 |
 | `src/context-vars.ts` | 我的资料、处理要求中的 `{{变量}}` 白名单与替换、给 AI 的运行上下文 |
 | 分派与补处理 | 方案 `output: 'dispatch'` + `dispatchFolder`：引擎 `dispatch()` 移动邮件（`src/mail/service.ts` 的 `moveMessage`），不跑 Agent；`state.backfills` 记录“从指定时间开始”的补处理，`task.backfill` 的邮件从不自动发送 |
-| `src/agent.ts` | 后台 Agent：提示词、结果工具 schema、工具白名单；审核类文字的语言由 `reviewLanguage()` 控制 |
+| `src/agent.ts` | 后台 Agent：提示词、结果工具 schema、工具白名单；审核类文字的语言由 `reviewLanguage()` 控制。会话以 `origin: 'subagent'` 创建，不进 DSH 会话列表 |
+| `src/trace.ts` | 从会话事件提炼“AI 处理过程”（模型输出、工具调用、用量、结束原因），存在事项的 `trace`；设置“显示 AI 处理过程”打开时才发给页面 |
 | `src/quoted.ts` | 把邮件拆成“本次新内容 + 历史引用” |
 | `src/mail/` | 内置邮件模块（移植自 dsh-email，见 `src/mail/NOTICE.md`）：`accounts.ts` 账号、`service.ts` 服务与连接池、`drafts.ts` 草稿 |
 | `src/channels/` | 渠道接口 `types.ts`（`CHANNEL_API_VERSION`、`WorkbenchChannels` 服务）与注册表 `registry.ts`；渠道插件经 `ctx.workbenchChannels.register()` 接入，核心只通过它们使用邮件以外的渠道 |
