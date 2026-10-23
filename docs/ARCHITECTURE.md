@@ -16,8 +16,8 @@
 | src/index.ts | Cordis 服务生命周期、依赖注入、鉴权 Connection 路由 |
 | src/storage/ | SQLite 存储（经 `zq-sqlite`）：表结构与迁移、按记录读写与事务、worker 所有权 |
 | src/store.ts | 任务历史 `touch` |
-| src/channels/types.ts、registry.ts | 渠道接口（`CHANNEL_API_VERSION`）与已安装渠道的注册表；版本不一致的渠道被拒绝并提示升级 |
-| src/channels/wechat/ | 微信只读渠道：读取、分段、建议回复规范、页面用的会话列表与聊天记录 |
+| src/channels/types.ts、registry.ts | 渠道接口（`CHANNEL_API_VERSION`）与已安装渠道的注册表；渠道插件经 `ctx.workbenchChannels` 注册，版本不一致的被拒绝并提示升级。微信渠道见 workbench-weixin 仓库 |
+| client/slots.tsx | 渠道插槽：页面声明的子插槽名称、各插槽的 props 与 `kit` |
 | src/mail/service.ts | 内置邮件服务：连接池生命周期、引擎使用的 `EmailService`、连接测试、对其他插件的只读接口 |
 | src/mail/accounts.ts | 邮箱账号存储与校验、服务商预设、收件人规则 |
 | src/mail/drafts.ts、draft-store.ts | 草稿保存、预览、发送锁与回执（移植） |

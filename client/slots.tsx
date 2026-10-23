@@ -1,11 +1,16 @@
 import * as React from "react";
-import type { Task } from "./lib";
+import { api, fullDate, statusLabel, time, when, type Task } from "./lib";
+import { systemMessage } from "./i18n";
+import { Alert, Empty, Icon, Modal, StatusTag, Switch, Tag } from "./ui";
 
 /**
  * Parts of the page an installed channel can fill (docs/DESIGN-CORE-CHANNELS.md §4.4). The workbench declares them as
  * DSH child slots; a channel registers one component per slot, keyed by its kind (`source.kind` of its tasks). Each
  * slot receives what it needs as props, so channel parts never reach into the workbench's own state. Where a channel
  * brings no part, or is not installed, the workbench shows a plain fallback.
+ *
+ * A channel plugin keeps its own copy of the slot names and prop types below; every part also receives `kit`, the
+ * workbench's own components and helpers, so channel parts look like the rest of the page.
  */
 export const SLOTS = {
   /** Extra tags in a task's header. Props: {@link TaskPartProps}. */
@@ -24,6 +29,9 @@ export const SLOTS = {
 /** The same settings card on DSH's settings page, which is a separate slot entry; a channel registers its card in both. */
 export const SETTINGS_PAGE_SLOT = "bkms-workbench.settings.channel";
 
+/** Workbench components and helpers handed to every channel part. `api` calls the workbench route, which forwards channel actions. */
+export const KIT = { Alert, Empty, Icon, Modal, StatusTag, Switch, Tag, api, systemMessage, statusLabel, time, when, fullDate };
+export type PartKit = typeof KIT;
 export type TaskPartProps = { task: Task };
 export type SourcePartProps = { task: Task; tasks: Task[]; open(taskId: string): void };
 export type ConversationsProps = { page: unknown; tasks: Task[]; revision: number; open(taskId: string): void; openSettings(): void; saveSettings(value: unknown, message: string): Promise<void> };
@@ -49,5 +57,5 @@ export function ChannelPart<K extends keyof PartProps>({ part, kind, props, fall
   const { render, settingsPage } = React.useContext(SlotContext);
   if (!render) return <>{fallback}</>;
   const name = part === "settings" && settingsPage ? SETTINGS_PAGE_SLOT : SLOTS[part];
-  return <>{render(name, props, { entryKey: kind, fallback })}</>;
+  return <>{render(name, { ...props, kit: KIT }, { entryKey: kind, fallback })}</>;
 }

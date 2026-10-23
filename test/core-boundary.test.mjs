@@ -5,18 +5,14 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /**
- * WeChat is becoming an optional channel plugin (docs/DESIGN-CORE-CHANNELS.md). The WeChat channel's own code lives in
- * its channel folders; everywhere else each file's count is a ratchet that can only go down. "企业微信" (WeCom and
- * Tencent Exmail) is a different product and is not counted.
+ * WeChat is a channel plugin of its own (zq-ai-labs/workbench-weixin, docs/DESIGN-CORE-CHANNELS.md). The workbench
+ * keeps only the name of the known source and a few words in messages; each file's count is a ratchet that can only go
+ * down. "企业微信" (WeCom and Tencent Exmail) is a different product and is not counted.
  */
-const CHANNEL_DIRS = ['src/channels/wechat/', 'client/channels/wechat/']
 const BASELINE = {
   'src/classify.ts': 1,
-  'src/index.ts': 4,
   'src/rules.ts': 1,
   'src/types.ts': 3,
-  // The page registers the WeChat parts itself until the WeChat plugin does (phase 4).
-  'client/index.tsx': 3,
   // Name of a known source, also for a channel that is not installed.
   'client/lib.ts': 1,
 }
@@ -29,7 +25,6 @@ const sources = dir => readdirSync(join(root, dir), { recursive: true, withFileT
 test('the core gains no new WeChat references (ratchet towards the channel split)', () => {
   const counts = {}
   for (const file of [...sources('src'), ...sources('client')]) {
-    if (CHANNEL_DIRS.some(dir => file.startsWith(dir))) continue
     const lines = readFileSync(join(root, file), 'utf8').split(/\r?\n/).filter(line => WECHAT.test(line)).length
     if (lines) counts[file] = lines
   }

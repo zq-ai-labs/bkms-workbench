@@ -1,7 +1,8 @@
 /**
  * Contract between the workbench core and a channel (docs/DESIGN-CORE-CHANNELS.md §4). A channel brings items in and
  * describes them; the core owns the queue, triage, workflows, the AI run, review and storage. Mail is the built-in
- * channel; other channels register through `ctx.workbenchChannels`, each from its own plugin.
+ * channel; other channels register through `ctx.workbenchChannels` (see {@link WorkbenchChannels}), each from its own
+ * plugin. A channel plugin keeps its own copy of this file; the version numbers must be equal.
  *
  * Any incompatible change to this file bumps CHANNEL_API_VERSION. A channel built for another version is refused and
  * the settings page asks to upgrade the older side (decision D10); there is no compatibility layer.
@@ -75,7 +76,24 @@ export interface Channel<S = unknown> {
   }
   /** Channel actions for the page, by action name. */
   actions?: Record<string, (body: Record<string, unknown>, context: ActionContext<S>) => Promise<unknown>>
+  /**
+   * English for the channel's own messages shown on the page (its `text`, errors and logs), keyed by the Chinese text;
+   * `{0}` placeholders as in `client/system-en.json`.
+   */
+  systemEnglish?: Record<string, string>
   /** Data for the page under `snapshot.channels[kind]`. */
   snapshot?(settings: S | undefined, saved: ChannelState): unknown
   close?(): void | Promise<void>
 }
+
+/**
+ * The workbench service `ctx.workbenchChannels`. A channel plugin injects it and registers its channel inside an effect:
+ * `ctx.effect(() => ctx.workbenchChannels.register(channel))`; the returned function removes the channel again.
+ * A channel built for another `CHANNEL_API_VERSION` is not used; the settings page asks to upgrade the older side.
+ */
+export interface WorkbenchChannels { apiVersion: number; register(channel: Channel<any>): () => void }
+/**
+ * Errors from a channel may carry an HTTP `status` (400–599) and a `code`; the page shows the message. The class
+ * itself does not matter, so a channel plugin can use its own.
+ */
+export interface ChannelError extends Error { code?: string; status?: number }

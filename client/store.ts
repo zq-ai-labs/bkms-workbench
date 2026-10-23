@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { api } from "./lib";
+import { addSystemEnglish } from "./i18n";
 import { TodoTracker, type Preferences } from "./preferences";
 
 /** Lightweight preferences shared by the sidebar entry, reminders and both settings surfaces. */
@@ -20,7 +21,7 @@ export function acceptPreferences(next: Preferences) {
   else if (count) reminder = { count: reminder.count + count, sequence: reminder.sequence + 1 };
   emit();
 }
-export async function refreshPreferences(signal?: AbortSignal) { acceptPreferences(await api<Preferences>("preferences", {}, signal)); }
+export async function refreshPreferences(signal?: AbortSignal) { const next = await api<Preferences>("preferences", {}, signal); addSystemEnglish((next.channelInfo ?? []).map(item => item.systemEnglish)); acceptPreferences(next); }
 export const usePreferences = () => useSyncExternalStore(subscribePreferences, () => preferences);
 export const useReminder = () => useSyncExternalStore(subscribePreferences, () => reminder);
 export function dismissReminder() { reminder = { ...reminder, count: 0 }; emit(); }

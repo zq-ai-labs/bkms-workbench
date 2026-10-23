@@ -43,6 +43,9 @@ function startTime(value: unknown): Date {
   if (Date.now() - at.getTime() > 366 * 86400000) throw new WorkbenchError('开始时间最多往前一年。')
   return at
 }
+/** HTTP status of a failed action: the error's own status (also from a channel plugin's error class), else 400. */
+const statusOf = (error: unknown): number => { const status = error instanceof WorkbenchError ? error.status : (error as { status?: unknown } | null)?.status; return typeof status === 'number' && status >= 400 && status <= 599 ? status : 400 }
+
 export class WorkbenchApi {
   private busy = new Set<string>()
   private accepting = true
@@ -130,7 +133,7 @@ export class WorkbenchApi {
   }
   /** Installed channels for the page: their names, how replies work and whether each is on. */
   private channelInfo(settings: { channels?: Record<string, unknown> }) {
-    return this.engine.channels.list().map(channel => ({ kind: channel.kind, label: channel.label, reply: channel.capabilities.reply, enabled: channel.settings.enabled(settings.channels?.[channel.kind]) }))
+    return this.engine.channels.list().map(channel => ({ kind: channel.kind, label: channel.label, reply: channel.capabilities.reply, enabled: channel.settings.enabled(settings.channels?.[channel.kind]), ...(channel.systemEnglish ? { systemEnglish: channel.systemEnglish } : {}) }))
   }
   /**
    * Trial run over mail received in a chosen time range, read straight from the mailbox (history before the baseline
@@ -682,7 +685,7 @@ export class WorkbenchApi {
   private cancelAutoSend(taskId: string): Promise<unknown> { return this.exclusive(taskId, () => this.cancelTaskAutoSend(taskId)) }
   async fetch(request: Request): Promise<Response> {
     try { return await this.tracked(() => this.dispatchFetch(request)) }
-    catch (error) { return json(error instanceof WorkbenchError ? error.status : 400, { ok: false, error: this.engine.safe(error), code: (error as any)?.code ?? 'invalid' }) }
+    catch (error) { return json(statusOf(error), { ok: false, error: this.engine.safe(error), code: (error as any)?.code ?? 'invalid' }) }
   }
   private async dispatchFetch(request: Request): Promise<Response> {
     try {
@@ -711,6 +714,6 @@ export class WorkbenchApi {
       }
       const value = await this.dispatch(body, signal)
       return json(200, { ok: true, value })
-    } catch (error) { return json(error instanceof WorkbenchError ? error.status : 400, { ok: false, error: this.engine.safe(error), code: (error as any)?.code ?? 'invalid' }) }
+    } catch (error) { return json(statusOf(error), { ok: false, error: this.engine.safe(error), code: (error as any)?.code ?? 'invalid' }) }
   }
 }

@@ -27,7 +27,7 @@ test('every workbench UI label has English text and matching placeholders', () =
     // System messages are recognized by pattern: a text that is only placeholders would match every message.
     assert.doesNotMatch(value, /^\s*(\{\d+\}\s*)+$/, `${key}: English text is only placeholders`)
   }
-  assert.ok(clientFiles.includes('index.tsx') && clientFiles.includes('channels/wechat/index.tsx') && clientFiles.length > 5)
+  assert.ok(clientFiles.includes('index.tsx') && clientFiles.length > 5)
   for (const file of clientFiles) check(file)
 })
 function check(file) {
