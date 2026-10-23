@@ -1125,5 +1125,12 @@
   "文件“{0}”中有 {1} 个处理方案、{2} 个分类方案。导入后它们读取下面选择的邮箱和文件夹，全部为停用状态，检查后再逐个启用。": "“{0}” has {1} workflows and {2} category schemes. They will read the mailbox and folder chosen below and are imported switched off; check them and enable them one by one.",
   "读取的文件夹": "Folder to read",
   "正在导入…": "Importing…",
-  "确认导入": "Import"
+  "确认导入": "Import",
+  "新建": "New",
+  "未保存": "Not saved",
+  "新分类方案": "New category scheme",
+  "新处理方案": "New workflow",
+  "新建处理方案": "New workflow",
+  "按投诉、咨询等业务类型分开邮件": "Sort mail by business type, e.g. complaints and inquiries",
+  "说清处理哪些信息、怎么处理": "Say which messages to handle and how"
 }

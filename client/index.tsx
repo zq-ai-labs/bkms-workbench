@@ -23,6 +23,8 @@ export function Workbench({ renderSlot }: { renderSlot?: RenderSlot }) {
   const [data, setData] = useState<Snapshot>(EMPTY), [loaded, setLoaded] = useState(false);
   const [route, setRoute] = useState<Route>(lastRoute);
   const [busy, setBusy] = useState(""), [error, setError] = useState(""), [notice, setNotice] = useState(""), [hiddenStatus, setHiddenStatus] = useState("");
+  /** Navigation requested during an operation, applied when it finishes. */
+  const queued = useRef<Route | undefined>(undefined), goRef = useRef<(next: Route) => void>(() => {});
   const op = useRef(false), sequence = useRef(0), mounted = useRef(true), leave = useRef<(() => boolean) | undefined>(undefined);
   /** Version of the data on screen; the periodic check sends it and gets only “unchanged” while nothing changed. */
   const version = useRef<string | undefined>(undefined);
@@ -53,18 +55,24 @@ export function Workbench({ renderSlot }: { renderSlot?: RenderSlot }) {
     if (op.current) return;
     op.current = true; setBusy(key); setError(""); setNotice("");
     try { await work(); } catch (failure) { setError(errorMessage(failure)); await refresh().catch(() => {}); }
-    finally { op.current = false; setBusy(""); }
+    finally {
+      op.current = false; setBusy("");
+      // A page asked to go somewhere while the operation ran (e.g. to the workflow it just saved): go there now.
+      const next = queued.current; queued.current = undefined;
+      if (next) goRef.current(next);
+    }
   }, [refresh]);
   const routeRef = useRef(route);
   routeRef.current = route;
   const go = useCallback((next: Route) => {
-    if (op.current) return;
+    if (op.current) { queued.current = next; return; }
     const current = routeRef.current;
     if (current.view === next.view && current.task === next.task && current.rule === next.rule && current.topic === next.topic && current.report === next.report && current.channel === next.channel) return;
     if (leave.current && !leave.current()) return;
     leave.current = undefined;
     setRoute(next);
   }, []);
+  goRef.current = go;
   const context: WorkbenchContext = useMemo(() => ({ data, loaded, busy, refresh, perform, notify: setNotice, fail: setError, go, leave }), [data, loaded, busy, refresh, perform, go]);
   const decisions = data.tasks.filter(task => task.attention).length;
   const recent = data.activity.filter(item => Date.parse(item.at) >= Date.now() - 864e5 && !item.undoneAt).length;
