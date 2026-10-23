@@ -175,11 +175,13 @@ export class Engine {
     this.polling = true; let added = 0
     const signal = AbortSignal.any([this.controller.signal, AbortSignal.timeout(90000)])
     try {
-      const email = this.email(), accounts = await email.accounts(), { rules } = await this.repo.config()
+      const email = this.email(), accounts = await email.accounts(), { rules, classifiers = [] } = await this.repo.config()
       const folders = new Map<string, { account: string; folder: string }>()
       for (const account of accounts) {
         folders.set(JSON.stringify([account.id, account.inboxFolder || 'INBOX']), { account: account.id, folder: account.inboxFolder || 'INBOX' })
         for (const rule of rules.filter(r => r.enabled && (!r.account || r.account === account.id))) folders.set(JSON.stringify([account.id, rule.folder]), { account: account.id, folder: rule.folder })
+        // A business-category scheme reads its own folder too, even when no workflow watches it.
+        for (const classifier of classifiers.filter(c => c.enabled && (!c.account || c.account === account.id))) folders.set(JSON.stringify([account.id, classifier.folder]), { account: account.id, folder: classifier.folder })
       }
       for (const [key, source] of folders) {
         try {

@@ -176,3 +176,24 @@ test('a trial run shows the category each message would get and changes nothing'
   assert.equal(bySubject['关于报价的疑问'].categoryId, '', 'unsure: would wait for you'); assert.ok(bySubject['关于报价的疑问'].likely)
   assert.equal(JSON.stringify(await stateOf(f.store)), before); assert.equal(f.moves.length, 0)
 })
+
+test('a scheme on a folder no workflow watches still receives that folder’s new mail and classifies it', async t => {
+  const f = await fixture(t)
+  // Only the scheme names this folder: no workflow is set up for it.
+  const saved = await f.saveScheme({ ...scheme, folder: '客服演示', categories: [{ name: '投诉', include: '表达不满。', action: 'label' }, { name: '查询', include: '查订单进度。', action: 'label' }] })
+  await f.engine.poll()
+  assert.deepEqual((await stateOf(f.store)).tasks, [], 'the first read is a baseline; mail already there is not processed')
+  f.verdict = () => ({ categoryId: f.byName(saved, '投诉').id, confidence: 'high', reason: '要求赔偿。' })
+  f.folders['客服演示'].push({ uid: 900, date: new Date().toISOString(), from: [{ address: 'buyer@client.example' }], subject: '物流延误，要求赔偿', text: '物流延误，要求赔偿', seen: false, hasAttachments: false })
+  await f.engine.poll()
+  for (let i = 0; i < 3; i++) await f.engine.processNext()
+  const [task] = (await stateOf(f.store)).tasks
+  assert.equal(task.source.folder, '客服演示')
+  assert.ok(f.seen.at(-1).classifier, 'triage was asked for a business category')
+  assert.equal(task.classification.state, 'applied'); assert.equal(task.classification.categoryName, '投诉')
+  // A disabled scheme no longer brings its folder in.
+  await f.saveScheme({ ...saved, enabled: false })
+  f.folders['客服演示'].push({ uid: 901, date: new Date().toISOString(), from: [{ address: 'buyer@client.example' }], subject: '再问一次', text: '再问一次', seen: false, hasAttachments: false })
+  await f.engine.poll()
+  assert.equal((await stateOf(f.store)).tasks.length, 1)
+})

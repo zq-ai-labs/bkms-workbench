@@ -1,5 +1,11 @@
 # 本地验证记录
 
+## 业务分类方案的文件夹也收信（2026-10-23）
+
+- 问题：收信只看收件箱和已启用处理方案的文件夹；分类方案选的文件夹若没有处理方案用到，就不会收信，分类无效（试运行按时间直接读文件夹，所以试运行看得到）。用户在 Mac 上复现。
+- 修复：收信时加入已启用分类方案的文件夹。第一次读这个文件夹时建立基线，只处理之后的新邮件；要处理已有邮件，用“重建收件基线”选这个文件夹和开始时间。
+- `test/classify.test.mjs` 新增用例；`pnpm test` 220 通过、4 跳过。
+
 ## 离线安装包（2026-10-23）
 
 - `pnpm run pack:plugin` 改为 `scripts/pack-plugin.mjs`：在临时目录用扁平布局只装运行依赖，带 `bundleDependencies` 打包。包约 7.6 MB，含 imapflow、nodemailer、mailparser、yaml、proper-lockfile、zq-sqlite 及其全部间接依赖（kysely、pino 等）。
