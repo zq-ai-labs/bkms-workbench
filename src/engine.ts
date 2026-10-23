@@ -8,11 +8,12 @@ import { classifierFor, decideCategory, triageClassifier } from './classify.js'
 import { runtimeContext, variableValues } from './context-vars.js'
 import { historyForPrompt, splitQuoted } from './quoted.js'
 import { originalMailFields } from './original-mail.js'
-import { Store, findTask, log, touch } from './store.js'
+import { touch } from './store.js'
+import { WorkbenchRepository, type Config, type Records } from './storage/repository.js'
 import { heuristicTriage } from './triage.js'
 import { activityEntry, briefData, briefTemplate, localDate, localMinutes, parseClock, senderKey, startOfWeek, topicData, topicMatches, topicTemplate, weeklyData, weeklyTemplate } from './digest.js'
 import { appendPending, chatAllowed, chatKind, segmentDue, segmentTitle, segmentVerdict, transcript, wechatSettingsOf } from './wechat.js'
-import { WorkbenchError, now, type AgentOutput, type AgentRunner, type Check, type EmailService, type Rule, type Settings, type State, type Task, type TopicSummary, type TriageRunner, type Confidence, type BusinessVerdict, type RuntimeContext, type Profile, type WechatChat, type WechatPending, type WechatService, type WechatSettings, type WechatStatus, type WriterRunner } from './types.js'
+import { WorkbenchError, now, type AgentOutput, type AgentRunner, type Check, type EmailService, type Rule, type Settings, type State, type Task, type Topic, type TopicSummary, type TriageRunner, type Confidence, type BusinessVerdict, type RuntimeContext, type Profile, type WechatChat, type WechatPending, type WechatService, type WechatSettings, type WechatStatus, type WriterRunner } from './types.js'
 
 const address = (entries: any[]): string => (entries || []).map(e => e.address || '').filter(Boolean).join(', ')
 const readableFrom = (entries: any[]): string => (entries || []).map(e => e.name ? `${e.name} <${e.address || ''}>` : e.address || '').filter(Boolean).join(', ')
@@ -82,12 +83,11 @@ export class Engine {
   async setLanguage(language: 'zh' | 'en'): Promise<void> {
     this.language = language
     if (this.savedLanguage === language) return
-    const state = await this.store.read()
-    if (state.uiLanguage !== language) await this.store.mutate(next => { next.uiLanguage = language })
+    if ((await this.repo.config()).uiLanguage !== language) await this.repo.write(tx => tx.setUiLanguage(language))
     this.savedLanguage = language
   }
   private savedLanguage?: 'zh' | 'en'
-  constructor(readonly store: Store, private emailSource: () => EmailService | undefined, readonly agent: AgentRunner, readonly capabilities: () => Promise<unknown> = async () => ({ tools: [], skills: [] }), readonly triage?: TriageRunner, readonly writer?: WriterRunner, readonly wechat?: { service(settings: WechatSettings | undefined): WechatService | undefined; clear?(): Promise<void> }) {}
+  constructor(readonly repo: WorkbenchRepository, private emailSource: () => EmailService | undefined, readonly agent: AgentRunner, readonly capabilities: () => Promise<unknown> = async () => ({ tools: [], skills: [] }), readonly triage?: TriageRunner, readonly writer?: WriterRunner, readonly wechat?: { service(settings: WechatSettings | undefined): WechatService | undefined; clear?(): Promise<void> }) {}
   email(): EmailService { const email = this.emailSource(); if (!email || email.version !== 1) throw new WorkbenchError('请先在工作台设置中添加邮箱账号。', 'email-unavailable', 503); return email }
   health() { return { email: this.emailSource()?.version === 1, agent: this.agent.available(), running: !!this.release && !this.stopping, lastPoll: this.lastPoll, error: this.error, triage: !!this.triage?.available(), writer: !!this.writer?.available(), wechat: this.wechatHealth() } }
   wechatHealth(): { ready: boolean; name?: string; library?: string; error?: string } | undefined {
@@ -96,14 +96,16 @@ export class Engine {
     return { ready: !!info?.ready && !this.wechatError, name: info?.name, library: info?.library, error: this.wechatError || info?.error }
   }
   async start(): Promise<void> {
-    this.release = await this.store.ownWorker(error => { this.error = this.safe(error); void this.stop() }, true)
-    try { await this.store.mutate(state => {
-      if (state.uiLanguage) { this.language = state.uiLanguage; this.savedLanguage = state.uiLanguage }
-      for (const task of state.tasks) {
+    this.release = await this.repo.ownWorker(error => { this.error = this.safe(error); void this.stop() }, true)
+    try { await this.repo.write(async tx => {
+      const { uiLanguage } = await tx.config()
+      if (uiLanguage) { this.language = uiLanguage; this.savedLanguage = uiLanguage }
+      for (const task of await tx.tasks({ statuses: ['running', 'sending'] })) {
         if (task.status === 'running') { task.status = 'queued'; touch(task, '服务重启，恢复未完成的准备任务。') }
         if (task.status === 'sending') { task.status = 'uncertain'; task.error = '服务在发送期间重启，请核对发送记录。'; touch(task, task.error) }
+        await tx.saveTask(task)
       }
-      log(state, '工作台后台已启动。首次连接邮箱仅建立基线，不处理历史邮件。')
+      await tx.log('工作台后台已启动。首次连接邮箱仅建立基线，不处理历史邮件。')
     }) } catch (error) { await this.release(); this.release = undefined; throw error }
     this.schedule(250)
   }
@@ -113,20 +115,21 @@ export class Engine {
     this.timer.unref?.()
   }
   private async tick(): Promise<void> {
-    const state = await this.store.read()
-    if (!state.settings.enabled) return
-    if (this.emailSource() && Date.now() - this.lastCheck >= state.settings.pollSeconds * 1000) { this.lastCheck = Date.now(); await this.poll().catch(error => { this.error = this.safe(error) }) }
-    if (wechatSettingsOf(state.settings.wechat).enabled) await this.pollWechat().catch(error => { this.wechatError = this.safe(error) })
+    const { settings } = await this.repo.config()
+    if (!settings.enabled) return
+    if (this.emailSource() && Date.now() - this.lastCheck >= settings.pollSeconds * 1000) { this.lastCheck = Date.now(); await this.poll().catch(error => { this.error = this.safe(error) }) }
+    if (wechatSettingsOf(settings.wechat).enabled) await this.pollWechat().catch(error => { this.wechatError = this.safe(error) })
     await this.processNext()
     await this.sendDue()
     // Scheduled writing is best effort: a busy writer simply waits for the next slot; other failures are logged once per attempt.
-    await this.scheduled().catch(error => (error as WorkbenchError)?.code === 'busy' ? undefined : this.store.mutate(state => log(state, `定时生成失败：${this.safe(error)}`, undefined, 'error')).catch(() => {}))
+    await this.scheduled().catch(error => (error as WorkbenchError)?.code === 'busy' ? undefined : this.repo.write(tx => tx.log(`定时生成失败：${this.safe(error)}`, undefined, 'error')).catch(() => {}))
   }
   async stop(): Promise<void> {
     this.stopping = true; clearTimeout(this.timer); this.controller.abort(new Error('工作台已停止'))
     // Do not release the worker lock while an execution can still mutate state.
     while (this.polling || this.wechatPolling || this.processing || this.sending || this.generating) await new Promise(resolve => setTimeout(resolve, 50))
     await this.release?.(); this.release = undefined
+    await this.repo.close()
   }
   safe(error: unknown): string {
     const value = error instanceof Error ? error.message : '处理失败，请查看任务记录。'
@@ -152,7 +155,7 @@ export class Engine {
     return read
   }
   async attachment(task: Task, index: number, signal: AbortSignal): Promise<{ path: string; filename: string }> {
-    const workspace = join(this.store.root, 'tasks', task.id)
+    const workspace = join(this.repo.root, 'tasks', task.id)
     await mkdir(workspace, { recursive: true, mode: 0o700 })
     const at = this.location(task)
     const result = await this.email().downloadAttachment(task.account, at.folder, at.uid, index, workspace, signal, at.uidValidity)
@@ -174,64 +177,66 @@ export class Engine {
     return { path: target, filename }
   }
   /** Triage runs whenever a triage runner exists and the user has not switched it off. */
-  private triageOn(state: State): boolean { return !!this.triage && settingsOf(state.settings).triage }
+  private triageOn(settings: Settings): boolean { return !!this.triage && settingsOf(settings).triage }
   async poll(): Promise<{ checked: boolean; added: number }> {
     if (this.polling) return { checked: false, added: 0 }
     if (this.stopping || !this.release) throw new WorkbenchError('后台尚未就绪。', 'not-ready', 503)
     this.polling = true; let added = 0
     const signal = AbortSignal.any([this.controller.signal, AbortSignal.timeout(90000)])
     try {
-      const email = this.email(), accounts = await email.accounts(), state = await this.store.read()
+      const email = this.email(), accounts = await email.accounts(), { rules } = await this.repo.config()
       const folders = new Map<string, { account: string; folder: string }>()
       for (const account of accounts) {
         folders.set(JSON.stringify([account.id, account.inboxFolder || 'INBOX']), { account: account.id, folder: account.inboxFolder || 'INBOX' })
-        for (const rule of state.rules.filter(r => r.enabled && (!r.account || r.account === account.id))) folders.set(JSON.stringify([account.id, rule.folder]), { account: account.id, folder: rule.folder })
+        for (const rule of rules.filter(r => r.enabled && (!r.account || r.account === account.id))) folders.set(JSON.stringify([account.id, rule.folder]), { account: account.id, folder: rule.folder })
       }
       for (const [key, source] of folders) {
         try {
           for (let page = 0; page < 10; page++) {
             signal.throwIfAborted()
-            const before = (await this.store.read()).cursors[key]
+            const before = await this.repo.cursor(key)
             const batch = await email.scan({ ...source, cursor: before, limit: 50 }, signal)
             if (batch.reset) throw new WorkbenchError('邮箱 UIDVALIDITY 已改变，请在确认邮箱后重建基线。', 'email-cursor-reset', 409)
-            added += await this.store.mutate(doc => {
-              if (JSON.stringify(doc.cursors[key]) !== JSON.stringify(before)) return 0
+            // Nothing new and nothing to record: no write, so an idle workbench leaves its data untouched.
+            if (!batch.messages.length && !batch.firstRun && JSON.stringify(batch.cursor) === JSON.stringify(before) && !(await this.repo.backfill(key))) break
+            added += await this.repo.write(async tx => {
+              // Someone else moved this folder's cursor meanwhile (a rebuilt baseline): this batch is stale.
+              if (JSON.stringify(await tx.cursor(key)) !== JSON.stringify(before)) return 0
               let count = 0, skipped = 0
-              const triage = this.triageOn(doc)
+              const config = await tx.config(), triage = this.triageOn(config.settings)
               // History processed from a chosen start time: marked, never auto-sent; mail already answered then is skipped.
-              const backfill = doc.backfills?.[key], inBackfill = (uid: number) => !!backfill && backfill.uidValidity === batch.cursor.uidValidity && uid <= backfill.untilUid
+              const backfill = await tx.backfill(key), inBackfill = (uid: number) => !!backfill && backfill.uidValidity === batch.cursor.uidValidity && uid <= backfill.untilUid
               for (const mail of batch.messages) {
                 if (inBackfill(mail.uid) && backfill!.skip.includes(mail.uid)) { skipped++; continue }
-                if (doc.tasks.some(t => t.source.account === source.account && t.source.folder === source.folder && t.source.uidValidity === batch.cursor.uidValidity && t.source.uid === mail.uid)) continue
                 const from = readableFrom(mail.from), meta = { ...source, from, subject: mail.subject || '', hasAttachments: !!mail.hasAttachments }
                 const timestamp = now(), task: Task = { id: randomUUID(), revision: 1, title: mail.subject || '无主题邮件', account: source.account, status: 'queued', from, subject: mail.subject || '', body: '', receivedAt: mail.date || timestamp, updatedAt: timestamp, source: { ...source, uid: mail.uid, uidValidity: batch.cursor.uidValidity }, attachments: [], history: [], attempts: 0 }
                 task.hasAttachments = !!mail.hasAttachments
                 if (inBackfill(mail.uid)) { task.backfill = true; task.history.push({ at: timestamp, message: '历史邮件补处理：只生成草稿，不会自动发送。' }) }
                 if (triage) { task.triage = { state: 'pending' }; task.history.push({ at: timestamp, message: '等待 AI 分拣。' }) }
                 else {
-                  const rule = chooseRule(doc.rules, meta)
+                  const rule = chooseRule(config.rules, meta)
                   task.status = rule ? 'queued' : 'unmatched'
                   task.history.push({ at: timestamp, message: rule ? `命中规则「${rule.name}」，等待处理。` : '未匹配规则，可手动选择规则处理。' })
                   if (rule) { task.ruleId = rule.id; task.ruleName = rule.name; task.rule = structuredClone(rule) }
                 }
-                doc.tasks.push(task); count++
+                // A message already received (same folder, generation and UID) is not added again.
+                if (await tx.insertTask(task)) count++
               }
-              doc.cursors[key] = batch.cursor
-              if (skipped) log(doc, `${source.account} / ${source.folder} 补处理时跳过 ${skipped} 封已回复的邮件。`)
+              await tx.setCursor(key, batch.cursor)
+              if (skipped) await tx.log(`${source.account} / ${source.folder} 补处理时跳过 ${skipped} 封已回复的邮件。`)
               if (backfill && (backfill.uidValidity !== batch.cursor.uidValidity || batch.cursor.lastUid >= backfill.untilUid)) {
-                delete doc.backfills![key]
-                if (!Object.keys(doc.backfills!).length) delete doc.backfills
-                log(doc, `${source.account} / ${source.folder} 历史邮件已全部收取，之后按新邮件处理。`)
+                await tx.setBackfill(key, undefined)
+                await tx.log(`${source.account} / ${source.folder} 历史邮件已全部收取，之后按新邮件处理。`)
               }
-              if (batch.firstRun) log(doc, `${source.account} / ${source.folder} 已建立基线，后续新增邮件开始处理。`)
-              if (count) log(doc, `${source.account} / ${source.folder} 接收 ${count} 封新邮件。`)
+              if (batch.firstRun) await tx.log(`${source.account} / ${source.folder} 已建立基线，后续新增邮件开始处理。`)
+              if (count) await tx.log(`${source.account} / ${source.folder} 接收 ${count} 封新邮件。`)
               return count
             })
             if (!batch.hasMore) break
           }
         } catch (error) {
           const message = this.safe(error); this.error = message
-          await this.store.mutate(doc => log(doc, `${source.account} / ${source.folder} 检查失败：${message}`, undefined, 'error'))
+          await this.repo.write(tx => tx.log(`${source.account} / ${source.folder} 检查失败：${message}`, undefined, 'error'))
         }
       }
       this.lastPoll = now()
@@ -248,7 +253,7 @@ export class Engine {
   /** Conversations currently readable under the allow/block lists, with display names. */
   /** The bridge for the current settings, or an error explaining why WeChat cannot be read. */
   async wechatService(): Promise<{ service: WechatService; settings: WechatSettings | undefined }> {
-    const settings = (await this.store.read()).settings.wechat
+    const settings = (await this.repo.config()).settings.wechat
     const service = wechatSettingsOf(settings).enabled ? this.wechat?.service(settings) : undefined
     if (!service) throw new WorkbenchError('请先在设置中开启微信读取。', 'wechat-disabled', 409)
     return { service, settings }
@@ -296,7 +301,7 @@ export class Engine {
   /** Read new messages from allowed conversations, group them into segments and queue finished segments as tasks. Read-only. */
   async pollWechat(): Promise<number> {
     if (this.wechatPolling || this.stopping || !this.release) return 0
-    const state = await this.store.read(), settings = state.settings.wechat, s = wechatSettingsOf(settings)
+    const settings = (await this.repo.config()).settings.wechat, s = wechatSettingsOf(settings)
     const service = this.wechat?.service(settings)
     if (!service || !s.enabled) return 0
     this.wechatPolling = true
@@ -307,7 +312,7 @@ export class Engine {
         if (!this.wechatInfo.ready) throw new WorkbenchError(this.wechatInfo.error || '微信未就绪。', 'wechat-unavailable', 503)
       }
       const eligible = await this.wechatEligible(service, settings, signal)
-      const marks = state.wechat?.watermarks ?? {}, pending = state.wechat?.pending ?? {}
+      const { cursors: marks, entries: pending } = await this.repo.channelState('wechat') as { cursors: Record<string, number>; entries: Record<string, WechatPending> }
       // New conversations get a baseline in batches so a large block-list setup does not stall one poll.
       const fresh = [...eligible.keys()].filter(id => marks[id] === undefined).slice(0, 100)
       // Query only conversations whose last-message time moved, plus a full sweep every minute.
@@ -324,12 +329,12 @@ export class Engine {
       const due = Object.values(pending).some(item => segmentDue(item, nowMs, s.quietMinutes))
       const incoming = Object.values(batch).some(list => list.length)
       if (!stale && !due && !incoming && !Object.keys(baseline).length) return 0
-      return await this.store.mutate(doc => {
-        const st = doc.wechat ??= { watermarks: {}, pending: {} }
+      return await this.repo.write(async tx => {
+        const saved = await tx.channelState('wechat'), config = await tx.config(), st = { watermarks: saved.cursors as Record<string, number>, pending: saved.entries as Record<string, WechatPending> }
         // A conversation removed from the lists is forgotten, so adding it back starts from new messages only.
         for (const id of Object.keys(st.watermarks)) if (!eligible.has(id)) delete st.watermarks[id]
         for (const id of Object.keys(st.pending)) if (!eligible.has(id)) delete st.pending[id]
-        for (const [id, seq] of Object.entries(baseline)) if (st.watermarks[id] === undefined && Number.isSafeInteger(seq) && seq >= 0) { st.watermarks[id] = seq; log(doc, `微信会话「${eligible.get(id)?.name || id}」已建立基线，之后的新消息开始处理。`) }
+        for (const [id, seq] of Object.entries(baseline)) if (st.watermarks[id] === undefined && Number.isSafeInteger(seq) && seq >= 0) { st.watermarks[id] = seq; await tx.log(`微信会话「${eligible.get(id)?.name || id}」已建立基线，之后的新消息开始处理。`) }
         for (const [id, list] of Object.entries(batch)) {
           const chat = eligible.get(id)
           if (!chat || st.watermarks[id] !== known[id]) continue
@@ -345,16 +350,18 @@ export class Engine {
         for (const [id, item] of Object.entries(st.pending)) {
           if (!segmentDue(item, nowMs, s.quietMinutes)) continue
           delete st.pending[id]
-          if (segmentVerdict(item, s.groups.scope) === 'task' && this.createWechatTask(doc, id, item)) created++
+          if (segmentVerdict(item, s.groups.scope) === 'task' && await this.createWechatTask(tx, config, id, item)) created++
         }
-        if (created) log(doc, `微信新增 ${created} 个待处理事项。`)
+        await tx.setChannelState('wechat', { cursors: st.watermarks, entries: st.pending })
+        if (created) await tx.log(`微信新增 ${created} 个待处理事项。`)
         return created
       })
     } finally { this.wechatPolling = false }
   }
-  private createWechatTask(doc: State, chat: string, item: WechatPending): boolean {
+  /** Queue a finished segment as a task; false when that segment was already queued. */
+  private async createWechatTask(tx: Records, config: Config, chat: string, item: WechatPending): Promise<boolean> {
     const seqs = item.messages.map(m => m.seq), toSeq = Math.max(...seqs), fromSeq = Math.min(...seqs)
-    if (!(toSeq >= 1) || doc.tasks.some(t => t.source.kind === 'wechat' && t.source.folder === chat && t.source.uid === toSeq)) return false
+    if (!(toSeq >= 1)) return false
     const { from, title } = segmentTitle(item), timestamp = now()
     const task: Task = {
       id: randomUUID(), revision: 1, title, account: 'wechat', status: 'queued', from, subject: item.chatName, body: transcript(item.messages),
@@ -362,34 +369,32 @@ export class Engine {
       attachments: [], history: [], attempts: 0, mailLoaded: true,
       wechat: { chat, chatName: item.chatName, group: item.group, messages: item.messages, fromSeq, toSeq, ...(item.messages.some(m => m.mentionsMe) ? { mentioned: true } : {}) },
     }
-    if (this.triageOn(doc)) { task.triage = { state: 'pending' }; task.history.push({ at: timestamp, message: '等待 AI 分拣。' }) }
+    if (this.triageOn(config.settings)) { task.triage = { state: 'pending' }; task.history.push({ at: timestamp, message: '等待 AI 分拣。' }) }
     else {
-      const rule = chooseRule(doc.rules, { account: 'wechat', from, subject: item.chatName, hasAttachments: false, kind: 'wechat' })
+      const rule = chooseRule(config.rules, { account: 'wechat', from, subject: item.chatName, hasAttachments: false, kind: 'wechat' })
       task.status = rule ? 'queued' : 'unmatched'
       task.history.push({ at: timestamp, message: rule ? `命中规则「${rule.name}」，等待处理。` : '未匹配规则，可手动选择规则处理。' })
       if (rule) { task.ruleId = rule.id; task.ruleName = rule.name; task.rule = structuredClone(rule) }
     }
-    doc.tasks.push(task)
-    return true
+    return tx.insertTask(task)
   }
   /** Prepare a WeChat segment: the AI suggests a reply that you copy into WeChat yourself. Nothing is sent. */
   private async prepareWechat(task: Task, signal: AbortSignal): Promise<void> {
-    const workspace = join(this.store.root, 'tasks', task.id)
+    const workspace = join(this.repo.root, 'tasks', task.id)
     await mkdir(workspace, { recursive: true, mode: 0o700 })
     task.workspace = workspace
-    const result = await this.agent.run(task, task.rule!, signal, { language: this.language, context: this.runtime(task, (await this.store.read()).settings.profile) })
+    const result = await this.agent.run(task, task.rule!, signal, { language: this.language, context: this.runtime(task, (await this.repo.config()).settings.profile) })
     signal.throwIfAborted()
     const reply = task.rule!.output === 'reply' && !result.output.needsInfo
     if (reply && !result.output.text?.trim()) throw new WorkbenchError('DSH 未生成建议回复。')
     const checks = reply ? cleanChecks(result.output.checks, result.output.text) : []
     const informationGaps = result.output.informationGaps?.trim() || (checks.length ? checks.map((check, index) => `${index + 1}. ${check.item}`).join('\n') : undefined)
-    await this.store.mutate(state => {
-      const item = findTask(state, task.id)
+    await this.repo.updateTask(task.id, undefined, async (item, tx) => {
       const status = result.output.needsInfo ? 'needs_info' : reply ? 'review' : 'completed'
       Object.assign(item, { summary: result.output.summary, informationGaps, checks: checks.length ? checks : undefined, needsInfoKind: result.output.needsInfo ? result.output.needsInfoKind || 'information' : undefined, sessionId: result.sessionId, workspace, status, error: result.output.needsInfo || undefined })
       if (reply && item.wechat) { item.wechat.reply = result.output.text!.trim(); item.wechat.replyRevision = (item.wechat.replyRevision ?? 0) + 1 }
-      touch(item, result.output.needsInfo ? '需要补充信息后继续。' : reply ? '已生成建议回复，复制到微信后发送。' : '分析报告已生成。'); log(state, 'DSH 处理完成。', item.id)
-      if (status === 'completed') state.activity = [...(state.activity || []), activityEntry({ kind: 'report', title: item.title, detail: item.ruleName, taskId: item.id, ruleName: item.ruleName, source: 'wechat' }, randomUUID())]
+      touch(item, result.output.needsInfo ? '需要补充信息后继续。' : reply ? '已生成建议回复，复制到微信后发送。' : '分析报告已生成。'); await tx.log('DSH 处理完成。', item.id)
+      if (status === 'completed') await tx.addActivity(activityEntry({ kind: 'report', title: item.title, detail: item.ruleName, taskId: item.id, ruleName: item.ruleName, source: 'wechat' }, randomUUID()))
     })
   }
   /** A dispatch workflow hands the mail to another team: move it to the target folder. No agent runs, nothing is sent. */
@@ -409,40 +414,40 @@ export class Engine {
     if (here && !here.uid && here.folder !== target) throw new WorkbenchError(`邮件已在「${here.folder}」，服务器没有返回它的新编号，无法再次移动；请在邮箱中手动移到「${target}」。`)
     const from = this.location(task)
     const moved = here && [target, target.split('/').join('.')].includes(here.folder) ? here : { ...(await email.move(task.account, from.folder, from.uid, target, signal, from.uidValidity)), at: now() }
-    await this.store.mutate(state => {
-      const item = findTask(state, task.id)
+    await this.repo.updateTask(task.id, undefined, async (item, tx) => {
       item.dispatch = moved; item.status = 'completed'; item.summary = note.summary
-      touch(item, `已移到文件夹「${target}」，由该文件夹的负责人处理。`); log(state, `邮件已移到「${target}」。`, item.id)
-      state.activity = [...(state.activity || []), activityEntry({ kind: 'dispatch', title: item.subject || item.title, detail: target, taskId: item.id, ruleName: note.label, source: 'email' }, randomUUID())]
+      touch(item, `已移到文件夹「${target}」，由该文件夹的负责人处理。`); await tx.log(`邮件已移到「${target}」。`, item.id)
+      await tx.addActivity(activityEntry({ kind: 'dispatch', title: item.subject || item.title, detail: target, taskId: item.id, ruleName: note.label, source: 'email' }, randomUUID()))
     })
   }
   /** Decide what the message is and which workflow, if any, should handle it. */
   private async runTriage(task: Task, signal: AbortSignal): Promise<void> {
     const wechat = task.source.kind === 'wechat'
     const read = wechat ? undefined : await this.loadForProcessing(task, signal)
-    const state = await this.store.read()
+    const config = await this.repo.config()
     const meta = { account: task.account, folder: task.source.folder, from: task.from, subject: task.subject, hasAttachments: task.hasAttachments === true || task.attachments.length > 0, kind: wechat ? 'wechat' as const : 'email' as const }
-    const candidates = candidateRules(state.rules, meta)
+    const candidates = candidateRules(config.rules, meta)
     // Replies carry the earlier exchange below the new text: classify by what was written now, read the rest as context.
     const split = wechat ? { latest: task.body, history: [] } : splitQuoted(task.body)
     const quotedHistory = historyForPrompt(split.history, 2500)
     const mail = { from: task.from, subject: task.subject, body: split.latest.slice(0, 5000), ...(quotedHistory ? { quotedHistory } : {}), hasAttachments: meta.hasAttachments, receivedAt: task.receivedAt, channel: meta.kind }
     // The workflow that handled the previous message of the same thread, when it is still a candidate.
-    const refs = new Set((task.references || '').split(/\s+/).map(ref => ref.replace(/[<>]/g, '')).filter(Boolean))
-    const previous = state.tasks.filter(item => item.id !== task.id && item.ruleId && item.messageId && refs.has(item.messageId.replace(/[<>]/g, ''))).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))[0]
+    const refs = (task.references || '').split(/\s+/).map(ref => ref.replace(/[<>]/g, '')).filter(Boolean)
+    const previous = (await this.repo.byMessageIds(refs)).filter(item => item.id !== task.id && item.ruleId).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))[0]
     const previousRule = previous && candidates.find(rule => rule.id === previous.ruleId)
     const thread = previousRule ? { previousRule: { id: previousRule.id, name: previousRule.name } } : undefined
     // A classification scheme on this folder: the same model call also picks one business category.
-    const classifier = wechat ? undefined : classifierFor(state, task.account, task.source.folder)
-    const profile = state.settings.profile, values = variableValues(profile, wechat ? '' : task.account, new Date(), this.language)
+    const classifier = wechat ? undefined : classifierFor(config, task.account, task.source.folder)
+    const profile = config.settings.profile, values = variableValues(profile, wechat ? '' : task.account, new Date(), this.language)
     const context = { now: values.now, timezone: values.timezone, ...(profile?.department ? { department: profile.department } : {}), ...(profile?.role ? { role: profile.role } : {}) }
     let result: { category: any; urgency: any; reason: string; nextStep: string; ruleId?: string; confidence?: Confidence; ruleReason?: string; business?: BusinessVerdict }, by: 'ai' | 'heuristic' = 'heuristic'
     if (this.triage?.available()) {
-      try { result = await this.triage.run({ mail, ...(thread ? { thread } : {}), ...(classifier ? { classifier: triageClassifier(classifier, state.categoryExamples) } : {}), context, rules: candidates.map(rule => ({ id: rule.id, name: rule.name, semantic: rule.semantic || '', output: rule.output, hint: rule.instructions.slice(0, 400), examples: (state.ruleExamples?.[rule.id] ?? []).slice(-EXAMPLES_IN_PROMPT).map(({ match, text }) => ({ match, text })) })), uiLanguage: this.language }, AbortSignal.any([signal, AbortSignal.timeout(90000)])); by = 'ai' }
-      catch (error) { if (signal.aborted) throw error; result = heuristicTriage(mail); await this.store.mutate(doc => log(doc, `AI 分拣失败，已改用规则判断：${this.safe(error)}`, task.id, 'error')) }
+      const ruleExamples = await this.repo.examples('rule'), categoryExamples = classifier ? await this.repo.examples('category') : {}
+      try { result = await this.triage.run({ mail, ...(thread ? { thread } : {}), ...(classifier ? { classifier: triageClassifier(classifier, categoryExamples) } : {}), context, rules: candidates.map(rule => ({ id: rule.id, name: rule.name, semantic: rule.semantic || '', output: rule.output, hint: rule.instructions.slice(0, 400), examples: (ruleExamples[rule.id] ?? []).slice(-EXAMPLES_IN_PROMPT).map(({ match, text }) => ({ match, text })) })), uiLanguage: this.language }, AbortSignal.any([signal, AbortSignal.timeout(90000)])); by = 'ai' }
+      catch (error) { if (signal.aborted) throw error; result = heuristicTriage(mail); await this.repo.write(tx => tx.log(`AI 分拣失败，已改用规则判断：${this.safe(error)}`, task.id, 'error')) }
     } else result = heuristicTriage(mail)
     signal.throwIfAborted()
-    const sender = senderKey(task), keep = state.senders?.[sender]?.neverArchive === true
+    const sender = senderKey(task), keep = (await this.repo.contact(sender))?.neverArchive === true
     const decision = decideAfterTriage(candidates, result.category, by === 'ai' ? { ruleId: result.ruleId || '', confidence: result.confidence, reason: result.ruleReason } : undefined)
     // Notifications and marketing keep being archived unless the scheme asks to classify them too.
     const classifies = !!classifier && (classifier.includeNotices || !['notification', 'marketing'].includes(result.category))
@@ -452,8 +457,7 @@ export class Engine {
     const rule = business && !applied ? undefined : applied?.action === 'move' ? undefined : decision.rule
     const suggestion = decision.suggestion ?? (decision.rule && !rule && !applied ? { rule: decision.rule, confidence: (decision.by === 'ai' ? result.confidence : undefined) ?? 'high' as Confidence, reason: result.ruleReason || '' } : undefined)
     let move: string | undefined
-    await this.store.mutate(doc => {
-      const item = findTask(doc, task.id)
+    await this.repo.updateTask(task.id, undefined, async (item, tx) => {
       if (item.status !== 'running') return
       if (read) Object.assign(item, originalMailFields(read), { body: task.body, mailLoaded: true, attachments: task.attachments, messageId: task.messageId, references: task.references, replyTo: task.replyTo })
       item.triage = { state: 'done', category: result.category, urgency: result.urgency, reason: result.reason || undefined, nextStep: result.nextStep || undefined, by: keep ? 'preference' : by, at: now() }
@@ -486,20 +490,20 @@ export class Engine {
       } else if (!keep && !wechat && (result.category === 'notification' || result.category === 'marketing')) {
         item.status = 'ignored'; item.triage.archived = true
         touch(item, '已归档，可随时恢复。')
-        doc.activity = [...(doc.activity || []), activityEntry({ kind: 'archive', title: item.subject || item.title, detail: result.reason, taskId: item.id, source: 'email' }, randomUUID())]
+        await tx.addActivity(activityEntry({ kind: 'archive', title: item.subject || item.title, detail: result.reason, taskId: item.id, source: 'email' }, randomUUID()))
       } else {
         item.status = 'unmatched'
         touch(item, result.category === 'fyi' ? '值得关注，无需处理方案；已列入今日简报。' : decision.needsAi ? '有方案需要 AI 判断是否适用，但当前没有可用的 AI 判断，等待你选择。' : '没有合适的处理方案，可手动选择方案或忽略。')
       }
-      log(doc, '信息已完成分拣。', item.id)
+      await tx.log('信息已完成分拣。', item.id)
     })
     if (move && applied) {
-      try { await this.moveMail(findTask(await this.store.read(), task.id), move, signal, { summary: `已归为「${applied.name}」，移到「${move}」。`, label: applied.name }) }
+      try { await this.moveMail(await this.repo.task(task.id), move, signal, { summary: `已归为「${applied.name}」，移到「${move}」。`, label: applied.name }) }
       catch (error) {
         if (signal.aborted) throw error
         // The category stands; only the move failed. Choosing the category again in the item retries it.
         const message = this.safe(error)
-        await this.store.mutate(doc => { const item = findTask(doc, task.id); if (item.status !== 'running') return; item.status = 'unmatched'; item.error = message; touch(item, `已归为「${applied.name}」，但移到「${move}」失败：${message}。可在事项中重新选择分类重试。`); log(doc, `移动邮件失败：${message}`, item.id, 'error') })
+        await this.repo.updateTask(task.id, undefined, async (item, tx) => { if (item.status !== 'running') return; item.status = 'unmatched'; item.error = message; touch(item, `已归为「${applied.name}」，但移到「${move}」失败：${message}。可在事项中重新选择分类重试。`); await tx.log(`移动邮件失败：${message}`, item.id, 'error') })
       }
     }
   }
@@ -511,12 +515,16 @@ export class Engine {
     const signal = AbortSignal.any([this.controller.signal, AbortSignal.timeout(5 * 60 * 1000)])
     try {
       const agentReady = this.agent.available()
-      task = await this.store.mutate(state => {
-        // Triage needs no workflow agent; preparation does. Pick accordingly so triage keeps working without a preparation model.
-        const item = state.tasks.find(t => t.status === 'queued' && (!t.nextAttemptAt || t.nextAttemptAt <= now()) && (t.triage?.state === 'pending' || agentReady || t.rule?.output === 'dispatch') && (t.source.kind === 'wechat' || emailReady))
-        if (!item) return undefined
+      // Triage needs no workflow agent; preparation does. Pick accordingly so triage keeps working without a preparation model.
+      const pickable = (t: Task) => t.status === 'queued' && (!t.nextAttemptAt || t.nextAttemptAt <= now()) && (t.triage?.state === 'pending' || agentReady || t.rule?.output === 'dispatch') && (t.source.kind === 'wechat' || emailReady)
+      // Look first without writing: an idle background never touches the data.
+      const candidate = (await this.repo.ready(now())).find(pickable)
+      if (!candidate) return
+      task = await this.repo.write(async tx => {
+        const item = await tx.task(candidate.id)
+        if (!pickable(item)) return undefined
         item.status = 'running'; item.attempts++; item.prepareKey ??= randomUUID(); delete item.error
-        touch(item, item.triage?.state === 'pending' ? '开始读取邮件并分拣。' : '开始读取资料并调用 DSH。'); log(state, '任务开始处理。', item.id)
+        touch(item, item.triage?.state === 'pending' ? '开始读取邮件并分拣。' : '开始读取资料并调用 DSH。'); await tx.saveTask(item); await tx.log('任务开始处理。', item.id)
         return item
       })
       if (!task) return
@@ -525,7 +533,7 @@ export class Engine {
       if (task.source.kind === 'wechat') { await this.prepareWechat(task, signal); this.error = undefined; return }
       if (task.rule.output === 'dispatch') { await this.dispatch(task, signal); this.error = undefined; return }
       const email = this.email(), read = await this.loadForProcessing(task, signal)
-      const workspace = join(this.store.root, 'tasks', task.id)
+      const workspace = join(this.repo.root, 'tasks', task.id)
       await mkdir(workspace, { recursive: true, mode: 0o700 })
       task.workspace = workspace
       // Download attachments only when a rule explicitly authorizes a tool to read them.
@@ -536,8 +544,8 @@ export class Engine {
           file.localPath = result.path
         }
       }
-      await this.store.mutate(state => { const item = findTask(state, task!.id); Object.assign(item, originalMailFields(read), { body: task!.body, mailLoaded: true, attachments: task!.attachments, workspace, messageId: task!.messageId, references: task!.references, replyTo: task!.replyTo }); touch(item, '原邮件与资料已读取。') })
-      const result = await this.agent.run(task, task.rule, signal, { language: this.language, context: this.runtime(task, (await this.store.read()).settings.profile) })
+      await this.repo.updateTask(task.id, undefined, item => { Object.assign(item, originalMailFields(read), { body: task!.body, mailLoaded: true, attachments: task!.attachments, workspace, messageId: task!.messageId, references: task!.references, replyTo: task!.replyTo }); touch(item, '原邮件与资料已读取。') })
+      const result = await this.agent.run(task, task.rule, signal, { language: this.language, context: this.runtime(task, (await this.repo.config()).settings.profile) })
       signal.throwIfAborted()
       let draftId = task.draftId, draftRevision: number | undefined
       if (task.rule.output === 'reply' && !result.output.needsInfo) {
@@ -553,32 +561,31 @@ export class Engine {
       }
       const checks = cleanChecks(result.output.checks, result.output.text)
       const informationGaps = result.output.informationGaps?.trim() || (checks.length ? checks.map((check, index) => `${index + 1}. ${check.item}`).join('\n') : undefined)
-      await this.store.mutate(state => {
-        const item = findTask(state, task!.id)
+      await this.repo.updateTask(task.id, undefined, async (item, tx) => {
         const status = result.output.needsInfo ? 'needs_info' : item.rule?.output === 'reply' ? 'review' : 'completed'
         Object.assign(item, { summary: result.output.summary, informationGaps, checks: checks.length ? checks : undefined, needsInfoKind: result.output.needsInfo ? result.output.needsInfoKind || 'information' : undefined, sessionId: result.sessionId, draftId, status, error: result.output.needsInfo || undefined })
         delete item.autoSend
-        touch(item, result.output.needsInfo ? '需要补充信息后继续。' : item.rule?.output === 'reply' ? '已生成回复草稿，等待人工审核。' : '分析报告已生成。'); log(state, 'DSH 处理完成。', item.id)
-        if (status === 'completed') state.activity = [...(state.activity || []), activityEntry({ kind: 'report', title: item.subject || item.title, detail: item.ruleName, taskId: item.id, ruleName: item.ruleName, source: 'email' }, randomUUID())]
+        touch(item, result.output.needsInfo ? '需要补充信息后继续。' : item.rule?.output === 'reply' ? '已生成回复草稿，等待人工审核。' : '分析报告已生成。'); await tx.log('DSH 处理完成。', item.id)
+        if (status === 'completed') await tx.addActivity(activityEntry({ kind: 'report', title: item.subject || item.title, detail: item.ruleName, taskId: item.id, ruleName: item.ruleName, source: 'email' }, randomUUID()))
         if (status === 'review' && item.rule && draftRevision !== undefined) {
-          const decision = autoSendDecision(item.rule, item, result.output, checks, state.senders)
+          const decision = autoSendDecision(item.rule, item, result.output, checks, await tx.contacts())
           if (decision.ok) {
-            const minutes = settingsOf(state.settings).undoMinutes, at = new Date(Date.now() + minutes * 60000).toISOString()
+            const minutes = settingsOf((await tx.config()).settings).undoMinutes, at = new Date(Date.now() + minutes * 60000).toISOString()
             item.autoSend = { at, scheduledAt: now(), autonomy: item.rule.autonomy!, draftRevision }
             touch(item, `按方案自主级别，将在 ${minutes} 分钟后自动发送；此前可撤回。`)
-            state.activity = [...(state.activity || []), activityEntry({ kind: 'auto_send_scheduled', title: item.subject || item.title, detail: item.replyTo, taskId: item.id, ruleName: item.ruleName, autonomy: item.rule.autonomy, undoUntil: at, source: 'email' }, randomUUID())]
+            await tx.addActivity(activityEntry({ kind: 'auto_send_scheduled', title: item.subject || item.title, detail: item.replyTo, taskId: item.id, ruleName: item.ruleName, autonomy: item.rule.autonomy, undoUntil: at, source: 'email' }, randomUUID()))
           } else if (decision.reason) touch(item, decision.reason)
         }
       })
       this.error = undefined
     } catch (error) {
       this.error = this.safe(error)
-      if (task) await this.store.mutate(state => {
-        const item = findTask(state, task!.id); item.error = this.safe(error)
+      if (task) await this.repo.updateTask(task.id, undefined, async (item, tx) => {
+        item.error = this.safe(error)
         const limit = item.triage?.state === 'pending' ? 2 : item.rule?.maxRetries ?? 0
         const retry = !this.stopping && item.attempts <= limit
         item.status = retry ? 'queued' : 'failed'; item.nextAttemptAt = retry ? new Date(Date.now() + 30000 * item.attempts).toISOString() : undefined
-        touch(item, retry ? '处理失败，稍后自动重试。' : '处理失败，可人工重试。'); log(state, item.error!, item.id, 'error')
+        touch(item, retry ? '处理失败，稍后自动重试。' : '处理失败，可人工重试。'); await tx.log(item.error!, item.id, 'error')
       })
       else throw error
     } finally { this.processing = false }
@@ -586,20 +593,20 @@ export class Engine {
   /** Submit automatic replies whose withdrawal window has ended. Each goes through the provider's own preview and recipient policy. */
   async sendDue(): Promise<void> {
     if (this.sending || this.stopping || !this.release || !this.emailSource()) return
-    const state = await this.store.read(), due = state.tasks.find(task => task.status === 'review' && task.draftId && task.autoSend && !task.autoSend.canceledAt && task.autoSend.at <= now())
-    if (!due) return
+    const due = await this.repo.dueAutoSend(now())
+    if (!due?.draftId || !due.autoSend || due.autoSend.canceledAt || due.status !== 'review') return
+    const { rules } = await this.repo.config()
     this.sending = true
     const signal = AbortSignal.any([this.controller.signal, AbortSignal.timeout(120000)])
-    const cancel = (reason: string, kind: 'auto_send_canceled' | 'auto_send_blocked') => this.store.mutate(doc => {
-      const item = findTask(doc, due.id)
+    const cancel = (reason: string, kind: 'auto_send_canceled' | 'auto_send_blocked') => this.repo.updateTask(due.id, undefined, async (item, tx) => {
       if (!item.autoSend || item.autoSend.canceledAt) return
       item.autoSend.canceledAt = now(); item.autoSend.reason = reason; touch(item, reason)
-      doc.activity = [...(doc.activity || []), activityEntry({ kind, title: item.subject || item.title, detail: reason, taskId: item.id, ruleName: item.ruleName, source: 'email' }, randomUUID())]
+      await tx.addActivity(activityEntry({ kind, title: item.subject || item.title, detail: reason, taskId: item.id, ruleName: item.ruleName, source: 'email' }, randomUUID()))
     })
     let claimedSend = false
     try {
       // The workflow is re-read at send time: lowering its autonomy or disabling it stops sends already scheduled.
-      const current = state.rules.find(rule => rule.id === due.ruleId)
+      const current = rules.find(rule => rule.id === due.ruleId)
       if (!current || !current.enabled || (current.autonomy ?? 'draft') === 'draft' || current.output !== 'reply') { await cancel('方案已停用或改为仅起草，自动发送已取消，请人工审核。', 'auto_send_canceled'); return }
       // A send long past its announced time (e.g. background processing was paused) is no longer what the person expected.
       if (Date.now() - Date.parse(due.autoSend!.at) > STALE_AUTO_SEND) { await cancel('已超过计划发送时间较久，自动发送已取消，请人工审核。', 'auto_send_canceled'); return }
@@ -610,31 +617,28 @@ export class Engine {
       if (plan.matching?.blocked) { await cancel('收件人命中禁止发送规则，自动发送已取消。', 'auto_send_blocked'); return }
       const planId = plan.planId || plan.id
       if (!planId) { await cancel('邮件服务未返回发送预览，自动发送已取消。', 'auto_send_blocked'); return }
-      const claimed = await this.store.mutate(doc => {
-        const item = findTask(doc, due.id)
+      const claimed = await this.repo.updateTask(due.id, undefined, async (item, tx) => {
         if (item.status !== 'review' || !item.autoSend || item.autoSend.canceledAt || item.revision !== due.revision) return false
-        item.status = 'sending'; touch(item, '撤回窗口结束，按方案自动发送。'); log(doc, '开始自动发送。', item.id)
+        item.status = 'sending'; touch(item, '撤回窗口结束，按方案自动发送。'); await tx.log('开始自动发送。', item.id)
         return true
       })
       if (!claimed) return
       claimedSend = true
       try {
         const result = await email.drafts.send(draftId, planId, true, signal)
-        await this.store.mutate(doc => {
-          const item = findTask(doc, due.id)
+        await this.repo.updateTask(due.id, undefined, async (item, tx) => {
           item.status = result.draft.state === 'sent' ? 'sent' : result.draft.state === 'draft' ? 'review' : 'uncertain'; item.error = result.draft.error
           if (item.status === 'review' && item.autoSend) { item.autoSend.canceledAt = now(); item.autoSend.reason = '发送未提交，已转为人工审核。' }
           touch(item, item.status === 'sent' ? '已自动发送，SMTP 已接受邮件。' : item.status === 'review' ? '自动发送未提交，草稿保留，请人工审核。' : '自动发送结果待核实，不会自动重发。')
-          doc.activity = [...(doc.activity || []), activityEntry({ kind: item.status === 'sent' ? 'auto_sent' : 'auto_send_blocked', title: item.subject || item.title, detail: item.status === 'sent' ? item.replyTo : item.error, taskId: item.id, ruleName: item.ruleName, autonomy: item.autoSend?.autonomy, source: 'email' }, randomUUID())]
-          log(doc, item.status === 'sent' ? '自动发送已获得 SMTP 回执。' : '自动发送未完成。', item.id)
+          await tx.addActivity(activityEntry({ kind: item.status === 'sent' ? 'auto_sent' : 'auto_send_blocked', title: item.subject || item.title, detail: item.status === 'sent' ? item.replyTo : item.error, taskId: item.id, ruleName: item.ruleName, autonomy: item.autoSend?.autonomy, source: 'email' }, randomUUID()))
+          await tx.log(item.status === 'sent' ? '自动发送已获得 SMTP 回执。' : '自动发送未完成。', item.id)
         })
       } catch (error) {
         const after = await email.drafts.get(draftId).catch(() => undefined)
-        await this.store.mutate(doc => {
-          const item = findTask(doc, due.id)
+        await this.repo.updateTask(due.id, undefined, async (item, tx) => {
           item.status = after?.state === 'draft' ? 'review' : after?.state === 'sent' ? 'sent' : 'uncertain'; item.error = this.safe(error)
           if (item.autoSend && item.status === 'review') { item.autoSend.canceledAt = now(); item.autoSend.reason = '自动发送失败，已转为人工审核。' }
-          touch(item, item.status === 'review' ? '自动发送校验未通过，邮件未提交。' : '自动发送记录需核实。'); log(doc, item.error!, item.id, 'error')
+          touch(item, item.status === 'review' ? '自动发送校验未通过，邮件未提交。' : '自动发送记录需核实。'); await tx.log(item.error!, item.id, 'error')
         })
       }
     } catch (error) {
@@ -654,12 +658,12 @@ export class Engine {
   }
   async generateBrief(language = this.language, signal = new AbortController().signal, scheduled = false) {
     return this.writing(async () => {
-      const data = briefData(await this.store.read())
+      const data = briefData({ tasks: await this.repo.tasks(), activity: await this.repo.activity() })
       const ai = await this.write('brief', data, language, signal)
       const brief = { date: data.date, text: String(ai?.text || briefTemplate(data, language === 'en')), generatedAt: now(), by: ai ? 'ai' as const : 'template' as const }
-      return this.store.mutate(state => {
-        state.brief = brief
-        if (scheduled) state.activity = [...(state.activity || []), activityEntry({ kind: 'brief', title: language === 'en' ? 'Daily brief' : '今日简报', detail: `${data.decisionCount}` }, randomUUID())]
+      return this.repo.write(async tx => {
+        await tx.setBrief(brief)
+        if (scheduled) await tx.addActivity(activityEntry({ kind: 'brief', title: language === 'en' ? 'Daily brief' : '今日简报', detail: `${data.decisionCount}` }, randomUUID()))
         return brief
       })
     })
@@ -667,34 +671,35 @@ export class Engine {
   async generateWeekly(language = this.language, signal = new AbortController().signal, scheduled = false) {
     return this.writing(async () => {
       const start = startOfWeek(), end = new Date(start.getTime() + 7 * 864e5)
-      const data = weeklyData(await this.store.read(), start, end)
+      const data = weeklyData({ tasks: await this.repo.tasks(), activity: await this.repo.activity() }, start, end)
       const ai = await this.write('weekly', data, language, signal)
       const template = weeklyTemplate(data, language === 'en')
       const report = { id: randomUUID(), kind: 'weekly' as const, title: String(ai?.title || template.title), text: String(ai?.text || template.text), periodStart: data.periodStart, periodEnd: data.periodEnd, generatedAt: now(), updatedAt: now(), by: ai ? 'ai' as const : 'template' as const }
-      return this.store.mutate(state => {
-        state.reports = [...(state.reports || []), report]
-        if (scheduled) state.activity = [...(state.activity || []), activityEntry({ kind: 'weekly', title: report.title }, randomUUID())]
+      return this.repo.write(async tx => {
+        await tx.addReport(report)
+        if (scheduled) await tx.addActivity(activityEntry({ kind: 'weekly', title: report.title }, randomUUID()))
         return report
       })
     })
   }
   async refreshTopic(id: string, language = this.language, signal = new AbortController().signal, report = false) {
     return this.writing(async () => {
-      const state = await this.store.read(), topic = state.topics?.find(item => item.id === id)
+      const topic = (await this.repo.topics()).find(item => item.id === id)
       if (!topic) throw new WorkbenchError('主题不存在。', 'missing', 404)
-      const data = topicData(state, topic)
+      const data = topicData({ tasks: await this.repo.tasks() }, topic)
       const ai = await this.write('topic', data, language, signal)
       const summary: TopicSummary = ai ? { text: String(ai.text), level: ai.level as TopicSummary['level'], risks: ai.risks as string[], todos: ai.todos as string[], at: now(), by: 'ai' } : topicTemplate(data, language === 'en')
       const en = language === 'en'
       const text = [`## ${en ? 'Status' : '现状'}\n${summary.text}`, summary.risks.length ? `## ${en ? 'Risks' : '风险'}\n${summary.risks.map(item => `- ${item}`).join('\n')}` : '', summary.todos.length ? `## ${en ? 'To-dos' : '待办'}\n${summary.todos.map(item => `- ${item}`).join('\n')}` : '', `## ${en ? 'Key messages' : '关键往来'}\n${data.items.slice(0, 10).map(item => `- ${item.receivedAt.slice(0, 10)} ${item.title}`).join('\n') || (en ? '- None' : '- 无')}`].filter(Boolean).join('\n\n')
-      return this.store.mutate(doc => {
-        const current = doc.topics?.find(item => item.id === id)
+      return this.repo.write(async tx => {
+        const current = (await tx.topics()).find(item => item.id === id)
         if (!current) throw new WorkbenchError('主题不存在。', 'missing', 404)
         current.summary = summary; current.updatedAt = now()
+        await tx.saveTopic(current)
         if (report) {
           const start = startOfWeek()
-          doc.reports = [...(doc.reports || []), { id: randomUUID(), kind: 'topic', topicId: id, title: `${current.name} · ${localDate()}`, text, periodStart: localDate(start), periodEnd: localDate(), generatedAt: now(), updatedAt: now(), by: summary.by }]
-          doc.activity = [...(doc.activity || []), activityEntry({ kind: 'topic', title: current.name }, randomUUID())]
+          await tx.addReport({ id: randomUUID(), kind: 'topic', topicId: id, title: `${current.name} · ${localDate()}`, text, periodStart: localDate(start), periodEnd: localDate(), generatedAt: now(), updatedAt: now(), by: summary.by })
+          await tx.addActivity(activityEntry({ kind: 'topic', title: current.name }, randomUUID()))
         }
         return { topic: current, matched: data.count }
       })
@@ -703,15 +708,16 @@ export class Engine {
   /** Scheduled briefs and reports run only while background processing is on. Each slot is attempted at most every 30 minutes. */
   private async scheduled(): Promise<void> {
     if (this.generating) return
-    const state = await this.store.read(), s = settingsOf(state.settings), at = new Date(), minutes = localMinutes(at), today = localDate(at)
+    const s = settingsOf((await this.repo.config()).settings), at = new Date(), minutes = localMinutes(at), today = localDate(at)
     const due = (key: string) => { const last = this.attempts.get(key) ?? 0; if (Date.now() - last < 30 * 60000) return false; this.attempts.set(key, Date.now()); return true }
-    if (s.briefEnabled && minutes >= parseClock(s.briefTime, '08:00') && state.brief?.date !== today && due(`brief:${today}`)) { await this.generateBrief(this.language, undefined, true); return }
+    if (s.briefEnabled && minutes >= parseClock(s.briefTime, '08:00') && (await this.repo.brief())?.date !== today && due(`brief:${today}`)) { await this.generateBrief(this.language, undefined, true); return }
     const weekStart = localDate(startOfWeek(at))
     if (s.weeklyEnabled && at.getDay() === s.weeklyDay && minutes >= parseClock(s.weeklyTime, '17:00')) {
-      if (!state.reports?.some(report => report.kind === 'weekly' && report.periodStart === weekStart) && due(`weekly:${weekStart}`)) { await this.generateWeekly(this.language, undefined, true); return }
-      const topic = state.topics?.find(item => item.schedule === 'weekly' && !state.reports?.some(report => report.kind === 'topic' && report.topicId === item.id && report.periodStart === weekStart))
+      const reports = await this.repo.reports()
+      if (!reports.some(report => report.kind === 'weekly' && report.periodStart === weekStart) && due(`weekly:${weekStart}`)) { await this.generateWeekly(this.language, undefined, true); return }
+      const topic = (await this.repo.topics()).find(item => item.schedule === 'weekly' && !reports.some(report => report.kind === 'topic' && report.topicId === item.id && report.periodStart === weekStart))
       if (topic && due(`topic:${topic.id}:${weekStart}`)) await this.refreshTopic(topic.id, this.language, undefined, true)
     }
   }
-  topicIds(state: State, task: Task): string[] { return (state.topics || []).filter(topic => topicMatches(topic, task)).map(topic => topic.id) }
+  topicIds(topics: Topic[], task: Task): string[] { return topics.filter(topic => topicMatches(topic, task)).map(topic => topic.id) }
 }

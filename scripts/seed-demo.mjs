@@ -6,7 +6,7 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, lstat, open, readdir, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import { Store, log } from '../lib/store.js'
+import { WorkbenchRepository } from '../lib/storage/repository.js'
 import { validateRule } from '../lib/rules.js'
 import { DraftStore } from '../lib/mail/draft-store.js'
 import { MailAccounts } from '../lib/mail/accounts.js'
@@ -49,7 +49,7 @@ try {
   await marker.sync()
 } finally { await marker.close() }
 
-const store = new Store(join(home, 'data', 'bkms-workbench'))
+const store = new WorkbenchRepository(join(home, 'data', 'bkms-workbench'))
 const drafts = new DraftStore(join(home, 'data', 'bkms-workbench', 'mail'), 'drafts')
 const endpoint = host => ({ host, port: 465, secure: true })
 await new MailAccounts(join(home, 'data', 'bkms-workbench', 'mail')).save({ provider: 'custom', user: ACCOUNT, password: 'demo-placeholder', senderName: content.sender, imap: { ...endpoint('imap.demo.example.test'), port: 993 }, smtp: endpoint('smtp.demo.example.test') }, 0)
@@ -100,15 +100,15 @@ for (const [index, mail] of content.mails.entries()) {
 }
 
 const today = new Date(), day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
-await store.mutate(state => {
-  state.settings = { enabled: false, pollSeconds: 60 }
-  state.uiLanguage = lang
-  state.rules = Object.values(rules)
-  state.tasks = tasks
-  state.activity = activity
+await store.write(async tx => {
+  await tx.saveConfig({ settings: { enabled: false, pollSeconds: 60 }, rules: Object.values(rules) })
+  await tx.setUiLanguage(lang)
+  for (const task of tasks) await tx.insertTask(task)
+  for (const entry of activity) await tx.addActivity(entry)
   // One learned example per workflow, shown on the 处理方案 page as what AI has learned.
-  state.ruleExamples = Object.fromEntries(Object.entries(rules).map(([key, rule]) => [rule.id, [{ id: randomUUID(), match: true, text: content.rules[key].example, at: at(3000) }]]))
-  state.brief = { date: day, text: content.brief, generatedAt: at(5), by: 'template' }
-  log(state, content.log)
+  for (const [key, rule] of Object.entries(rules)) await tx.setExamples('rule', rule.id, [{ id: randomUUID(), match: true, text: content.rules[key].example, at: at(3000) }])
+  await tx.setBrief({ date: day, text: content.brief, generatedAt: at(5), by: 'template' })
+  await tx.log(content.log)
 })
+await store.close()
 console.log(JSON.stringify({ home: actualHome, language: lang, rules: Object.keys(rules).length, tasks: tasks.length, drafts: tasks.filter(task => task.draftId).length, backgroundEnabled: false }, null, 2))

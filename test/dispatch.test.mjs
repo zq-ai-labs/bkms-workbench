@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Store } from '../lib/store.js'
+import { WorkbenchRepository } from '../lib/storage/repository.js'
+import { stateOf, setSettings, editRules, editTask, editTasks, readFresh } from './helpers.mjs'
 import { Engine, autoSendDecision } from '../lib/engine.js'
 import { WorkbenchApi } from '../lib/api.js'
 import { validateRule } from '../lib/rules.js'
@@ -14,7 +15,7 @@ const dispatchRule = { ...base, name: '华东销售', output: 'dispatch', dispat
 /** A mailbox with folders; scan/read/move/window/listRange behave like the built-in mail service. */
 async function fixture(t, { verdict } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'bkms-dispatch-'))
-  const store = new Store(root), folders = { INBOX: [] }, moves = [], drafts = new Map()
+  const store = new WorkbenchRepository(root), folders = { INBOX: [] }, moves = [], drafts = new Map()
   let runs = 0, nextUid = 100
   const mail = (uid, subject, extra = {}) => ({ uid, date: new Date(Date.UTC(2026, 9, 1 + uid % 20, 8)).toISOString(), from: [{ address: 'buyer@east.example' }], subject, seen: false, hasAttachments: false, ...extra })
   // Each folder has its own generation, as on a real server.
@@ -57,9 +58,9 @@ async function fixture(t, { verdict } = {}) {
   const agent = { available: () => true, async run() { runs++; return { output: { summary: '已整理。', subject: 'Re', text: '您好。' }, sessionId: 's' } } }
   const engine = new Engine(store, () => email, agent, undefined, triage), api = new WorkbenchApi(engine)
   await engine.start()
-  t.after(async () => { await engine.stop(); await rm(root, { recursive: true, force: true }) })
-  const drain = async () => { for (let i = 0; i < 30 && (await store.read()).tasks.some(task => task.status === 'queued'); i++) await engine.processNext() }
-  const save = async rule => api.action({ action: 'saveRule', revision: (await store.read()).configRevision, rule })
+  t.after(async () => { await engine.stop(); await store.close(); await rm(root, { recursive: true, force: true }) })
+  const drain = async () => { for (let i = 0; i < 30 && (await stateOf(store)).tasks.some(task => task.status === 'queued'); i++) await engine.processNext() }
+  const save = async rule => api.action({ action: 'saveRule', revision: (await stateOf(store)).configRevision, rule })
   return { store, engine, api, folders, moves, mail, drain, save, get runs() { return runs } }
 }
 
@@ -85,7 +86,7 @@ test('a matched mail is moved to the team folder without running the agent; the 
   await f.engine.poll(); await f.drain()
   assert.deepEqual(f.moves, [{ folder: 'INBOX', uid: 11, target: '分派/华东销售' }])
   assert.equal(f.runs, 0, 'no agent run for a dispatch')
-  const state = await f.store.read(), task = state.tasks[0]
+  const state = await stateOf(f.store), task = state.tasks[0]
   assert.equal(task.status, 'completed'); assert.deepEqual({ ...task.dispatch, at: undefined }, { folder: '分派/华东销售', uid: 100, uidValidity: 9, at: undefined })
   assert.equal(state.activity.at(-1).kind, 'dispatch'); assert.equal(state.activity.at(-1).detail, '分派/华东销售')
   // The original is read from its new place.
@@ -96,7 +97,7 @@ test('a matched mail is moved to the team folder without running the agent; the 
   await f.engine.poll()
   f.folders['分派/华东销售'].push(f.mail(101, '再次询价'))
   await f.engine.poll(); await f.drain()
-  assert.ok((await f.store.read()).tasks.some(item => item.source.folder === '分派/华东销售' && item.status === 'review'))
+  assert.ok((await stateOf(f.store)).tasks.some(item => item.source.folder === '分派/华东销售' && item.status === 'review'))
 })
 
 test('processing history from a chosen time: preview, cap, answered mail skipped, never sent automatically', async t => {
@@ -104,15 +105,15 @@ test('processing history from a chosen time: preview, cap, answered mail skipped
   await f.save({ ...base, name: '回复', output: 'reply', instructions: '生成回复。', matchMode: 'literal', autonomy: 'auto' })
   f.folders.INBOX.push(f.mail(3, '很早的邮件'), f.mail(5, '询价 A'), f.mail(6, '已回复的询价', { answered: true }), f.mail(7, '询价 B'))
   await f.engine.poll()
-  assert.equal((await f.store.read()).tasks.length, 0, 'baseline from now')
-  const since = new Date(Date.UTC(2026, 9, 6)).toISOString(), revision = (await f.store.read()).configRevision
+  assert.equal((await stateOf(f.store)).tasks.length, 0, 'baseline from now')
+  const since = new Date(Date.UTC(2026, 9, 6)).toISOString(), revision = (await stateOf(f.store)).configRevision
   assert.deepEqual(await f.api.action({ action: 'baselineWindow', account: 'shared@corp.example', folder: 'INBOX', since }), { count: 3, answered: 1, limit: 200 })
   await assert.rejects(f.api.action({ action: 'resetBaseline', account: 'shared@corp.example', folder: 'INBOX', since, revision }), /明确确认/)
   await assert.rejects(f.api.action({ action: 'baselineWindow', account: 'shared@corp.example', folder: 'INBOX', since: new Date(Date.now() + 86400000).toISOString() }), /不能晚于现在/)
   await f.api.action({ action: 'resetBaseline', account: 'shared@corp.example', folder: 'INBOX', since, revision, confirmed: true })
   f.folders.INBOX.push(f.mail(8, '新邮件'))
   await f.engine.poll(); await f.drain()
-  const state = await f.store.read(), bySubject = Object.fromEntries(state.tasks.map(task => [task.subject, task]))
+  const state = await stateOf(f.store), bySubject = Object.fromEntries(state.tasks.map(task => [task.subject, task]))
   assert.deepEqual(Object.keys(bySubject).sort(), ['新邮件', '询价 A', '询价 B'].sort(), 'the answered one is skipped, the early one is outside the range')
   assert.equal(bySubject['询价 A'].backfill, true); assert.equal(bySubject['新邮件'].backfill, undefined)
   assert.equal(bySubject['询价 A'].autoSend, undefined, 'history is never sent automatically')
@@ -120,21 +121,21 @@ test('processing history from a chosen time: preview, cap, answered mail skipped
   assert.equal(state.backfills, undefined, 'the range is finished')
   assert.equal(autoSendDecision({ ...base, output: 'reply', autonomy: 'auto' }, { backfill: true, replyTo: 'a@b.example' }, { summary: '', text: 'ok' }, [], {}).ok, false)
   // Including answered mail, and the cap.
-  await f.api.action({ action: 'resetBaseline', account: 'shared@corp.example', folder: 'INBOX', since, revision: (await f.store.read()).configRevision, confirmed: true, includeAnswered: true })
-  assert.deepEqual((await f.store.read()).backfills['["shared@corp.example","INBOX"]'].skip, [])
+  await f.api.action({ action: 'resetBaseline', account: 'shared@corp.example', folder: 'INBOX', since, revision: (await stateOf(f.store)).configRevision, confirmed: true, includeAnswered: true })
+  assert.deepEqual((await stateOf(f.store)).backfills['["shared@corp.example","INBOX"]'].skip, [])
   for (let uid = 20; uid < 222; uid++) f.folders.INBOX.push(f.mail(uid, `批量 ${uid}`, { date: new Date().toISOString() }))
-  await assert.rejects(f.api.action({ action: 'resetBaseline', account: 'shared@corp.example', folder: 'INBOX', since, revision: (await f.store.read()).configRevision, confirmed: true }), /一次最多处理 200 封/)
+  await assert.rejects(f.api.action({ action: 'resetBaseline', account: 'shared@corp.example', folder: 'INBOX', since, revision: (await stateOf(f.store)).configRevision, confirmed: true }), /一次最多处理 200 封/)
 })
 
 test('trial run over a time range reads history from the mailbox and changes nothing', async t => {
   const f = await fixture(t)
   f.folders.INBOX.push(f.mail(5, '询价 A'), f.mail(6, '发票'), f.mail(7, '询价 B'))
-  const before = JSON.stringify(await f.store.read())
+  const before = JSON.stringify(await stateOf(f.store))
   const result = await f.api.action({ action: 'trialRule', rule: { ...dispatchRule, match: { ...dispatchRule.match, subject: '询价' } }, range: { since: new Date(Date.UTC(2026, 9, 1)).toISOString() } })
   assert.equal(result.total, 3)
   assert.deepEqual(result.items.filter(item => item.matched).map(item => item.subject), ['询价 B', '询价 A'])
   assert.match(result.note, /不会建立事项、移动或发送/)
-  assert.equal(JSON.stringify(await f.store.read()), before); assert.equal(f.moves.length, 0)
+  assert.equal(JSON.stringify(await stateOf(f.store)), before); assert.equal(f.moves.length, 0)
   await assert.rejects(f.api.action({ action: 'trialRule', rule: dispatchRule, range: { since: new Date(Date.UTC(2026, 9, 9)).toISOString(), until: new Date(Date.UTC(2026, 9, 8)).toISOString() } }), /结束时间/)
 })
 
@@ -145,15 +146,15 @@ test('a wrong dispatch is corrected by choosing another team: the mail moves on 
   await f.engine.poll()
   f.folders.INBOX.push(f.mail(11, '询价 TH-100'))
   await f.engine.poll(); await f.drain()
-  let task = (await f.store.read()).tasks[0]
+  let task = (await stateOf(f.store)).tasks[0]
   assert.equal(task.dispatch.folder, '分派/华东销售')
   task = await f.api.action({ action: 'rejectRule', id: task.id, revision: task.revision })
   assert.equal(task.status, 'unmatched'); assert.equal(task.dispatch.folder, '分派/华东销售', 'the mail stays put until another team is chosen')
-  assert.equal((await f.store.read()).ruleExamples[task.match.ruleId].at(-1).match, false, 'the correction is learned')
-  const south = (await f.store.read()).rules.find(rule => rule.name === '华南销售')
+  assert.equal((await stateOf(f.store)).ruleExamples[task.match.ruleId].at(-1).match, false, 'the correction is learned')
+  const south = (await stateOf(f.store)).rules.find(rule => rule.name === '华南销售')
   await f.api.action({ action: 'runRule', id: task.id, revision: task.revision, ruleId: south.id }); await f.drain()
   assert.deepEqual(f.moves.map(m => [m.folder, m.target]), [['INBOX', '分派/华东销售'], ['分派/华东销售', '分派/华南销售']])
-  task = (await f.store.read()).tasks[0]
+  task = (await stateOf(f.store)).tasks[0]
   assert.equal(task.status, 'completed'); assert.equal(task.dispatch.folder, '分派/华南销售')
   // Reprocessing with the same team does not move it again.
   await f.api.action({ action: 'runRule', id: task.id, revision: task.revision, ruleId: south.id }); await f.drain()
@@ -167,14 +168,14 @@ test('a start time with no mail since then is a baseline from now, never a repla
   for (let uid = 1; uid <= 50; uid++) f.folders.Archive.push(f.mail(uid, `旧邮件 ${uid}`))
   const since = new Date(Date.now() - 3600000).toISOString(), key = '["shared@corp.example","Archive"]'
   // A range still pending from an earlier choice is dropped too.
-  await f.store.mutate(state => { state.backfills = { [key]: { uidValidity: 7, untilUid: 30, skip: [], since, at: since } } })
-  const cursor = await f.api.action({ action: 'resetBaseline', account: 'shared@corp.example', folder: 'Archive', since, revision: (await f.store.read()).configRevision, confirmed: true })
+  await f.store.write(tx => tx.setBackfill(key, { uidValidity: 7, untilUid: 30, skip: [], since, at: since }))
+  const cursor = await f.api.action({ action: 'resetBaseline', account: 'shared@corp.example', folder: 'Archive', since, revision: (await stateOf(f.store)).configRevision, confirmed: true })
   assert.deepEqual(cursor, { uidValidity: 9, lastUid: 50 })
-  assert.equal((await f.store.read()).backfills, undefined)
+  assert.equal((await stateOf(f.store)).backfills, undefined)
   await f.save({ ...base, name: '归档回复', folder: 'Archive', output: 'reply', instructions: '生成回复。', matchMode: 'literal', autonomy: 'auto' })
   await f.engine.poll()
-  assert.equal((await f.store.read()).tasks.length, 0, 'old mail stays out')
+  assert.equal((await stateOf(f.store)).tasks.length, 0, 'old mail stays out')
   f.folders.Archive.push(f.mail(51, '新邮件'))
   await f.engine.poll()
-  assert.deepEqual((await f.store.read()).tasks.map(task => task.subject), ['新邮件'])
+  assert.deepEqual((await stateOf(f.store)).tasks.map(task => task.subject), ['新邮件'])
 })

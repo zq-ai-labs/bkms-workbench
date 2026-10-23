@@ -5,7 +5,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Store } from '../lib/store.js'
+import { WorkbenchRepository } from '../lib/storage/repository.js'
+import { stateOf, setSettings, editRules, editTask, editTasks, readFresh } from './helpers.mjs'
 import { Engine } from '../lib/engine.js'
 import { WorkbenchApi } from '../lib/api.js'
 import { WechatBridge, WechatConnector, appendPending, chatAllowed, segmentDue, segmentVerdict, transcript } from '../lib/wechat.js'
@@ -40,7 +41,7 @@ function fakeWechat() {
 
 async function fixture(t, { triage, agentOutput } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'bkms-wechat-'))
-  const store = new Store(root), fake = fakeWechat()
+  const store = new WorkbenchRepository(root), fake = fakeWechat()
   let cleared = 0
   const connector = { service: s => s?.enabled ? fake.service : undefined, async clear() { cleared++ } }
   const runs = []
@@ -48,12 +49,12 @@ async function fixture(t, { triage, agentOutput } = {}) {
   // No email provider at all: WeChat must work on its own.
   const engine = new Engine(store, () => undefined, agent, undefined, triage, undefined, connector), api = new WorkbenchApi(engine)
   await engine.start()
-  t.after(async () => { await engine.stop(); await rm(root, { recursive: true, force: true }) })
-  const configure = async patch => { const state = await store.read(); return api.action({ action: 'saveSettings', revision: state.configRevision, settings: { enabled: true, ...patch } }) }
-  const drain = async () => { for (let i = 0; i < 20 && (await store.read()).tasks.some(task => task.status === 'queued'); i++) await engine.processNext() }
+  t.after(async () => { await engine.stop(); await store.close(); await rm(root, { recursive: true, force: true }) })
+  const configure = async patch => { const state = await stateOf(store); return api.action({ action: 'saveSettings', revision: state.configRevision, settings: { enabled: true, ...patch } }) }
+  const drain = async () => { for (let i = 0; i < 20 && (await stateOf(store)).tasks.some(task => task.status === 'queued'); i++) await engine.processNext() }
   return { root, store, engine, api, fake, runs, configure, drain, get cleared() { return cleared } }
 }
-const tasks = async f => (await f.store.read()).tasks
+const tasks = async f => (await stateOf(f.store)).tasks
 
 test('policy helpers: lists, segment timing and verdicts', () => {
   assert.equal(chatAllowed(settings(), 'wxid_li'), true)
@@ -80,7 +81,7 @@ test('only allowed conversations are read; history outside the lists is refused'
   const f = await fixture(t)
   await f.configure({ wechat: settings() })
   await f.engine.pollWechat()
-  assert.deepEqual(Object.keys((await f.store.read()).wechat.watermarks), ['wxid_li'], 'baseline only for the allowed chat')
+  assert.deepEqual(Object.keys((await stateOf(f.store)).wechat.watermarks), ['wxid_li'], 'baseline only for the allowed chat')
   f.fake.say('wxid_mom', '记得穿外套'); f.fake.say('wxid_li', '报价单能今天发吗？')
   await f.engine.pollWechat()
   assert.ok(f.fake.polled.every(ids => ids.every(id => id === 'wxid_li')), 'blocked chats are never polled')
@@ -92,7 +93,7 @@ test('only allowed conversations are read; history outside the lists is refused'
   await f.configure({ wechat: settings({ people: { mode: 'block', list: ['wxid_mom'] } }) })
   f.engine.wechatChanged()
   await f.engine.pollWechat()
-  assert.deepEqual(Object.keys((await f.store.read()).wechat.watermarks).sort(), ['wxid_li'], 'groups stay on their own (empty) allow list')
+  assert.deepEqual(Object.keys((await stateOf(f.store)).wechat.watermarks).sort(), ['wxid_li'], 'groups stay on their own (empty) allow list')
   await assert.rejects(f.api.action({ action: 'wechatHistory', chat: 'wxid_mom' }), /不在允许读取/)
 })
 
@@ -125,11 +126,11 @@ test('a segment waits for the conversation to go quiet', async t => {
   await f.engine.pollWechat()
   f.fake.say('wxid_li', '在吗', { at: new Date().toISOString() })
   await f.engine.pollWechat()
-  let state = await f.store.read()
+  let state = await stateOf(f.store)
   assert.equal(state.tasks.length, 0); assert.equal(state.wechat.pending.wxid_li.messages.length, 1)
-  await f.store.mutate(doc => { doc.wechat.pending.wxid_li.lastAt = minutesAgo(4); doc.wechat.pending.wxid_li.firstAt = minutesAgo(4) })
+  await f.store.write(async tx => { const st = await tx.channelState('wechat'); st.entries.wxid_li.lastAt = minutesAgo(4); st.entries.wxid_li.firstAt = minutesAgo(4); await tx.setChannelState('wechat', st) })
   await f.engine.pollWechat()
-  state = await f.store.read()
+  state = await stateOf(f.store)
   assert.equal(state.tasks.length, 1); assert.deepEqual(state.wechat.pending, {})
   assert.equal(state.tasks[0].status, 'unmatched', 'no WeChat workflow yet')
 })
@@ -170,10 +171,10 @@ test('triage sees the chat as WeChat and never archives it; email-only actions a
   assert.equal(task.status, 'unmatched', 'not archived'); assert.ok(!task.triage.archived)
   // An email-only workflow does not receive WeChat segments.
   const emailRule = { ...wechatRule, name: '仅邮件', sources: undefined }
-  await f.api.action({ action: 'saveRule', revision: (await f.store.read()).configRevision, rule: emailRule })
+  await f.api.action({ action: 'saveRule', revision: (await stateOf(f.store)).configRevision, rule: emailRule })
   const trial = await f.api.action({ action: 'trialRule', rule: emailRule })
   assert.equal(trial.items[0].matched, false)
-  const saved = await f.api.action({ action: 'saveRule', revision: (await f.store.read()).configRevision, rule: wechatRule })
+  const saved = await f.api.action({ action: 'saveRule', revision: (await stateOf(f.store)).configRevision, rule: wechatRule })
   await f.api.action({ action: 'runRule', id: task.id, revision: task.revision, ruleId: saved.id })
   await f.drain()
   task = (await tasks(f))[0]
@@ -191,10 +192,10 @@ test('removing a chat from the list forgets its progress; adding it back starts 
   await f.engine.pollWechat()
   f.fake.say('wxid_li', '第一句', { at: new Date().toISOString() })
   await f.engine.pollWechat()
-  assert.ok((await f.store.read()).wechat.pending.wxid_li)
+  assert.ok((await stateOf(f.store)).wechat.pending.wxid_li)
   await f.configure({ wechat: settings({ people: { mode: 'allow', list: [] } }) })
   f.engine.wechatChanged(); await f.engine.pollWechat()
-  assert.deepEqual((await f.store.read()).wechat, { watermarks: {}, pending: {} })
+  assert.deepEqual((await stateOf(f.store)).wechat, { watermarks: {}, pending: {} })
   f.fake.say('wxid_li', '你不在时说的话')
   await f.configure({ wechat: settings() })
   f.engine.wechatChanged(); await f.engine.pollWechat(); await f.engine.pollWechat()
@@ -308,18 +309,18 @@ test('end to end through the real bridge process with a fixture database', { ski
   const polled = await bridge.poll({ '111@chatroom': 0 })
   assert.equal(polled['111@chatroom'][1].mentionsMe, true); assert.equal(polled['111@chatroom'][0].senderName, '钱多多')
   // Through the engine, with the connector starting the same bridge.
-  const store = new Store(join(root, 'data'))
+  const store = new WorkbenchRepository(join(root, 'data'))
   const connector = new WechatConnector(join(root, 'cache'), ['--fixture', fixtureFile])
   const engine = new Engine(store, () => undefined, { available: () => false }, undefined, undefined, undefined, { service: s => connector.service({ ...s, python }), clear: () => connector.clear() })
   await engine.start()
-  t.after(async () => { await engine.stop(); connector.close() })
-  await store.mutate(state => { state.settings.enabled = true; state.settings.wechat = { enabled: true, people: { mode: 'allow', list: ['wxid_liming'] }, groups: { mode: 'allow', list: [], scope: 'mention' } } })
+  t.after(async () => { await engine.stop(); await store.close(); connector.close() })
+  await setSettings(store, { enabled: true, wechat: { enabled: true, people: { mode: 'allow', list: ['wxid_liming'] }, groups: { mode: 'allow', list: [], scope: 'mention' } } })
   await engine.pollWechat()
-  assert.equal((await store.read()).wechat.watermarks.wxid_liming, 4000)
+  assert.equal((await stateOf(store)).wechat.watermarks.wxid_liming, 4000)
   const service = connector.service({ enabled: true, python, people: { mode: 'allow', list: [] }, groups: { mode: 'allow', list: [], scope: 'mention' } })
   await service.call('fixture_append', { chat: 'wxid_liming', row: { local_id: 9, sort_seq: 9000, type: '文本', sender_username: 'wxid_liming', create_time: Math.floor(Date.now() / 1000) - 600, content: '报价单今天能发吗？' } })
   await engine.pollWechat()
-  const [task] = (await store.read()).tasks
+  const [task] = (await stateOf(store)).tasks
   assert.equal(task.wechat.chatName, '李明 · 启明演示'); assert.match(task.body, /李明 · 启明演示：报价单今天能发吗？/)
   assert.equal(engine.health().wechat.ready, true)
 })

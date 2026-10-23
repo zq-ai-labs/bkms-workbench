@@ -7,7 +7,8 @@ import { createRequire } from 'node:module'
 import { createServer } from 'node:http'
 import { pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
-import { Store } from '../lib/store.js'
+import { WorkbenchRepository } from '../lib/storage/repository.js'
+import { stateOf, setSettings, editRules, editTask, editTasks, readFresh } from './helpers.mjs'
 import { Engine } from '../lib/engine.js'
 import { WorkbenchApi } from '../lib/api.js'
 import { validateRule, matches, chooseRule } from '../lib/rules.js'
@@ -15,7 +16,7 @@ import { validateRule, matches, chooseRule } from '../lib/rules.js'
 const ruleInput = { name: '客户需求回复', enabled: true, priority: 100, account: '', folder: 'INBOX', match: { from: '', subject: '询价', hasAttachments: false, mode: 'all' }, instructions: '整理需求生成回复，不编造价格。', tools: [], output: 'reply', maxRetries: 1 }
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'bkms-workbench-'))
-  const store = new Store(root), drafts = new Map()
+  const store = new WorkbenchRepository(root), drafts = new Map()
   let newMail = [], sends = 0, runs = 0, output = { summary: '已整理客户需求。', subject: 'Re: 产品询价', text: '您好，已收到您的产品需求。' }
   const email = {
     version: 1, accounts: () => [{ id: 'sales', address: 'sales@example.test', inboxFolder: 'INBOX' }],
@@ -32,28 +33,25 @@ async function fixture(t) {
   const agent = { available: () => true, async run(task, rule, signal) { signal.throwIfAborted(); runs++; return { output, sessionId: 'session-fixture' } } }
   const engine = new Engine(store, () => email, agent), api = new WorkbenchApi(engine)
   await engine.start()
-  t.after(async () => { await engine.stop(); await rm(root, { recursive: true, force: true }) })
+  t.after(async () => { await engine.stop(); await store.close(); await rm(root, { recursive: true, force: true }) })
   return { root, store, email, engine, api, drafts, get sends() { return sends }, get runs() { return runs }, mail: value => { newMail = value }, output: value => { output = value } }
 }
 const mail = (uid = 11) => ({ uid, date: new Date().toISOString(), from: [{ address: 'buyer@example.test' }], subject: '产品询价', seen: true, hasAttachments: false })
-test('preferences migrate old data, persist independently and do not invoke email or pause processing', async t => {
+test('preferences have defaults, persist independently and do not invoke email or pause processing', async t => {
   const f = await fixture(t)
-  const legacy = await f.store.read()
-  delete legacy.settings.showWorkbench; delete legacy.settings.notifyNewTodo
-  await writeFile(f.store.file, JSON.stringify(legacy))
-  const migrated = await f.store.read()
-  assert.equal(migrated.settings.showWorkbench, true)
-  assert.equal(migrated.settings.notifyNewTodo, false)
-  await f.api.action({ action: 'saveSettings', revision: migrated.configRevision, settings: { enabled: true, pollSeconds: 90 } })
-  const enabled = await f.store.read()
+  const initial = await stateOf(f.store)
+  assert.equal(initial.settings.showWorkbench, true)
+  assert.equal(initial.settings.notifyNewTodo, false)
+  await f.api.action({ action: 'saveSettings', revision: initial.configRevision, settings: { enabled: true, pollSeconds: 90 } })
+  const enabled = await stateOf(f.store)
   await f.api.action({ action: 'saveSettings', revision: enabled.configRevision, settings: { showWorkbench: false, notifyNewTodo: true } })
-  const reloaded = await new Store(f.root).read()
+  const reloaded = await readFresh(f.root)
   assert.deepEqual(reloaded.settings, { enabled: true, pollSeconds: 90, showWorkbench: false, notifyNewTodo: true })
   await assert.rejects(f.api.action({ action: 'saveSettings', revision: enabled.configRevision, settings: { showWorkbench: true } }), error => error.code === 'conflict')
   for (const settings of [{ showWorkbench: 'false' }, { notifyNewTodo: 1 }, { pollSeconds: 29 }, { pollSeconds: 3601 }, { unexpected: true }, []]) {
     await assert.rejects(f.api.action({ action: 'saveSettings', revision: reloaded.configRevision, settings }))
   }
-  assert.deepEqual((await f.store.read()).settings, reloaded.settings)
+  assert.deepEqual((await stateOf(f.store)).settings, reloaded.settings)
   f.email.accounts = () => { throw new Error('preferences must not access mail') }
   const lightweight = await f.api.action({ action: 'preferences' })
   assert.equal(lightweight.settings.showWorkbench, false)
@@ -104,19 +102,19 @@ test('mail folder picker validates accounts and lists real paths or common paths
 })
 
 test('AI candidate generation does not save or enable processing; normal reviewed save is still required', async t => {
-  const f = await fixture(t), before = await f.store.read(), received = []
+  const f = await fixture(t), before = await stateOf(f.store), received = []
   const api = new WorkbenchApi(f.engine, async (input, signal) => { signal.throwIfAborted(); received.push(input); return { rule: validateRule({ ...ruleInput, account: input.account, folder: input.folder }), warnings: [] } })
   const candidate = await api.action({ action: 'generateRule', description: ' 回复询价邮件 ', account: 'sales', folder: 'INBOX' })
   assert.deepEqual(received, [{ description: '回复询价邮件', account: 'sales', folder: 'INBOX' }])
-  assert.deepEqual(await f.store.read(), before); assert.equal(f.runs, 0); assert.equal(f.sends, 0)
+  assert.deepEqual(await stateOf(f.store), before); assert.equal(f.runs, 0); assert.equal(f.sends, 0)
   for (const values of [{ description: '' }, { description: 'x'.repeat(8001) }, { account: 'missing' }, { folder: '' }]) await assert.rejects(api.action({ action: 'generateRule', description: '回复询价', account: 'sales', folder: 'INBOX', ...values }))
   assert.equal(received.length, 1)
   await api.action({ action: 'generateRule', description: '仍然生成中文回复', account: 'sales', folder: 'INBOX', uiLanguage: 'en' })
   assert.deepEqual(received[1], { description: '仍然生成中文回复', account: 'sales', folder: 'INBOX', uiLanguage: 'en' })
-  assert.deepEqual(await f.store.read(), before)
+  assert.deepEqual(await stateOf(f.store), before)
   await api.action({ action: 'saveRule', rule: candidate.rule, revision: before.configRevision })
-  assert.equal((await f.store.read()).rules.length, 1)
-  assert.equal((await f.store.read()).settings.enabled, false)
+  assert.equal((await stateOf(f.store)).rules.length, 1)
+  assert.equal((await stateOf(f.store)).settings.enabled, false)
 })
 
 test('AI generation is bounded to one request and plugin shutdown cancels it before draining', async t => {
@@ -129,18 +127,18 @@ test('AI generation is bounded to one request and plugin shutdown cancels it bef
   const failed = assert.rejects(running, /生成已取消/)
   await api.close(); await failed
   await assert.rejects(api.action(body), error => error.code === 'stopping')
-  assert.equal((await f.store.read()).rules.length, 0)
+  assert.equal((await stateOf(f.store)).rules.length, 0)
 })
 
 test('AI instruction refinement works without mail, returns a candidate only and recovers after failure', async t => {
-  const f = await fixture(t), before = await f.store.read(), received = []
+  const f = await fixture(t), before = await stateOf(f.store), received = []
   f.email.accounts = () => { throw new Error('must not read mail') }
   let fail = false, result = { instructions: '  整理客户需求，生成中文回复草稿。  ' }
   const api = new WorkbenchApi(f.engine, undefined, async (input, signal) => { signal.throwIfAborted(); received.push(input); if (fail) throw new Error('mock model failure'); return result })
   const body = { action: 'optimizeInstructions', instructions: '  帮我整理客户需求，生成中文回复。  ' }
   assert.deepEqual(await api.action(body), { instructions: '整理客户需求，生成中文回复草稿。' })
   assert.deepEqual(received, [{ instructions: body.instructions.trim() }])
-  assert.deepEqual(await f.store.read(), before); assert.equal(f.runs, 0); assert.equal(f.sends, 0)
+  assert.deepEqual(await stateOf(f.store), before); assert.equal(f.runs, 0); assert.equal(f.sends, 0)
   for (const instructions of ['', '1234', 'x'.repeat(16001), '12345\0', null]) await assert.rejects(api.action({ ...body, instructions }), /5–16000/)
   assert.equal(received.length, 1)
   await assert.rejects(f.api.action(body), error => error.code === 'assistant_unavailable')
@@ -149,7 +147,7 @@ test('AI instruction refinement works without mail, returns a candidate only and
   for (const invalid of [{ instructions: '短' }, { instructions: '有效的处理要求', tools: ['email_send'] }, { instructions: '12345\0' }]) {
     result = invalid; await assert.rejects(api.action(body), /格式无效/)
   }
-  assert.deepEqual(await f.store.read(), before)
+  assert.deepEqual(await stateOf(f.store), before)
 })
 
 test('AI instruction refinement shares generation lock and is canceled and drained on shutdown', async t => {
@@ -165,26 +163,33 @@ test('AI instruction refinement shares generation lock and is canceled and drain
   const failed = assert.rejects(running, /已取消/)
   await api.close(); await failed
   await assert.rejects(api.action(body), error => error.code === 'stopping')
-  assert.equal((await f.store.read()).rules.length, 0)
+  assert.equal((await stateOf(f.store)).rules.length, 0)
 })
 
-test('store: concurrent writers retain changes, stale revision blocked and corruption preserved', async t => {
+test('store: concurrent writers retain changes, stale revision blocked and one worker per folder', async t => {
   const f = await fixture(t)
-  await Promise.all(Array.from({ length: 8 }, (_, i) => f.store.mutate(state => { state.logs.push({ id: String(i), at: '', level: 'info', message: String(i) }) })))
-  assert.equal((await f.store.read()).logs.length, 9)
+  await Promise.all(Array.from({ length: 8 }, (_, i) => f.store.write(tx => tx.log(String(i)))))
+  assert.equal((await stateOf(f.store)).logs.length, 9)
   await f.api.action({ action: 'saveRule', rule: ruleInput, revision: 1 })
   await assert.rejects(f.api.action({ action: 'saveRule', rule: ruleInput, revision: 1 }), /配置已更新/)
-  const second = new Store(f.root)
+  const second = new WorkbenchRepository(f.root)
   await assert.rejects(second.ownWorker(), /已有工作台/)
-  await writeFile(f.store.file, '{broken')
-  await assert.rejects(f.store.read(), /原文件已保留/)
-  assert.equal(await readFile(f.store.file, 'utf8'), '{broken')
+})
+
+test('store: a corrupt database file is reported and preserved, never replaced', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'bkms-corrupt-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await writeFile(join(root, 'workbench.sqlite'), '{broken')
+  const repo = new WorkbenchRepository(root)
+  await assert.rejects(repo.config(), error => error.code === 'storage' && /无法打开/.test(error.message))
+  await repo.close()
+  assert.equal(await readFile(join(root, 'workbench.sqlite'), 'utf8'), '{broken')
 })
 
 test('end-to-end: baseline, already-read mail, dedup, draft edit, explicit send and no repeated send', async t => {
   const f = await fixture(t), task = await prepare(f)
   assert.equal(task.status, 'review'); assert.equal(task.draft.to, 'reply@example.test'); assert.equal(f.runs, 1)
-  await f.engine.poll(); await f.engine.processNext(); assert.equal((await f.store.read()).tasks.length, 1); assert.equal(f.runs, 1)
+  await f.engine.poll(); await f.engine.processNext(); assert.equal((await stateOf(f.store)).tasks.length, 1); assert.equal(f.runs, 1)
   await f.api.action({ action: 'saveDraft', id: task.id, revision: task.revision, draftRevision: task.draft.revision, draft: { to: task.draft.to, cc: '', subject: '人工审核主题', text: '人工审核正文' } })
   const edited = (await f.api.snapshot()).tasks[0]
   const preview = await f.api.action({ action: 'previewSend', id: task.id, revision: edited.revision, draftRevision: edited.draft.revision })
@@ -239,10 +244,10 @@ test('latest workflow reprocessing is explicit, revision checked, and preserves 
   assert.equal(snapshot.tasks[0].ruleUpdated, true)
   assert.equal(snapshot.tasks[0].outputKind, 'reply')
   await assert.rejects(f.api.action({ action: 'runRule', id: current.id, revision: current.revision, ruleId: saved.id, ruleRevision: snapshot.revision - 1 }), /配置已更新/)
-  const unchanged = await f.store.read()
+  const unchanged = await stateOf(f.store)
   assert.deepEqual(unchanged.tasks[0].rule.tools, [])
   await f.api.action({ action: 'runRule', id: current.id, revision: current.revision, ruleId: saved.id, ruleRevision: snapshot.revision, text: '第二份补充资料' })
-  let queued = (await f.store.read()).tasks[0]
+  let queued = (await stateOf(f.store)).tasks[0]
   assert.deepEqual(queued.rule.tools, ['read_document'])
   assert.equal(queued.supplement, '第一份补充资料\n\n第二份补充资料')
   assert(queued.history.some(event => event.message.includes('原分析结果')))
@@ -253,7 +258,7 @@ test('latest workflow reprocessing is explicit, revision checked, and preserves 
   assert.equal(current.ruleUpdated, false)
   assert.equal(current.outputKind, 'report')
   await assert.rejects(f.api.action({ action: 'supplement', id: current.id, revision: current.revision, text: 'x'.repeat(16000) }), /累计补充信息/)
-  assert.equal((await f.store.read()).tasks[0].supplement, queued.supplement)
+  assert.equal((await stateOf(f.store)).tasks[0].supplement, queued.supplement)
   assert.equal(f.sends, 0)
 })
 
@@ -296,7 +301,7 @@ test('uncertain sends require explicit verification and exact revisions; recover
     assert.equal(result.draft.receipt, undefined); assert(result.history.some(h => h.message.includes('用户核对邮箱')))
     await assert.rejects(f.api.action(body)); assert.equal(resolutions, 1); assert.equal(f.sends, 0)
     // If the email backend committed but the task write was interrupted, the next snapshot recovers it.
-    await f.store.mutate(state => { state.tasks[0].status = 'uncertain' })
+    await editTask(f.store, 0, task => { task.status = 'uncertain' })
     assert.equal((await f.api.snapshot()).tasks[0].status, result.status)
   }
 })
@@ -307,15 +312,15 @@ test('a definite pre-connect failure returns to review without repeated SMTP sub
   await f.api.action({ action: 'send', id: task.id, revision: task.revision, draftRevision: task.draft.revision, planId: 'plan', confirmed: true })
   const result = (await f.api.snapshot()).tasks[0]
   assert.equal(result.status, 'review'); assert.equal(result.draftId, task.draftId); assert.match(result.error, /connection refused/)
-  await f.store.mutate(state => { state.tasks[0].status = 'uncertain' })
+  await editTask(f.store, 0, task => { task.status = 'uncertain' })
   assert.equal((await f.api.snapshot()).tasks[0].status, 'review'); assert.equal(f.sends, 0)
 })
 
 test('mailbox generation mismatch preserves cursor and records actionable failure', async t => {
-  const f = await fixture(t); await f.engine.poll(); const before = (await f.store.read()).cursors
+  const f = await fixture(t); await f.engine.poll(); const before = (await stateOf(f.store)).cursors
   f.email.scan = async () => { throw new Error('邮箱 UIDVALIDITY 已改变，请确认后重建基线。') }
   await f.engine.poll()
-  assert.deepEqual((await f.store.read()).cursors, before)
+  assert.deepEqual((await stateOf(f.store)).cursors, before)
   assert.match(f.engine.health().error, /UIDVALIDITY/)
 })
 
@@ -344,31 +349,36 @@ test('snapshot reads provider drafts once and reports a draft storage failure wi
   assert.match(failed.health.error, /draft storage unavailable/)
 })
 
-test('malformed persisted cursors and task paths are preserved and never admitted to a worker', async t => {
-  const f = await fixture(t), valid = await f.store.read()
-  const broken = { ...valid, cursors: { mailbox: { uidValidity: 1, lastUid: -1 } } }
-  await writeFile(f.store.file, JSON.stringify(broken))
-  await assert.rejects(f.store.read(), /原文件已保留/)
-  assert.equal(JSON.parse(await readFile(f.store.file, 'utf8')).cursors.mailbox.lastUid, -1)
-  await writeFile(f.store.file, JSON.stringify(valid))
-  const task = await prepare(f), unsafe = await f.store.read()
-  unsafe.tasks[0].id = '../../outside'
-  await writeFile(f.store.file, JSON.stringify(unsafe))
-  await assert.rejects(f.store.read(), /原文件已保留/)
-  assert.equal(JSON.parse(await readFile(f.store.file, 'utf8')).tasks[0].id, '../../outside')
+test('a database written by a newer workbench is refused, left as it was and never given a worker', async t => {
+  const f = await fixture(t)
+  await prepare(f)
+  await f.engine.stop()
+  // A newer build ran a migration this build does not know.
+  const { DatabaseSync } = await import('node:sqlite')
+  const raw = new DatabaseSync(join(f.root, 'workbench.sqlite'))
+  raw.prepare("insert into zq_migrations (name, timestamp) values ('9999-future', ?)").run(new Date().toISOString())
+  const before = raw.prepare('select count(*) as n from tasks').get().n
+  raw.close()
+  const engine = new Engine(new WorkbenchRepository(f.root), () => undefined, { available: () => false })
+  await assert.rejects(engine.start(), error => error.code === 'storage-newer')
+  assert.equal(engine.health().running, false)
+  const release = await new WorkbenchRepository(f.root).ownWorker(); await release()
+  const check = new DatabaseSync(join(f.root, 'workbench.sqlite'))
+  assert.equal(check.prepare('select count(*) as n from tasks').get().n, before)
+  check.close()
 })
 
 test('failed worker startup releases ownership while preserving the invalid data file', async t => {
   const root = await mkdtemp(join(tmpdir(), 'bkms-start-failure-'))
   t.after(() => rm(root, { recursive: true, force: true }))
-  const store = new Store(root)
-  await writeFile(store.file, '{broken')
+  const store = new WorkbenchRepository(root)
+  await writeFile(join(root, 'workbench.sqlite'), '{broken')
   const engine = new Engine(store, () => undefined, { available: () => false })
-  await assert.rejects(engine.start(), /原文件已保留/)
+  await assert.rejects(engine.start(), /无法打开/)
   assert.equal(engine.health().running, false)
-  const release = await new Store(root).ownWorker()
+  const release = await new WorkbenchRepository(root).ownWorker()
   await release()
-  assert.equal(await readFile(store.file, 'utf8'), '{broken')
+  assert.equal(await readFile(join(root, 'workbench.sqlite'), 'utf8'), '{broken')
 })
 
 test('worker stop retains ownership until an in-flight preparation actually settles', async t => {
@@ -382,11 +392,11 @@ test('worker stop retains ownership until an in-flight preparation actually sett
   const execution = f.engine.processNext()
   await ready
   const stopped = f.engine.stop()
-  await assert.rejects(new Store(f.root).ownWorker(), /已有工作台/)
+  await assert.rejects(new WorkbenchRepository(f.root).ownWorker(), /已有工作台/)
   unblock(); await execution; await stopped
-  const release = await new Store(f.root).ownWorker(); await release()
+  const release = await new WorkbenchRepository(f.root).ownWorker(); await release()
   assert.equal(f.drafts.size, 0)
-  assert.equal((await f.store.read()).tasks[0].status, 'failed')
+  assert.equal((await stateOf(f.store)).tasks[0].status, 'failed')
 })
 
 test('an explicit baseline reset wins against an older in-flight poll without importing skipped mail', async t => {
@@ -408,7 +418,7 @@ test('an explicit baseline reset wins against an older in-flight poll without im
   assert.equal(mailSettings.accounts[0].id, 'sales')
   await f.api.action({ action: 'resetBaseline', account: 'sales', folder: 'INBOX', confirmed: true, revision: mailSettings.revision })
   unblock(); await polling
-  const state = await f.store.read()
+  const state = await stateOf(f.store)
   assert.equal(state.cursors[JSON.stringify(['sales', 'INBOX'])].lastUid, 99)
   assert.equal(state.tasks.length, 0)
   f.email.scan = initial
@@ -425,21 +435,22 @@ test('a draft created before task persistence is recovered with the same prepara
     const found = [...f.drafts.values()].find(draft => draft.sourceKey === input.sourceKey)
     return found ? structuredClone(found) : create(input)
   }
-  const mutate = f.store.mutate.bind(f.store)
+  // The first save that would make the task reviewable fails, as if the process died right after the draft was created.
+  const updateTask = f.store.updateTask.bind(f.store)
   let failedOnce = false
-  f.store.mutate = fn => mutate(state => {
-    const result = fn(state)
-    if (!failedOnce && state.tasks[0]?.status === 'review') { failedOnce = true; throw Error('synthetic crash after provider draft creation') }
+  f.store.updateTask = (id, revision, change) => updateTask(id, revision, async (task, tx) => {
+    const result = await change(task, tx)
+    if (!failedOnce && task.status === 'review') { failedOnce = true; throw Error('synthetic crash after provider draft creation') }
     return result
   })
   await f.engine.processNext()
-  const failed = (await f.store.read()).tasks[0]
+  const failed = (await stateOf(f.store)).tasks[0]
   assert.equal(f.drafts.size, 1); assert.equal(failed.status, 'queued')
   // Force the configured retry due without changing the durable execution key.
-  await f.store.mutate(state => { delete state.tasks[0].nextAttemptAt })
+  await editTask(f.store, 0, task => { delete task.nextAttemptAt })
   await f.engine.processNext()
   assert.equal(f.drafts.size, 1); assert.equal(keys[0], keys[1])
-  assert.equal((await f.store.read()).tasks[0].status, 'review')
+  assert.equal((await stateOf(f.store)).tasks[0].status, 'review')
 })
 
 test('retries preserve state and rule snapshot, respect due time, and stop at the configured limit', async t => {
@@ -449,12 +460,12 @@ test('retries preserve state and rule snapshot, respect due time, and stop at th
   let attempts = 0
   f.engine.agent.run = async () => { attempts++; throw Error('synthetic tool failure') }
   await f.engine.processNext()
-  const pending = (await f.store.read()).tasks[0]
+  const pending = (await stateOf(f.store)).tasks[0]
   assert.equal(pending.status, 'queued'); assert.equal(pending.attempts, 1); assert.ok(pending.nextAttemptAt)
   await f.engine.processNext(); assert.equal(attempts, 1)
-  await f.store.mutate(state => { state.rules[0].instructions = 'Changed live rule'; delete state.tasks[0].nextAttemptAt })
+  await editRules(f.store, rules => { rules[0].instructions = 'Changed live rule' }); await editTask(f.store, 0, task => { delete task.nextAttemptAt })
   await f.engine.processNext()
-  const failed = (await f.store.read()).tasks[0]
+  const failed = (await stateOf(f.store)).tasks[0]
   assert.equal(failed.status, 'failed'); assert.equal(failed.attempts, 2)
   assert.equal(failed.rule.instructions, ruleInput.instructions)
   await f.engine.processNext(); assert.equal(attempts, 2)
@@ -474,13 +485,13 @@ test('API shutdown rejects new admission and drains an accepted send across prov
   const rejected = await f.api.fetch(new Request('http://127.0.0.1/api/bkms-workbench', { method: 'POST', headers: { 'content-type': 'application/json', 'x-bkms-workbench': '1' }, body: '{"action":"snapshot"}' }))
   assert.equal(rejected.status, 503); assert.equal(drained, false)
   unblock(); await sending; await closing
-  assert.equal(drained, true); assert.equal((await f.store.read()).tasks[0].status, 'sent')
+  assert.equal(drained, true); assert.equal((await stateOf(f.store)).tasks[0].status, 'sent')
 })
 
 test('an unmatched mail can be loaded for manual review without running a rule or creating a draft', async t => {
   const f = await fixture(t)
   await f.engine.poll(); f.mail([mail()]); await f.engine.poll()
-  const task = (await f.store.read()).tasks[0]
+  const task = (await stateOf(f.store)).tasks[0]
   assert.equal(task.status, 'unmatched'); assert.equal(task.body, '')
   const original = f.email.read
   f.email.read = async (...args) => ({ ...(await original(...args)), uidValidity: 123, attachments: [{ filename: '需求.pdf', size: 5, contentType: 'application/pdf', part: '2' }] })
@@ -505,24 +516,24 @@ test('original-mail metadata persists on manual and automated reads without repl
   f.email.read = original
   const plain = await f.api.action({ action: 'loadMail', id: loaded.id, revision: loaded.revision })
   assert.equal(plain.bodyHtml, undefined); assert.equal(plain.to, '')
-  const stored = await new Store(f.root).read()
+  const stored = await readFresh(f.root)
   assert.equal(stored.tasks[0].bodyHtml, undefined); assert.equal(f.runs, 1); assert.equal(f.sends, 0)
 })
 
 test('manual original-mail loading rejects reassigned UIDs without overwriting the task', async t => {
   const f = await fixture(t)
   await f.engine.poll(); f.mail([mail()]); await f.engine.poll()
-  const task = (await f.store.read()).tasks[0], original = f.email.read
+  const task = (await stateOf(f.store)).tasks[0], original = f.email.read
   f.email.read = async (...args) => ({ ...(await original(...args)), uidValidity: 456, text: 'Different message after UID reset' })
   await assert.rejects(f.api.action({ action: 'loadMail', id: task.id, revision: task.revision }), error => error.code === 'email-cursor-reset' && error.status === 409)
-  const retained = (await f.store.read()).tasks[0]
+  const retained = (await stateOf(f.store)).tasks[0]
   assert.equal(retained.body, ''); assert.equal(retained.mailLoaded, undefined); assert.equal(retained.revision, task.revision)
 })
 
 test('source attachment downloads copy exact bytes into the task and use safe binary response headers', async t => {
   const f = await fixture(t)
   await f.engine.poll(); f.mail([mail()]); await f.engine.poll()
-  const task = (await f.store.read()).tasks[0], original = f.email.read
+  const task = (await stateOf(f.store)).tasks[0], original = f.email.read
   const bytes = Buffer.from([0, 255, 4, 13, 10, 42]), filename = '订单 "附件"\r\n.pdf'
   const source = join(f.root, 'shared-download.bin')
   await writeFile(source, bytes)
@@ -606,7 +617,7 @@ test('real DSH lifecycle: authenticated carrier, provider leases and route/worke
   assert.equal((await (await request(cookie)).json()).value.health.email, false)
   providerFiber = ctx.plugin(scope => scope.provide('emailWorkbench', email)); await providerFiber.await()
   assert.equal(leases, 1)
-  const store = new Store(join(home, 'data', 'bkms-workbench'))
+  const store = new WorkbenchRepository(join(home, 'data', 'bkms-workbench'))
   const taskId = randomUUID(), timestamp = new Date().toISOString()
   const draft = { id: 'synthetic-draft', revision: 1, account: 'sales', to: 'synthetic@example.test', cc: '', subject: 'Synthetic lifecycle', text: 'No real SMTP', attachments: [], state: 'draft' }
   let enteredSend
@@ -615,7 +626,7 @@ test('real DSH lifecycle: authenticated carrier, provider leases and route/worke
     async get() { return structuredClone(draft) }, async list() { return [structuredClone(draft)] },
     async send() { enteredSend(); await sendHeld; draft.state = 'sent'; return { draft: structuredClone(draft) } },
   }
-  await store.mutate(state => { state.tasks.push({ id: taskId, revision: 1, title: 'Synthetic lifecycle', subject: 'Synthetic lifecycle', account: 'sales', from: 'buyer@example.test', body: 'Test only', status: 'review', receivedAt: timestamp, updatedAt: timestamp, source: { account: 'sales', folder: 'INBOX', uid: 11, uidValidity: 123 }, attachments: [], history: [], attempts: 1, draftId: draft.id }) })
+  await store.write(tx => tx.insertTask({ id: taskId, revision: 1, title: 'Synthetic lifecycle', subject: 'Synthetic lifecycle', account: 'sales', from: 'buyer@example.test', body: 'Test only', status: 'review', receivedAt: timestamp, updatedAt: timestamp, source: { account: 'sales', folder: 'INBOX', uid: 11, uidValidity: 123 }, attachments: [], history: [], attempts: 1, draftId: draft.id }))
   const sending = request(cookie, { origin: base, 'sec-fetch-site': 'same-origin' }, { action: 'send', id: taskId, revision: 1, draftRevision: 1, planId: 'synthetic-preview', confirmed: true })
   await sendEntered
   let disposed = false
@@ -627,7 +638,7 @@ test('real DSH lifecycle: authenticated carrier, provider leases and route/worke
   await disposal; workbenchFiber = undefined
   assert.equal(leases, 0)
   assert.equal((await request(cookie)).status, 404)
-  assert.equal((await store.read()).tasks[0].status, 'sent')
+  assert.equal((await stateOf(store)).tasks[0].status, 'sent')
   let release
   for (let i = 0; i < 40 && !release; i++) {
     try { release = await store.ownWorker() } catch { await new Promise(resolve => setTimeout(resolve, 25)) }

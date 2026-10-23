@@ -74,7 +74,7 @@ export function categoryCounts(tasks: Task[]): { categories: { name: string; cou
   return { categories: [...counts].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count), unclassified: tasks.filter(task => task.classification?.state === 'pending').length }
 }
 const countLine = (data: ReturnType<typeof categoryCounts>, en: boolean) => data.categories.map(item => en ? `${item.name} ${item.count}` : `${item.name} ${item.count}`).join(en ? ', ' : '、') + (data.unclassified ? (en ? `; ${data.unclassified} waiting for a category` : `；待人工分类 ${data.unclassified}`) : '')
-export function briefData(state: State, at = new Date()) {
+export function briefData(state: Pick<State, 'tasks' | 'activity'>, at = new Date()) {
   const since = new Date(at.getTime() - 24 * 3600e3).toISOString()
   const decisions = state.tasks.filter(needsAttention).sort((a, b) => urgencyRank(a) - urgencyRank(b) || b.receivedAt.localeCompare(a.receivedAt))
   const activity = (state.activity || []).filter(item => item.at >= since && !item.undoneAt)
@@ -107,7 +107,7 @@ export function briefTemplate(data: ReturnType<typeof briefData>, en: boolean): 
   ].join('')
 }
 
-export function weeklyData(state: State, start: Date, end: Date) {
+export function weeklyData(state: Pick<State, 'tasks' | 'activity'>, start: Date, end: Date) {
   const from = start.toISOString(), to = end.toISOString()
   const inRange = (value: string) => value >= from && value < to
   const tasks = state.tasks.filter(task => inRange(task.receivedAt) || inRange(task.updatedAt))
@@ -130,7 +130,7 @@ export function weeklyTemplate(data: ReturnType<typeof weeklyData>, en: boolean)
   return { title: `周报 ${data.periodStart} 至 ${data.periodEnd}`, text: `## 本周完成（${data.doneCount}）\n${lines(data.done) || '- 无'}\n\n## 仍在处理（${data.openCount}）\n${lines(data.open) || '- 无'}\n\n## 工作量\n- 收到 ${data.received} 条信息，AI 代办 ${data.automated} 件。${data.business.categories.length || data.business.unclassified ? `\n- 按业务分类：${countLine(data.business, false)}` : ''}\n\n## 下周计划\n- [请补充]` }
 }
 
-export function topicData(state: State, topic: Topic) {
+export function topicData(state: Pick<State, 'tasks'>, topic: Topic) {
   const tasks = state.tasks.filter(task => topicMatches(topic, task)).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
   return { topic: { name: topic.name, kind: topic.kind }, items: tasks.slice(0, 40).map(brief), count: tasks.length, open: tasks.filter(needsAttention).length }
 }
@@ -145,7 +145,7 @@ export function topicTemplate(data: ReturnType<typeof topicData>, en: boolean): 
 }
 
 /** Trial-run input. `mails` replaces received items, e.g. history read straight from the mailbox for a chosen time range. */
-export function trialData(state: State, rule: { id?: string; name: string; semantic?: string; instructions: string; exclude?: string[] }, taskIds?: string[], mails?: { id: string; from: string; subject: string; excerpt: string }[]) {
+export function trialData(state: Pick<State, 'tasks' | 'ruleExamples'>, rule: { id?: string; name: string; semantic?: string; instructions: string; exclude?: string[] }, taskIds?: string[], mails?: { id: string; from: string; subject: string; excerpt: string }[]) {
   const pool = state.tasks.slice().sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)).filter(task => !taskIds || taskIds.includes(task.id)).slice(0, 30)
   const examples = (rule.id ? state.ruleExamples?.[rule.id] ?? [] : []).slice(-8).map(({ match, text }) => ({ match, text }))
   return { rule: { name: rule.name, semantic: rule.semantic || '', hint: rule.instructions.slice(0, 600), exclude: rule.exclude, examples }, mails: mails ? mails.slice(0, 30) : pool.map(task => ({ id: task.id, from: task.from, subject: task.subject, category: task.triage?.category, excerpt: (task.summary || splitQuoted(task.body || '').latest).slice(0, 300) })) }

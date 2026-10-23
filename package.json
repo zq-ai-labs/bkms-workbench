@@ -55,7 +55,8 @@
     "mailparser": "3.9.33",
     "nodemailer": "10.0.13",
     "proper-lockfile": "4.1.2",
-    "yaml": "2.9.0"
+    "yaml": "2.9.0",
+    "zq-sqlite": "github:zq-ai-labs/zq-sqlite#v0.1.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

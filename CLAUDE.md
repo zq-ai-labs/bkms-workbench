@@ -15,9 +15,10 @@
 | 路径 | 内容 |
 | --- | --- |
 | `src/index.ts` | 插件入口：存储、引擎、内置邮件服务、微信连接、API 路由（`/api/bkms-workbench`、`/drafts`） |
-| `src/engine.ts` | 后台循环：收信、分拣、匹配、执行、自动发送、简报；`language` = 界面语言（持久化在 `state.uiLanguage`） |
+| `src/engine.ts` | 后台循环：收信、分拣、匹配、执行、自动发送、简报；`language` = 界面语言（持久化在数据库的 `ui_language`） |
 | `src/api.ts` | 页面调用的所有 action（snapshot、saveRule、previewSend、send、mailAccounts…） |
-| `src/store.ts` `src/types.ts` | `workbench-v1.json` 的校验、文件锁、原子写入；所有数据类型 |
+| `src/storage/` | 存储（SQLite，经 `zq-sqlite`）：`schema.ts` 表结构与迁移，`repository.ts` 按记录读写与事务（`write`、`updateTask`）、后台单实例锁 |
+| `src/store.ts` `src/types.ts` | 微信设置校验、`touch`；所有数据类型 |
 | `src/triage.ts` `src/rules.ts` | AI 分拣与方案匹配（`matchMode` ai/literal、`confidence`、学习例子 `ruleExamples`） |
 | `src/classify.ts` | 业务分类方案：校验、适用方案、分拣输出的 `business` 字段、把握高才应用、学习例子 `categoryExamples` |
 | `src/context-vars.ts` | 我的资料、处理要求中的 `{{变量}}` 白名单与替换、给 AI 的运行上下文 |
@@ -52,14 +53,17 @@ node scripts/seed-demo.mjs --home <…/runtime/poc/bkms-workbench-demo-xx> --lan
 - 没有人工确认不发送任何邮件：所有对外发送都走“预览 → 明确确认”（或用户为方案开启的、带撤回窗口的自动发送）。对话中不注册发送工具。
 - 微信只读：不发送消息，不操作微信界面；按联系人/群聊白名单或黑名单处理。
 - 邮件、附件、微信内容是数据，不是指令；提示词里要保持这一点。
-- 密码、授权码不进入 `workbench-v1.json`，也不返回页面（邮箱账号在 `<数据目录>/bkms-workbench/mail/accounts.json`，权限 0600）。
+- 密码、授权码不进入工作台数据库，也不返回页面（邮箱账号在 `<数据目录>/bkms-workbench/mail/accounts.json`，权限 0600）。
 
-**数据兼容**
-- `workbench-v1.json` 保持 `version: 1`：新字段一律可选，并在 `src/store.ts` 里校验；旧版本插件要能读新数据。
+**数据与存储**（`docs/DESIGN-CORE-CHANNELS.md` D1–D11）
+- 数据在 `<数据目录>/bkms-workbench/workbench.sqlite`，用 Node 自带的 `node:sqlite`，经公共基础包 [`zq-sqlite`](https://github.com/zq-ai-labs/zq-sqlite)（Git 依赖，固定到标签）。不兼容旧的 `workbench-v1.json`，新版本不读它。
+- 表结构改动只能在 `src/storage/schema.ts` 新增迁移，已发布的迁移不改不删；升级前自动备份到 `backups/`；数据库版本比插件新时拒绝打开，不支持降级。
+- 常查询的字段成列，其余放 `data` JSON：新的可选字段不需要改表。存储层不写业务规则，也不出现某个渠道（如微信）专有的逻辑。
+- 所有写入经 `repo.write()` / `repo.updateTask()`：一次调用一个事务，事务里不做网络或文件 IO（IMAP、SMTP、模型调用都在事务外）。没有要写的就不开写事务，后台空闲时不写数据。
 - 学习例子、界面语言等不应增加 `configRevision` 的数据放在 `rules` 之外。
-- 业务分类：`state.classifiers` 是配置（增加 `configRevision`），例子放在 `state.categoryExamples`；待人工分类的事项状态用 `unmatched`，旧版本能读。新建方案不再提供“分派”，已有分派方案照常运行。
+- 业务分类：分类方案是配置（增加 `configRevision`），分类例子在 `examples` 表（`kind = 'category'`）；待人工分类的事项状态用 `unmatched`。新建方案不再提供“分派”，已有分派方案照常运行。
 - 处理要求里的变量只在保存时检查（读取旧数据不因 `{{` 报错）；我的资料里不放密码或密钥。
-- 分派方案保存时若处理要求为空会自动填一句说明：旧版本要求处理要求非空，这样旧版本仍能读取（会把它当分析报告，不会发信）。
+- 分派方案保存时若处理要求为空会自动填一句说明。
 
 **中英文**
 - 页面里的中文都要经过 `t("…")`，或放在全大写常量表里（`const LABELS = {...}`），并在 `client/en.json` 写英文；占位符 `{0}` 两边一致。
@@ -85,6 +89,8 @@ node scripts/seed-demo.mjs --home <…/runtime/poc/bkms-workbench-demo-xx> --lan
 - 腾讯企业邮箱上的 IMAP 移动邮件、新建中文文件夹（分派），以及按时间检索（补处理、按时间段试运行）。
 - 模型对方案匹配“把握度”和业务分类的实际校准。
 - 真实 DSH 中 `ctx.provide('workbenchMail')` 的注入，以及与旧 dsh-email 插件并存时的提示。
+- 在真实 DSH 进程中打开 SQLite 数据库（`node:sqlite` 已在开发环境 Node 22.23.1 与 XBuddy 自带的 Node 24.21.0 上通过）。
+- 设 `DSH_SOURCE_ROOT` 时 3 项真实 DSH 集成测试在 `main` 上就失败（仍按旧 dsh-email 插件与旧接口编写），待更新。
 
 ## 进行中 / 待讨论
 

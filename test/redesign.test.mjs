@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Store } from '../lib/store.js'
+import { WorkbenchRepository } from '../lib/storage/repository.js'
+import { stateOf, setSettings, editRules, editTask, editTasks, readFresh } from './helpers.mjs'
 import { Engine, autoSendDecision, cleanChecks } from '../lib/engine.js'
 import { WorkbenchApi } from '../lib/api.js'
 import { validateRule, decideAfterTriage } from '../lib/rules.js'
@@ -15,7 +16,7 @@ const quoteRule = { name: '业务来信报价处理', enabled: true, priority: 1
 
 async function fixture(t, { triage, writer, agentOutput } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'bkms-redesign-'))
-  const store = new Store(root), drafts = new Map()
+  const store = new WorkbenchRepository(root), drafts = new Map()
   let inbox = [], sends = 0, runs = 0, previewBlocked = false, previewFails = false
   let output = agentOutput ?? { summary: '已整理客户需求。', subject: 'Re: 报价咨询', text: '您好，报价如下。' }
   const mails = new Map()
@@ -35,14 +36,14 @@ async function fixture(t, { triage, writer, agentOutput } = {}) {
   const agent = { available: () => true, async run(task, rule, signal) { signal.throwIfAborted(); runs++; return { output: structuredClone(output), sessionId: 's' } } }
   const engine = new Engine(store, () => email, agent, undefined, triage, writer), api = new WorkbenchApi(engine)
   await engine.start()
-  t.after(async () => { await engine.stop(); await rm(root, { recursive: true, force: true }) })
+  t.after(async () => { await engine.stop(); await store.close(); await rm(root, { recursive: true, force: true }) })
   let uid = 10
   const deliver = async (subject, address, text, extra = {}) => { uid++; mails.set(uid, { name: extra.name || '', address, text, ...extra }); inbox = [...inbox, { uid, date: new Date(Date.now() - (100 - uid) * 1000).toISOString(), from: [{ name: extra.name || '', address }], subject, hasAttachments: false }]; await engine.poll(); return uid }
-  const drain = async () => { for (let i = 0; i < 20 && (await store.read()).tasks.some(t => t.status === 'queued'); i++) await engine.processNext() }
+  const drain = async () => { for (let i = 0; i < 20 && (await stateOf(store)).tasks.some(t => t.status === 'queued'); i++) await engine.processNext() }
   await engine.poll()
   return { root, store, engine, api, email, drafts, deliver, drain, get sends() { return sends }, get runs() { return runs }, output: value => { output = value }, block: value => { previewBlocked = value }, failPreview: value => { previewFails = value } }
 }
-const taskBySubject = async (f, subject) => (await f.store.read()).tasks.find(task => task.subject === subject)
+const taskBySubject = async (f, subject) => (await stateOf(f.store)).tasks.find(task => task.subject === subject)
 
 test('AI triage archives notifications even when a broad workflow matches literally, and routes real requests', async t => {
   const seen = []
@@ -98,13 +99,13 @@ test('without a model, heuristic triage still separates notices but never guesse
   assert.equal(guessed.triage.by, 'heuristic'); assert.equal(guessed.ruleId, undefined); assert.match(guessed.history.at(-1).message, /需要 AI 判断/)
   assert.equal(guessed.attention, undefined); assert.equal((await f.api.snapshot()).tasks.find(task => task.id === guessed.id).attention, true, 'a request waits for you')
   // A workflow explicitly set to literal matching keeps working without a model.
-  const literalRule = await f.api.action({ action: 'saveRule', revision: (await f.store.read()).configRevision, rule: { ...quoteRule, name: '简历归档', matchMode: 'literal', match: { ...quoteRule.match, subject: '简历' } } })
+  const literalRule = await f.api.action({ action: 'saveRule', revision: (await stateOf(f.store)).configRevision, rule: { ...quoteRule, name: '简历归档', matchMode: 'literal', match: { ...quoteRule.match, subject: '简历' } } })
   assert.equal(literalRule.matchMode, 'literal')
   await f.deliver('前端简历 · 张三', 'cv@example.test', '请查收简历。')
   await f.drain()
   const resume = await taskBySubject(f, '前端简历 · 张三')
   assert.equal(resume.ruleName, '简历归档'); assert.equal(resume.match.by, 'literal'); assert.equal(resume.status, 'review')
-  const state = await f.store.read()
+  const state = await stateOf(f.store)
   await f.api.action({ action: 'saveSettings', revision: state.configRevision, settings: { triage: false } })
   await f.deliver('系统通知 · 维护窗口', 'noreply@example.test', '今晚维护。')
   const literal = await taskBySubject(f, '系统通知 · 维护窗口')
@@ -155,7 +156,7 @@ test('low-risk automatic replies wait for the withdrawal window, then send once 
   assert.equal(task.status, 'review'); assert.ok(task.autoSend); assert.equal(task.autoSend.autonomy, 'low_risk')
   assert.ok(Date.parse(task.autoSend.at) - Date.now() > 29 * 60000, 'default 30 minute window')
   await f.engine.sendDue(); assert.equal(f.sends, 0, 'nothing is sent inside the window')
-  await f.store.mutate(state => { state.tasks.find(item => item.id === task.id).autoSend.at = new Date(Date.now() - 1000).toISOString() })
+  await f.store.updateTask(task.id, undefined, item => { item.autoSend.at = new Date(Date.now() - 1000).toISOString() })
   await f.engine.sendDue(); await f.engine.sendDue()
   task = await taskBySubject(f, '资料已发')
   assert.equal(task.status, 'sent'); assert.equal(f.sends, 1)
@@ -174,7 +175,7 @@ test('withdrawing an automatic reply keeps future replies to that contact manual
   await f.api.action({ action: 'undoActivity', activityId: entry.id })
   task = await taskBySubject(f, '第一封')
   assert.ok(task.autoSend.canceledAt); assert.equal(task.status, 'review')
-  await f.store.mutate(state => { state.tasks.find(item => item.id === task.id).autoSend.at = new Date(0).toISOString() })
+  await f.store.updateTask(task.id, undefined, item => { item.autoSend.at = new Date(0).toISOString() })
   await f.engine.sendDue(); assert.equal(f.sends, 0)
   await f.deliver('第二封', 'a@example.test', '再确认一下。')
   await f.drain()
@@ -193,7 +194,7 @@ test('withdrawing an automatic reply keeps future replies to that contact manual
   await f.drain()
   const fourth = await taskBySubject(f, '第四封')
   f.block(true)
-  await f.store.mutate(state => { state.tasks.find(item => item.id === fourth.id).autoSend.at = new Date(Date.now() - 1000).toISOString() })
+  await f.store.updateTask(fourth.id, undefined, item => { item.autoSend.at = new Date(Date.now() - 1000).toISOString() })
   await f.engine.sendDue()
   assert.equal(f.sends, 0); assert.ok((await taskBySubject(f, '第四封')).autoSend.canceledAt)
   assert.ok((await f.api.snapshot()).activity.some(item => item.kind === 'auto_send_blocked'))
@@ -203,7 +204,7 @@ test('scheduled automatic sends re-check the workflow, go stale, and fall back t
   const triage = { available: () => true, async run(input) { return { category: 'reply_needed', urgency: 'normal', reason: '', nextStep: '', ruleId: input.rules[0]?.id ?? '', confidence: 'high' } } }
   const f = await fixture(t, { triage, agentOutput: { summary: '确认。', subject: 'Re', text: '收到，谢谢。', lowRisk: true } })
   await f.api.action({ action: 'saveRule', revision: 1, rule: { ...quoteRule, autonomy: 'auto' } })
-  const due = async subject => { const task = await taskBySubject(f, subject); await f.store.mutate(state => { state.tasks.find(item => item.id === task.id).autoSend.at = new Date(Date.now() - 1000).toISOString() }) }
+  const due = async subject => { const task = await taskBySubject(f, subject); await f.store.updateTask(task.id, undefined, item => { item.autoSend.at = new Date(Date.now() - 1000).toISOString() }) }
   // Lowering the workflow to draft-only stops a send that was already scheduled.
   await f.deliver('改为仅起草', 'a@example.test', '请确认。'); await f.drain()
   const config = await f.api.snapshot()
@@ -216,7 +217,7 @@ test('scheduled automatic sends re-check the workflow, go stale, and fall back t
   // A send far past its announced time is not delivered late.
   await f.deliver('很久以前', 'b@example.test', '请确认。'); await f.drain()
   task = await taskBySubject(f, '很久以前')
-  await f.store.mutate(state => { state.tasks.find(item => item.id === task.id).autoSend.at = new Date(Date.now() - 3 * 3600000).toISOString() })
+  await f.store.updateTask(task.id, undefined, item => { item.autoSend.at = new Date(Date.now() - 3 * 3600000).toISOString() })
   await f.engine.sendDue()
   assert.equal(f.sends, 0); assert.ok((await taskBySubject(f, '很久以前')).autoSend.canceledAt)
   // An error before submission hands the reply to a person rather than retrying forever.
@@ -312,18 +313,17 @@ test('thread relations rely on message references; same-subject mail is only a s
   assert.throws(() => parseWriter('topic', { text: 'x', level: 'panic', risks: [], todos: [] }))
 })
 
-test('settings accept new keys within bounds and legacy data files without new fields still load', async t => {
+test('settings accept new keys within bounds, and a workbench with nothing saved shows the defaults', async t => {
   const f = await fixture(t)
-  let state = await f.store.read()
+  let state = await stateOf(f.store)
   await f.api.action({ action: 'saveSettings', revision: state.configRevision, settings: { undoMinutes: 15, briefTime: '07:30', weeklyDay: 1, weeklyTime: '09:00', briefEnabled: false, triage: true } })
-  state = await f.store.read()
+  state = await stateOf(f.store)
   assert.equal(state.settings.undoMinutes, 15); assert.equal(state.settings.briefTime, '07:30')
   for (const settings of [{ undoMinutes: 0 }, { briefTime: '25:00' }, { weeklyDay: 7 }, { triage: 'yes' }, { meetingBriefMinutes: 1 }]) await assert.rejects(f.api.action({ action: 'saveSettings', revision: state.configRevision, settings }))
-  const legacy = { version: 1, revision: 3, configRevision: 2, settings: { enabled: false, pollSeconds: 60 }, rules: [validateRule({ ...quoteRule, id: 'old' })], tasks: [], cursors: {}, logs: [] }
-  await writeFile(f.store.file, JSON.stringify(legacy))
-  const loaded = await f.store.read()
-  assert.equal(loaded.activity, undefined); assert.equal(loaded.topics, undefined)
-  const snapshot = await f.api.snapshot()
+  const fresh = await fixture(t)
+  const loaded = await stateOf(fresh.store)
+  assert.deepEqual(loaded.activity, []); assert.deepEqual(loaded.topics, [])
+  const snapshot = await fresh.api.snapshot()
   assert.equal(snapshot.defaults.undoMinutes, 30); assert.equal(snapshot.defaults.triage, true); assert.deepEqual(snapshot.activity, [])
   assert.equal(snapshot.sources.find(source => source.kind === 'feishu').connected, false)
 })
@@ -334,7 +334,7 @@ test('a message whose triage failed can be retried and is triaged again', async 
   const f = await fixture(t, { triage })
   f.email.read = async () => { if (fail) throw new Error('IMAP timeout'); return { text: '请回复', from: [{ address: 'x@example.test' }], replyTo: [], attachments: [], messageId: 'm@x', references: '' } }
   await f.deliver('询问', 'x@example.test', '请回复')
-  for (let i = 0; i < 4; i++) { await f.store.mutate(state => { for (const task of state.tasks) delete task.nextAttemptAt }); await f.engine.processNext() }
+  for (let i = 0; i < 4; i++) { await editTasks(f.store, task => { delete task.nextAttemptAt }); await f.engine.processNext() }
   let task = await taskBySubject(f, '询问')
   assert.equal(task.status, 'failed'); assert.equal(task.triage.state, 'pending'); assert.equal(task.attempts, 3)
   fail = false

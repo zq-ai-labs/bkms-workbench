@@ -14,7 +14,8 @@
 | 文件 | 职责 |
 | --- | --- |
 | src/index.ts | Cordis 服务生命周期、依赖注入、鉴权 Connection 路由 |
-| src/store.ts | 格式校验、文件锁、原子存储、worker 所有权 |
+| src/storage/ | SQLite 存储（经 `zq-sqlite`）：表结构与迁移、按记录读写与事务、worker 所有权 |
+| src/store.ts | 微信设置校验、任务历史 `touch` |
 | src/mail/service.ts | 内置邮件服务：连接池生命周期、引擎使用的 `EmailService`、连接测试、对其他插件的只读接口 |
 | src/mail/accounts.ts | 邮箱账号存储与校验、服务商预设、收件人规则 |
 | src/mail/drafts.ts、draft-store.ts | 草稿保存、预览、发送锁与回执（移植） |
@@ -51,7 +52,7 @@
 
 ## 数据和状态
 
-数据版本为 `1`；全局写版本与配置版本分开，后台任务更新不会让正在编辑的规则无故冲突。任务有独立 revision、规则快照、收件 UID/UIDVALIDITY、执行次数、来源键和历史。
+数据在 SQLite 库 `workbench.sqlite`，表结构见 `src/storage/schema.ts`，设计见 `docs/DESIGN-CORE-CHANNELS.md` §5。每次写入让变更序号加一，页面的定时刷新带上快照的 `version`，没有变化时只返回 `unchanged`；配置版本与之分开，后台任务更新不会让正在编辑的规则无故冲突。任务有独立 revision、规则快照、收件 UID/UIDVALIDITY、执行次数、来源键和历史。
 
 业务分类：`state.classifiers`（配置，保存会增加 `configRevision`）与 `state.categoryExamples`（学习例子，不增加配置版本）；事项上的 `classification` 记录分类及 `applied`/`pending` 状态。待人工分类的事项状态为 `unmatched`，旧版本按未匹配显示。归类在分拣的同一次模型调用中完成（`business` 字段）；动作为“移到文件夹”时由引擎 `moveMail()` 移动邮件并完成事项，与分派方案共用。我的资料存于 `settings.profile`。
 
