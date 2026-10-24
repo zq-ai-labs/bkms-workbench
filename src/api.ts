@@ -159,7 +159,7 @@ export class WorkbenchApi {
     if (ruleMode(rule) === 'ai' && this.engine.writer?.available() && judged.length) {
       try {
         const mails = list.filter(mail => judged.some(item => item.id === `m${mail.uid}`)).map(mail => ({ id: `m${mail.uid}`, from: mail.from, subject: mail.subject, excerpt: mail.excerpt }))
-        const result = await this.engine.writer.run('trial', { ...trialData({ tasks: [], ruleExamples: await this.engine.repo.examples('rule') }, rule, undefined, mails), uiLanguage: uiLanguage ?? this.engine.language }, AbortSignal.any([signal, this.controller.signal, AbortSignal.timeout(120000)])) as { matches: { id: string; matched: boolean; reason: string }[] }
+        const result = await this.engine.writer.run('trial', { ...trialData({ tasks: [], ruleExamples: await this.engine.repo.examples('rule') }, rule, undefined, mails), uiLanguage: uiLanguage ?? this.engine.language }, AbortSignal.any([signal, this.controller.signal])) as { matches: { id: string; matched: boolean; reason: string }[] }
         for (const verdict of result.matches) { const item = items.find(entry => entry.id === verdict.id && entry.matched); if (item) { item.matched = verdict.matched; item.reason = verdict.reason || item.reason } }
         by = 'ai'
       } catch (error) { if (signal.aborted) throw error }
@@ -188,7 +188,7 @@ export class WorkbenchApi {
         .map(task => ({ id: task.id, from: task.from, subject: task.subject, excerpt: (task.body || '').slice(0, 300), receivedAt: task.receivedAt }))
     }
     if (!mails.length) return { total: 0, items: [], note: '这段时间没有邮件。' }
-    const result = await this.engine.writer.run('classify', { classifier: triageClassifier(classifier, await this.engine.repo.examples('category')), mails: mails.map(({ id, from, subject, excerpt }) => ({ id, from, subject, excerpt })), uiLanguage: uiLanguage ?? this.engine.language }, AbortSignal.any([signal, this.controller.signal, AbortSignal.timeout(120000)])) as { results: { id: string; categoryId: string; confidence: 'high' | 'medium' | 'low'; reason: string }[] }
+    const result = await this.engine.writer.run('classify', { classifier: triageClassifier(classifier, await this.engine.repo.examples('category')), mails: mails.map(({ id, from, subject, excerpt }) => ({ id, from, subject, excerpt })), uiLanguage: uiLanguage ?? this.engine.language }, AbortSignal.any([signal, this.controller.signal])) as { results: { id: string; categoryId: string; confidence: 'high' | 'medium' | 'low'; reason: string }[] }
     const byId = new Map(result.results.map(item => [item.id, item]))
     const items = mails.map(mail => {
       const verdict = byId.get(mail.id), category = classifier.categories.find(item => item.id === verdict?.categoryId)
@@ -263,7 +263,7 @@ export class WorkbenchApi {
       if (this.generating) throw new WorkbenchError('AI 正在生成或优化，请稍后再试。', 'busy', 409)
       this.generating = true
       try {
-        const result = await this.instructionOptimizer({ instructions: body.instructions.trim() }, AbortSignal.any([signal, this.controller.signal, AbortSignal.timeout(120000)]))
+        const result = await this.instructionOptimizer({ instructions: body.instructions.trim() }, AbortSignal.any([signal, this.controller.signal]))
         if (!result || typeof result.instructions !== 'string' || result.instructions.trim().length < 5 || result.instructions.length > 16000 || result.instructions.includes('\0') || Object.keys(result).some(key => key !== 'instructions')) throw new WorkbenchError('模型返回的处理要求格式无效。')
         return { instructions: result.instructions.trim() }
       } finally { this.generating = false }
@@ -278,7 +278,7 @@ export class WorkbenchApi {
       if (!this.ruleAssistant) throw new WorkbenchError('当前服务未提供 AI 方案生成，请更新工作台插件。', 'assistant_unavailable', 503)
       if (this.generating) throw new WorkbenchError('AI 正在生成或优化，请稍后再试。', 'busy', 409)
       this.generating = true
-      try { return await this.ruleAssistant({ description: body.description.trim(), account, folder, ...(body.uiLanguage === 'en' || body.uiLanguage === 'zh' ? { uiLanguage: body.uiLanguage } : {}) }, AbortSignal.any([signal, this.controller.signal, AbortSignal.timeout(120000)])) }
+      try { return await this.ruleAssistant({ description: body.description.trim(), account, folder, ...(body.uiLanguage === 'en' || body.uiLanguage === 'zh' ? { uiLanguage: body.uiLanguage } : {}) }, AbortSignal.any([signal, this.controller.signal])) }
       finally { this.generating = false }
     }
     if (body.action === 'saveSettings') {
@@ -443,7 +443,7 @@ export class WorkbenchApi {
       // Literal-mode workflows take every literal match; only AI-mode workflows need the AI verdict.
       if (ruleMode(rule) === 'ai' && this.engine.writer?.available() && judged.length) {
         try {
-          const result = await this.engine.writer.run('trial', { ...trialData({ tasks, ruleExamples: await this.engine.repo.examples('rule') }, rule, judged.map(item => item.id)), uiLanguage: uiLanguage ?? this.engine.language }, AbortSignal.any([signal, this.controller.signal, AbortSignal.timeout(120000)])) as { matches: { id: string; matched: boolean; reason: string }[] }
+          const result = await this.engine.writer.run('trial', { ...trialData({ tasks, ruleExamples: await this.engine.repo.examples('rule') }, rule, judged.map(item => item.id)), uiLanguage: uiLanguage ?? this.engine.language }, AbortSignal.any([signal, this.controller.signal])) as { matches: { id: string; matched: boolean; reason: string }[] }
           for (const verdict of result.matches) { const item = items.find(entry => entry.id === verdict.id && entry.matched); if (item) { item.matched = verdict.matched; item.reason = verdict.reason || item.reason } }
           by = 'ai'
         } catch (error) { if (signal.aborted) throw error }

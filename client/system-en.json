@@ -431,5 +431,13 @@
   "方案文件里没有可导入的方案。": "The workflow file has nothing to import.",
   "方案文件里不应包含分派方案。": "A workflow file must not contain dispatch workflows.",
   "方案「{0}」的处理要求": "the instructions of workflow “{0}”",
-  "已导入 {0} 个处理方案、{1} 个分类方案（均为停用状态）。": "Imported {0} workflows and {1} category schemes (switched off)."
+  "已导入 {0} 个处理方案、{1} 个分类方案（均为停用状态）。": "Imported {0} workflows and {1} category schemes (switched off).",
+  "AI 处理超时，请稍后重试。": "The AI run timed out. Try again later.",
+  "AI 输出过长被截断，请精简要求后重试。": "The AI output was cut off for length. Shorten the request and retry.",
+  "模型服务拒绝了访问凭据，请在 DSH 中检查模型配置。": "The model service rejected the credentials. Check the model settings in DSH.",
+  "模型服务额度不足，请检查模型账号后重试。": "The model service quota is used up. Check the model account and retry.",
+  "模型服务繁忙，请稍后重试。": "The model service is busy. Try again later.",
+  "内容超出模型能处理的长度，请减少内容后重试。": "The content is longer than the model can handle. Reduce it and retry.",
+  "模型服务出错，请稍后重试。": "The model service returned an error. Try again later.",
+  "AI 运行未成功：{0}（{1}）": "AI run failed: {0} ({1})"
 }

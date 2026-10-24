@@ -351,8 +351,14 @@ export class Engine {
     if (this.triage?.available()) {
       const ruleExamples = await this.repo.examples('rule'), categoryExamples = classifier ? await this.repo.examples('category') : {}
       const channelHint = channel?.ai.triageHint?.(this.language)
-      try { result = await this.triage.run({ mail, ...(channelHint ? { channelHint } : {}), ...(thread ? { thread } : {}), ...(classifier ? { classifier: triageClassifier(classifier, categoryExamples) } : {}), context, rules: candidates.map(rule => ({ id: rule.id, name: rule.name, semantic: rule.semantic || '', output: rule.output, hint: rule.instructions.slice(0, 400), examples: (ruleExamples[rule.id] ?? []).slice(-EXAMPLES_IN_PROMPT).map(({ match, text }) => ({ match, text })) })), uiLanguage: this.language }, AbortSignal.any([signal, AbortSignal.timeout(90000)])); by = 'ai' }
-      catch (error) { if (signal.aborted) throw error; result = heuristicTriage(mail); await this.repo.write(tx => tx.log(`AI 分拣失败，已改用规则判断：${this.safe(error)}`, task.id, 'error')) }
+      try { result = await this.triage.run({ mail, ...(channelHint ? { channelHint } : {}), ...(thread ? { thread } : {}), ...(classifier ? { classifier: triageClassifier(classifier, categoryExamples) } : {}), context, rules: candidates.map(rule => ({ id: rule.id, name: rule.name, semantic: rule.semantic || '', output: rule.output, hint: rule.instructions.slice(0, 400), examples: (ruleExamples[rule.id] ?? []).slice(-EXAMPLES_IN_PROMPT).map(({ match, text }) => ({ match, text })) })), uiLanguage: this.language }, signal); by = 'ai' }
+      catch (error) {
+        if (signal.aborted) throw error
+        result = heuristicTriage(mail)
+        // The failed run's record stays with the item (shown with "Show AI runs"), as for preparation.
+        const trace = (error as { trace?: Task['trace'] } | null)?.trace
+        await this.repo.updateTask(task.id, undefined, async (item, tx) => { if (trace) item.trace = trace; await tx.log(`AI 分拣失败，已改用规则判断：${this.safe(error)}`, item.id, 'error') })
+      }
     } else result = heuristicTriage(mail)
     signal.throwIfAborted()
     const sender = senderKey(task), keep = (await this.repo.contact(sender))?.neverArchive === true
@@ -566,7 +572,7 @@ export class Engine {
   }
   private async write(kind: 'brief' | 'weekly' | 'topic', data: object, language: 'zh' | 'en', signal: AbortSignal): Promise<Record<string, unknown> | undefined> {
     if (!this.writer?.available()) return undefined
-    return this.writer.run(kind, { ...data, uiLanguage: language }, AbortSignal.any([signal, this.controller.signal, AbortSignal.timeout(120000)]))
+    return this.writer.run(kind, { ...data, uiLanguage: language }, AbortSignal.any([signal, this.controller.signal]))
   }
   async generateBrief(language = this.language, signal = new AbortController().signal, scheduled = false) {
     return this.writing(async () => {

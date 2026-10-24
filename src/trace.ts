@@ -46,3 +46,16 @@ export function traceOf(events: readonly unknown[], sessionId: string, startedAt
   }
   return { sessionId, startedAt: new Date(startedAt).toISOString(), durationMs: Math.max(0, finishedAt - startedAt), outcome, ...(input || output ? { tokens: { input, output } } : {}), steps, ...(truncated ? { truncated: true } : {}) }
 }
+
+/**
+ * One line on how a failed run ended, for the workbench log: duration, how the turn ended (its kind only, not the
+ * provider's message), rejected results with the last reason, tokens. The model's own text is left out.
+ */
+export function diagnosisOf(trace: AgentTrace): string {
+  const rejected = trace.steps.filter(step => step.kind === 'tool' && step.error), last = rejected.at(-1)?.error
+  return [
+    `${(trace.durationMs / 1000).toFixed(1)}s`, `end ${trace.outcome.split(':')[0]}`,
+    ...(rejected.length ? [`rejected ${rejected.length}${last ? `: ${last.slice(0, 200)}` : ''}`] : []),
+    ...(trace.tokens ? [`tokens ${trace.tokens.input}/${trace.tokens.output}`] : []),
+  ].join(' · ')
+}

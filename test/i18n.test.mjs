@@ -62,6 +62,9 @@ test('system messages change language without modifying dynamic user content', (
   assert.equal(i18n.systemMessage('命中规则「客户询价」，等待处理。'), 'Matched workflow “客户询价”. Waiting for processing.')
   assert.equal(i18n.systemMessage('sales / 客户/询价 检查失败：后台尚未就绪。'), 'Mailbox check failed for sales / 客户/询价: The background worker is not ready.')
   assert.equal(i18n.systemMessage('这是用户手工输入的中文邮件。'), '这是用户手工输入的中文邮件。')
+  // Why an AI run failed is itself a system message inside these.
+  assert.equal(i18n.systemMessage('AI 分拣失败，已改用规则判断：AI 处理超时，请稍后重试。'), 'AI triage failed; rules were used instead: The AI run timed out. Try again later.')
+  assert.equal(i18n.systemMessage('AI 运行未成功：模型服务繁忙，请稍后重试。（12.0s · end error · tokens 900/40）'), 'AI run failed: The model service is busy. Try again later. (12.0s · end error · tokens 900/40)')
   assert.equal(i18n.t('发件人包含 {0}', 'customer{0}'), 'Sender contains customer{0}')
   const notice = i18n.t('检测完成，新增 {0} 项任务', 3)
   active = 'zh'; revision++; listeners.forEach(fn => fn())

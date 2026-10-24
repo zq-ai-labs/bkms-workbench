@@ -27,7 +27,7 @@
 | src/context-vars.ts | 我的资料校验、处理要求中的 `{{变量}}`（白名单、按时区取值、替换）、给 AI 的运行上下文 |
 | src/engine.ts | 增量收件、去重、排队、重试、生成草稿 |
 | src/agent.ts | 隔离 DSH Agent、技能加载、精确工具授权、文件路径约束、结构化结果 |
-| src/rule-assistant.ts | 自然语言方案草稿生成、能力目录校验与受限生成 Agent |
+| src/rule-assistant.ts | 自然语言方案草稿生成与能力目录校验（经 `runStructured`） |
 | src/api.ts | 快照、配置、人工操作、草稿审核发送、冲突校验 |
 | client/index.tsx | 标准 main/sidebar/settings 插槽、交互界面 |
 | client/classifiers.tsx、classification.tsx | 分类方案编辑与试运行；事项上的待人工分类、改分类与批量归类 |
@@ -38,7 +38,8 @@
 | 文件 | 职责 |
 | --- | --- |
 | src/triage.ts | AI 分拣（类别、紧急度、下一步、选择方案）与无模型时的规则判断 |
-| src/structured.ts | 无工具、只提交一个结构化结果的隔离 Agent 运行 |
+| src/structured.ts | 无工具、只提交一个结构化结果的隔离 Agent 运行；分拣、写作、AI 生成方案、AI 优化的唯一入口。`logFailures` 把不属于事项的失败记入日志 |
+| src/run-failure.ts | AI 运行失败的分类（超时、输出截断、结果无效、模型服务的凭据/额度/限流/长度/其他错误）与连续无效结果的上限 |
 | src/writer.ts | 每日简报、周报草稿、主题概括和方案试运行的生成 |
 | src/digest.ts | 待办判定、会话关联、主题匹配，以及简报/周报/主题的输入数据与模板 |
 | src/sources.ts | 信息源连接状态（邮件内置，其余来自已安装渠道） |

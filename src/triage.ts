@@ -70,7 +70,7 @@ export function createTriageRunner(ctx: any): TriageRunner {
   return {
     available: () => { try { const agents = typeof ctx.get === 'function' ? ctx.get('agents') : ctx.agents; return typeof agents?.create === 'function' && selectedModel(ctx) !== undefined } catch { return false } },
     run: (input, signal) => runStructured(ctx, {
-      name: TRIAGE_TOOL, description: '提交这条信息的分拣结果。', schema: triageSchema(!!input.classifier), input, signal,
+      name: TRIAGE_TOOL, description: '提交这条信息的分拣结果。', schema: triageSchema(!!input.classifier), input, signal, timeoutMs: 90000,
       parse: args => parseTriage(args, new Set(input.rules.map(rule => rule.id)), input.classifier ? new Set(input.classifier.categories.map(category => category.id)) : undefined),
       system: `你是工作台的信息分拣助手。判断一条新信息是什么、是否需要收件人处理，以及应该交给哪个候选处理方案。
 只在候选方案中选择 ruleId。候选方案只是通过了发件人、主题、文件夹等字面条件，并不代表适用；你需要根据方案名称、适用说明(semantic)、处理要求摘要(hint)和例子(examples)判断这条信息是否真正属于该方案。examples 是用户确认过的历史判断：match=true 表示属于该方案，match=false 表示用户纠正过“不属于”，遇到相似信息时必须遵循。

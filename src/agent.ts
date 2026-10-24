@@ -5,6 +5,7 @@ import { historyForPrompt, splitQuoted } from './quoted.js'
 import { WorkbenchError, type AgentChannel, type AgentOutput, type AgentRunner, type Rule, type RuntimeContext, type Task } from './types.js'
 import { renderVariables } from './context-vars.js'
 import { traceOf } from './trace.js'
+import { MAX_REJECTED_RESULTS, runFailure, timedOut, timeoutError } from './run-failure.js'
 
 export const RESULT_TOOL = 'bkms_workbench_result'
 /** The new text of the mail plus its quoted history, so the model can tell what was asked this time. */
@@ -121,6 +122,7 @@ export function createAgentRunner(ctx: any, workspaceRoot: string): AgentRunner 
       try { return typeof service(ctx, 'agents')?.create === 'function' && selectedModel(ctx) !== undefined }
       catch { return false } // A partially mounted or invalid model selection must not claim readiness.
     },
+    // The caller's signal carries the time limit (the engine gives each item 5 minutes); a timeout is reported as such.
     async run(task: Task, rule: Rule, signal: AbortSignal, options?: { language?: 'zh' | 'en'; context?: RuntimeContext; channel?: AgentChannel }) {
       signal.throwIfAborted()
       const agents = service(ctx, 'agents')
@@ -168,7 +170,7 @@ export function createAgentRunner(ctx: any, workspaceRoot: string): AgentRunner 
       const attachmentNeedsInfo = requiresAttachments && missingAttachments.length > 0
         ? `有 ${missingAttachments.length} 个附件尚未下载或读取，无法完成规则要求的附件分析：${missingAttachments.map(file => file.filename).join('、')}。请补充这些资料或拆分邮件后重新处理。`
         : undefined
-      let output: AgentOutput | undefined
+      let output: AgentOutput | undefined, rejected = 0, stop = () => {}
       const staged = new WeakMap<object, AgentOutput>()
       const handle = await agents.create({
         // A background run, not a conversation: DSH keeps sessions with this origin out of its session list.
@@ -205,6 +207,7 @@ export function createAgentRunner(ctx: any, workspaceRoot: string): AgentRunner 
             const value = staged.get(exec)
             staged.delete(exec)
             if (exec.name === RESULT_TOOL && value !== undefined && !result.isError) output = value
+            else if (exec.name === RESULT_TOOL && result.isError && ++rejected >= MAX_REJECTED_RESULTS) stop()
           })
           agentCtx.systemPrompt.section({
             name: 'bkms-workbench:preparation', order: 0, complete: true, interpolate: false,
@@ -213,6 +216,8 @@ export function createAgentRunner(ctx: any, workspaceRoot: string): AgentRunner 
         },
       })
       const onAbort = () => handle.agent.cancel({ kind: 'hook', reason: 'bkms-workbench task canceled' })
+      // Out of the tool-result listener, so the loop is not canceled from inside its own step.
+      stop = () => queueMicrotask(() => handle.agent.cancel({ kind: 'hook', reason: 'bkms-workbench: too many invalid results' }))
       // What the run did, kept with the task for debugging (src/trace.ts); attached to a failure too.
       const trace = () => { try { return traceOf(handle.agent.session.snapshotEvents(), sessionId, startedAt) } catch { return undefined } }
       signal.addEventListener('abort', onAbort, { once: true })
@@ -221,17 +226,15 @@ export function createAgentRunner(ctx: any, workspaceRoot: string): AgentRunner 
         // External email text must never masquerade as a human $skill invocation gesture.
         handle.agent.followup({ id: randomUUID(), role: 'user', source: { kind: 'bkms-workbench-input' }, content: [{ type: 'text', text: JSON.stringify({ taskId: task.id, ...(options?.channel ? options.channel.input : { mail: mailInput(task) }), supplement: task.supplement ?? '', attachments, outputKind: rule.output }) }] })
         await handle.agent.whenIdle()
-        signal.throwIfAborted()
         const events = handle.agent.session.snapshotEvents()
         const ending = [...events].reverse().find((event: any) => event.type === 'turn/end')
-        if (ending?.data?.reason?.kind !== 'completed') {
-          throw new WorkbenchError(`DSH 处理未完成：${ending?.data?.reason?.error?.message ?? ending?.data?.reason?.kind ?? '未产生终止记录'}`, 'agent_failed', 503)
-        }
-        if (output === undefined) throw new WorkbenchError('DSH 未提交有效的结构化处理结果，请重试或调整规则。', 'invalid_output', 503)
+        // Why it failed, told by kind; the provider's own error text stays in the run record.
+        if (signal.aborted || ending?.data?.reason?.kind !== 'completed' || output === undefined) throw runFailure(events, signal, { message: 'DSH 未提交有效的结构化处理结果，请重试或调整规则。', code: 'invalid_output' })
         const sessions = service(ctx, 'sessions')
         if (typeof sessions?.flush === 'function') await sessions.flush(handle.agent.session)
         return { output, sessionId, trace: trace() }
-      } catch (error) {
+      } catch (caught) {
+        const error = timedOut(signal) ? timeoutError() : caught
         const recorded = trace()
         if (recorded && error && typeof error === 'object') Object.assign(error, { trace: recorded })
         throw error

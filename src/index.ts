@@ -8,6 +8,7 @@ import { createRuleAssistant } from './rule-assistant.js'
 import { createInstructionOptimizer } from './instruction-optimizer.js'
 import { createTriageRunner } from './triage.js'
 import { createWriter } from './writer.js'
+import { logFailures } from './structured.js'
 import { ChannelRegistry } from './channels/registry.js'
 import { CHANNEL_API_VERSION, type WorkbenchChannels } from './channels/types.js'
 import { MailService } from './mail/service.js'
@@ -32,8 +33,10 @@ export function apply(ctx: any): void {
   // Channels besides mail come from their own plugins (e.g. workbench-weixin), which register through this service.
   const channels = new ChannelRegistry()
   if (typeof ctx.provide === 'function') ctx.provide('workbenchChannels', { apiVersion: CHANNEL_API_VERSION, register: channel => channels.register(channel) } satisfies WorkbenchChannels)
-  const engine = new Engine(store, () => mail.configured() ? email : undefined, createAgentRunner(ctx, join(store.root, 'tasks')), () => getCapabilities(ctx), createTriageRunner(ctx), createWriter(ctx), channels)
-  const api = new WorkbenchApi(engine, createRuleAssistant(ctx), createInstructionOptimizer(ctx), mail)
+  // Runs that belong to no item note their failures in the log; preparation and triage keep theirs on the item.
+  const logRun = (message: string) => store.write(tx => tx.log(message, undefined, 'error')), writer = createWriter(ctx)
+  const engine = new Engine(store, () => mail.configured() ? email : undefined, createAgentRunner(ctx, join(store.root, 'tasks')), () => getCapabilities(ctx), createTriageRunner(ctx), { ...writer, run: logFailures(writer.run, logRun) }, channels)
+  const api = new WorkbenchApi(engine, logFailures(createRuleAssistant(ctx), logRun), logFailures(createInstructionOptimizer(ctx), logRun), mail)
   // Drafts written by the old dsh-email plugin are copied in once, so earlier tasks keep their draft.
   const legacyDrafts = mail.importLegacyDrafts(join(home, 'data', 'dsh-email', 'drafts-v1.json')).then(count => { if (count) ctx.logger?.info?.('bkms-workbench: imported %d drafts from dsh-email', count) }, () => {})
   const ready = legacyDrafts.then(() => mail.reload()).then(() => engine.start())

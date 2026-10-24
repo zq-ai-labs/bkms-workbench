@@ -74,6 +74,8 @@ export function addSystemEnglish(dictionaries: (Record<string, string> | undefin
   notify();
 }
 
+/** Messages whose {0} is itself a system message, such as why an AI run failed. */
+const NESTED = new Set(["DSH 处理未完成：{0}", "AI 分拣失败，已改用规则判断：{0}", "定时生成失败：{0}", "AI 运行未成功：{0}（{1}）"]);
 /** Translate only recognized system messages, never arbitrary mail or user-authored content. */
 export function systemMessage(message: string): string {
   if (Object.hasOwn(en, message)) return t(message);
@@ -84,7 +86,7 @@ export function systemMessage(message: string): string {
     pattern.indices.forEach((index, position) => { values[index] = match[position + 1]; });
     // Nested system errors are recognized separately; mailbox paths and workflow names stay verbatim.
     if (pattern.key === "{0} / {1} 检查失败：{2}") values[2] = systemMessage(values[2]);
-    if (pattern.key === "DSH 处理未完成：{0}") values[0] = systemMessage(values[0]);
+    if (NESTED.has(pattern.key)) values[0] = systemMessage(values[0]);
     return t(pattern.key, ...values);
   }
   return message;
