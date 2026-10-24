@@ -26,6 +26,8 @@
 | `src/context-vars.ts` | 我的资料、处理要求中的 `{{变量}}` 白名单与替换、给 AI 的运行上下文 |
 | 分派与补处理 | 方案 `output: 'dispatch'` + `dispatchFolder`：引擎 `dispatch()` 移动邮件（`src/mail/service.ts` 的 `moveMessage`），不跑 Agent；`state.backfills` 记录“从指定时间开始”的补处理，`task.backfill` 的邮件从不自动发送 |
 | `src/agent.ts` | 后台 Agent：提示词、结果工具 schema、工具白名单；审核类文字的语言由 `reviewLanguage()` 控制。会话以 `origin: 'subagent'` 创建，不进 DSH 会话列表 |
+| `src/structured.ts` | `runStructured`：所有不用工具的模型调用（分拣、写作、AI 生成方案、AI 优化）的唯一入口，同样以 `origin: 'subagent'` 创建会话。新增模型调用走它，不要直接调 `agents.create()`（`test/core-boundary.test.mjs` 会检查）。默认超时 2 分钟（分拣 90 秒） |
+| `src/run-failure.ts` | AI 运行失败按类别提示（超时、截断、结果无效、模型服务错误），不转述模型服务的原始错误文字（留在 `trace`）；连续 3 次结果无效即停止运行（DSH 不限步数） |
 | `src/trace.ts` | 从会话事件提炼“AI 处理过程”（模型输出、工具调用、用量、结束原因），存在事项的 `trace`；设置“显示 AI 处理过程”打开时才发给页面 |
 | `src/quoted.ts` | 把邮件拆成“本次新内容 + 历史引用” |
 | `src/mail/` | 内置邮件模块（移植自 dsh-email，见 `src/mail/NOTICE.md`）：`accounts.ts` 账号、`service.ts` 服务与连接池、`drafts.ts` 草稿 |

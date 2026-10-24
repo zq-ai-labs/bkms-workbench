@@ -9,6 +9,7 @@ import { WorkbenchApi } from '../lib/api.js'
 import { ChannelRegistry } from '../lib/channels/registry.js'
 import { CHANNEL_API_VERSION } from '../lib/channels/types.js'
 import { traceOf } from '../lib/trace.js'
+import { WorkbenchError } from '../lib/types.js'
 import { stateOf } from './helpers.mjs'
 
 /** The record of a background AI run: taken from the run's events, kept with the task, shown only when switched on. */
@@ -46,11 +47,11 @@ function chat() {
     ai: { agentInput: task => ({ conversation: task.body }), writingGuide: '简短。', exampleLabel: () => '演示' },
   }
 }
-async function fixture(t, agent) {
+async function fixture(t, agent, triage) {
   const root = await mkdtemp(join(tmpdir(), 'bkms-trace-'))
   const store = new WorkbenchRepository(root), channels = new ChannelRegistry(), channel = chat()
   channels.register(channel)
-  const engine = new Engine(store, () => undefined, agent, undefined, undefined, undefined, channels), api = new WorkbenchApi(engine)
+  const engine = new Engine(store, () => undefined, agent, undefined, triage, undefined, channels), api = new WorkbenchApi(engine)
   await engine.start()
   t.after(async () => { await engine.stop(); await store.close(); await rm(root, { recursive: true, force: true, maxRetries: 5 }) })
   const rule = { name: '答复', enabled: true, priority: 100, account: '', folder: 'INBOX', match: { from: '', subject: '', hasAttachments: false, mode: 'all' }, instructions: '答复。', tools: [], output: 'reply', maxRetries: 0, sources: ['demo'], matchMode: 'literal' }
@@ -77,4 +78,13 @@ test('a failed run keeps its record too', async t => {
   const f = await fixture(t, { available: () => true, async run() { throw Object.assign(new Error('DSH 处理未完成：超时'), { trace: { ...record, outcome: 'error: 超时' } }) } })
   const [task] = (await stateOf(f.store)).tasks
   assert.equal(task.status, 'failed'); assert.equal(task.trace.outcome, 'error: 超时')
+})
+
+test('a failed AI triage keeps its record on the item and falls back to the rules', async t => {
+  const triaged = { ...record, sessionId: 'bkms-workbench-bkms_workbench_triage-x', outcome: 'aborted', steps: [{ kind: 'tool', name: 'bkms_workbench_triage', input: '{}', error: '分拣结果无效。' }] }
+  const triage = { available: () => true, async run() { throw Object.assign(new WorkbenchError('AI 未返回有效结果，请稍后重试。', 'invalid_output', 503), { trace: triaged }) } }
+  const f = await fixture(t, { available: () => true, async run() { throw new Error('preparation failed without a record') } }, triage)
+  const [task] = (await stateOf(f.store)).tasks
+  assert.equal(task.trace.sessionId, triaged.sessionId)
+  assert.ok((await stateOf(f.store)).logs.some(log => log.message === 'AI 分拣失败，已改用规则判断：AI 未返回有效结果，请稍后重试。'))
 })

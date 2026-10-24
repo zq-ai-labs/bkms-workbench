@@ -37,3 +37,14 @@ test('the core gains no new WeChat references (ratchet towards the channel split
   for (const file of Object.keys(BASELINE)) if (!counts[file]) problems.push(`${file}: no WeChat lines left. Remove it from the baseline in test/core-boundary.test.mjs.`)
   assert.deepEqual(problems, [])
 })
+
+/**
+ * Background model calls create DSH sessions in two places only: the preparation agent (tools, task folder) and
+ * runStructured (every tool-less call). Both set the session's origin so it stays out of the DSH session list
+ * (test/background-runs.test.mjs); a new call site would have to remember that, so add new calls through these.
+ */
+test('DSH agent sessions are created only by the preparation agent and runStructured', () => {
+  const allowed = ['src/agent.ts', 'src/structured.ts']
+  const found = sources('src').filter(file => /agents\.create\(/.test(readFileSync(join(root, file), 'utf8')))
+  assert.deepEqual(found.sort(), allowed, 'Call runStructured (src/structured.ts) instead of agents.create().')
+})
